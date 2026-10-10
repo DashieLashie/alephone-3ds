@@ -47,12 +47,15 @@ StatsManager::StatsManager() : thread_(0), run_(true), busy_(false)
 {
 	entry_mutex_ = SDL_CreateMutex();
 
+#ifndef A1_NO_NETWORK
 	// do uploads in a separate thread
 	thread_ = SDL_CreateThread(Run, "StatsManager_uploadThread", this);
+#endif
 }
 
 void StatsManager::Process()
 {
+#ifndef A1_NO_NETWORK
 	Entry entry;
 	if (CollectLuaStats(entry.options, entry.parameters))
 	{
@@ -60,6 +63,7 @@ void StatsManager::Process()
 		busy_ = true;
 		entries_.push(entry);
 	}
+#endif
 }
 
 void StatsManager::CheckForDone(dialog* d)

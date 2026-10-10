@@ -110,6 +110,7 @@ stubs.
 | `Misc/preferences.cpp` | `StarGameProtocol.h` include; `<star_protocol>` is kept and written back unchanged instead of parsed; **INTERNET** button (metaserver account/stats dialog) hidden |
 | `shell.cpp` | `networking_available()` returns false (Gather/Join become non-selectable, non-clickable); `g`/`j` menu shortcuts removed |
 | `main.cpp` | "Built with network play enabled" banner |
+| `Misc/Statistics.cpp` | `StatsManager` upload thread creation and `Process()` body (stage 3 prerequisite, behaviour change 6) |
 
 Also added: `#include "Scenario.h"` in `shell.cpp` and `preferences.cpp`
 (they relied on it arriving through the network headers).
@@ -133,8 +134,13 @@ clicked, highlighted or pressed via shortcut.
 4. Theme `<metaserver><games>` settings are ignored.
 5. The `latency_tolerance` console command sets a value that has no effect
    and is not saved.
-6. `StatsManager` still starts its thread on the first `leaving_map()`
-   (unchanged); uploads always fail fast through the stub `HTTPClient`.
+6. `StatsManager` starts no upload thread and queues nothing
+   (`Misc/Statistics.cpp`, fenced in the constructor and `Process()`; added
+   with the stage 3 prerequisites, see `STAGE3-PREREQS.md` item 7). Before
+   that fence, the first `leaving_map()` started `StatsManager_uploadThread`,
+   which polled every 200 ms and could only fail through the stub
+   `HTTPClient`. Callers are unchanged: `Process()` is a no-op and `Finish()`
+   finds nothing pending, so the "Uploading stats" dialog never appears.
 
 ## 3. `AudioBackend`
 
