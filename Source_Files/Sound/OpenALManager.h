@@ -22,6 +22,7 @@
 #include "MusicPlayer.h"
 #include "SoundPlayer.h"
 #include "StreamPlayer.h"
+#include "AudioBackend.h"
 #include <queue>
 
 #if defined (_MSC_VER) && !defined (M_PI)
@@ -134,7 +135,8 @@ private:
 	bool LoadOptionalExtensions();
 
 	static void MixerCallback(void* usr, uint8* stream, int len);
-	SDL_AudioSpec sdl_audio_specs_obtained;
+	std::unique_ptr<AudioBackend> audio_backend = AudioBackend::CreateDefault(); // before UpdateParameters() locks it
+	AudioBackend::Spec audio_spec_obtained;
 	AudioParameters audio_parameters;
 	ALCint openal_rendering_format = 0;
 	ALuint low_pass_filter;

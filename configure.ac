@@ -25,6 +25,7 @@ AC_DEFUN([AX_ARG_WITH],
            AC_ARG_WITH([$1], AS_HELP_STRING([--without-$1], [do not use $2])) ])
 
 AX_ARG_ENABLE([opengl], [OpenGL rendering])
+AX_ARG_ENABLE([network], [network play, metaserver and HTTP support])
 
 AX_ARG_WITH([sdl_image], [SDL2_image support])
 AX_ARG_WITH([curl], [cURL for HTTP communication])
@@ -78,6 +79,14 @@ AC_ARG_ENABLE([standalone_hub],
 			                 [Build standalone hub instead of Aleph One]))
 
 AM_CONDITIONAL([STANDALONE_HUB], [test x"$enable_standalone_hub" = x"yes"])
+
+dnl Network option (--disable-network builds a single-player-only engine)
+AS_IF([test "x$enable_network" = "xno"],
+      [ AS_IF([test x"$enable_standalone_hub" = x"yes"],
+              [AC_MSG_ERROR([--enable-standalone-hub cannot be combined with --disable-network])])
+        AC_DEFINE([A1_NO_NETWORK], [1], [Build without network play]) ],
+      [ have_network=true ])
+AM_CONDITIONAL([MAKE_NETWORK], [test "x$have_network" = "xtrue"])
 AS_IF([test x"$enable_standalone_hub" = x"yes"],
       [ AC_DEFINE([A1_NETWORK_STANDALONE_HUB], [1], [Use the standalone hub])])
 
@@ -100,10 +109,16 @@ dnl Check for boost functions and libraries.
 AX_BOOST_BASE([1.69.0],
               ,
               [AC_MSG_ERROR([You need Boost 1.69.0 or higher to build Aleph One.])])
-AX_BOOST_FILESYSTEM
-AS_IF([ test "x$BOOST_FILESYSTEM_LIB" != "x" ],
-      [ LIBS="$BOOST_FILESYSTEM_LIB $LIBS" ],
-      [AC_MSG_ERROR([You need the Boost::Filesystem library to run Aleph One.])])
+dnl --enable-std-filesystem: use std::filesystem through a1_filesystem.h
+AC_ARG_ENABLE([std_filesystem],
+              AS_HELP_STRING([--enable-std-filesystem],
+                             [use std::filesystem instead of the Boost::Filesystem library]))
+AS_IF([test x"$enable_std_filesystem" = x"yes"],
+      [ AC_DEFINE([A1_FS_STD], [1], [Use std::filesystem instead of Boost::Filesystem]) ],
+      [ AX_BOOST_FILESYSTEM
+        AS_IF([ test "x$BOOST_FILESYSTEM_LIB" != "x" ],
+              [ LIBS="$BOOST_FILESYSTEM_LIB $LIBS" ],
+              [AC_MSG_ERROR([You need the Boost::Filesystem library to run Aleph One.])]) ])
       
 AC_DEFUN([AX_CHECK_BOOST_HEADER],
          [ AC_LANG_PUSH(C++)
@@ -133,9 +148,10 @@ AX_CHECK_BOOST_HEADER([boost/uuid/uuid.hpp])
 dnl AX_CHECK_BOOST_HEADER([boost/uuid/uuid_generators.hpp])
 dnl AX_CHECK_BOOST_HEADER([boost/uuid/uuid_io.hpp])
 
-AC_LANG_PUSH(C++)
-AC_CHECK_HEADER([asio.hpp], , [AC_MSG_ERROR([You need asio to build Aleph One.])])
-AC_LANG_POP(C++)
+AS_IF([test "x$have_network" = "xtrue"],
+      [ AC_LANG_PUSH(C++)
+        AC_CHECK_HEADER([asio.hpp], , [AC_MSG_ERROR([You need asio to build Aleph One.])])
+        AC_LANG_POP(C++) ])
 
 dnl Check for library functions.
 AC_CHECK_FUNCS([snprintf vsnprintf], , AC_MSG_ERROR([You need snprintf and vsnprintf to run Aleph One.]))     
@@ -275,7 +291,7 @@ if test -n "$have_matroska" && test -n "$have_ebml" && test -n "$have_vpx" && \
    AC_DEFINE([FILM_EXPORT], [1], [have all film export libraries])
 fi
 
-AS_IF([test "x{with_nfd}" != "xno"],
+AS_IF([test "x${with_nfd}" != "xno"],
     [AC_CHECK_HEADERS([nfd.h],
         [AC_CHECK_LIB([nfd], [NFD_Quit], , , [-ldbus-1])])
                AS_IF([test "x${ac_cv_lib_nfd_NFD_Quit}" = "xyes"],
@@ -348,6 +364,7 @@ AS_ECHO([""])
 AS_ECHO(["Summary of optional features:"])
 AS_ECHO([""])
 AX_PRINT_SUMMARY([opengl])
+AX_PRINT_SUMMARY([network])
 AX_PRINT_SUMMARY([sdl_image])
 AX_PRINT_SUMMARY([curl])
 AX_PRINT_SUMMARY([zzip])

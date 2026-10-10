@@ -41,7 +41,11 @@
 
 #include "cseries.h"
 #include "sdl_dialogs.h"
+#ifndef A1_NO_NETWORK
 #include "network_dialog_widgets_sdl.h"
+#else
+#include "preferences_widgets_sdl.h" // extern sFileChooserInvalidFileString
+#endif
 #include "sdl_fonts.h"
 #include "sdl_widgets.h"
 #include "resource_manager.h"
@@ -2475,6 +2479,7 @@ w_directory_chooser::update_directoryname()
 		set_selection(sFileChooserInvalidFileString);
 }
 
+#ifndef A1_NO_NETWORK
 const string w_items_in_room_get_name_of_item (GameListMessage::GameListEntry item)
 {
 	return item.name ();
@@ -2738,6 +2743,7 @@ void w_players_in_room::draw_item(const MetaserverPlayerInfo& item, SDL_Surface*
 
 	set_drawing_clip_rectangle(SHRT_MIN, SHRT_MIN, SHRT_MAX, SHRT_MAX);
 }
+#endif // A1_NO_NETWORK
 
 
 void w_colorful_chat::append_entry(const ColoredChatEntry& e)
@@ -2928,7 +2934,7 @@ void SDLWidgetWidget::activate ()
 	m_widget->set_enabled (!hidden);
 }
 
-
+#ifndef A1_NO_NETWORK
 PlayersInGameWidget::PlayersInGameWidget (w_players_in_game2* pig)
 	: SDLWidgetWidget (pig)
 	, m_pig (pig)
@@ -2940,6 +2946,7 @@ void PlayersInGameWidget::redraw ()
 	m_pig->update_display ();
 	m_pig->get_owning_dialog ()->draw_dirty_widgets ();
 }
+#endif // A1_NO_NETWORK
 
 
 

@@ -2,6 +2,7 @@
 
 noinst_LIBRARIES = libnetwork.a
 
+if MAKE_NETWORK
 SUBDIRS = Metaserver StandaloneHub
 
 libnetwork_a_SOURCES = NetworkInterface.h ConnectPool.h network.h network_capabilities.h \
@@ -18,6 +19,10 @@ libnetwork_a_SOURCES = NetworkInterface.h ConnectPool.h network.h network_capabi
   Update.cpp HTTP.cpp PortForward.cpp Pinger.cpp
 
 EXTRA_libnetwork_a_SOURCES = network_dummy.cpp
+else
+# --disable-network: game-type rules plus stubs for the network entry points
+libnetwork_a_SOURCES = network.h network_games.h network_games.cpp network_dummy.cpp
+endif
 
 AM_CPPFLAGS = -I$(top_srcdir)/Source_Files/CSeries -I$(top_srcdir)/Source_Files/Files \
   -I$(top_srcdir)/Source_Files/GameWorld -I$(top_srcdir)/Source_Files/Input \

@@ -74,7 +74,10 @@ May 22, 2003 (Woody Zenfell):
 #include "Plugins.h"
 
 #include "InfoTree.h"
+#include "Scenario.h"
+#ifndef A1_NO_NETWORK
 #include "StarGameProtocol.h"
+#endif
 
 #include "tags.h"
 #include "Logging.h"
@@ -132,8 +135,11 @@ static const size_t NUMBER_OF_NETWORK_GAME_PROTOCOL_NAMES = sizeof(sNetworkGameP
 // Have the prefs been inited?
 static bool PrefsInited = false;
 
-static std::vector<boost::filesystem::path> orphan_disabled_plugins;
-static std::vector<boost::filesystem::path> orphan_enabled_plugins;
+static std::vector<a1fs::path> orphan_disabled_plugins;
+static std::vector<a1fs::path> orphan_enabled_plugins;
+#ifdef A1_NO_NETWORK
+static InfoTree star_protocol_passthrough; // written back unchanged for network builds
+#endif
 
 // Global preferences data
 struct graphics_preferences_data *graphics_preferences = NULL;
@@ -233,8 +239,10 @@ void handle_preferences(void)
 	d.add(w_header);
 	w_button *w_player = new w_button("PLAYER", player_dialog, &d);
 	d.add(w_player);
+#ifndef A1_NO_NETWORK
 	w_button *w_online = new w_button("INTERNET", online_dialog, &d);
 	d.add(w_online);
+#endif
 	w_button *w_graphics = new w_button("GRAPHICS", graphics_dialog, &d);
 	d.add(w_graphics);
 	w_button *w_sound = new w_button("SOUND", sound_dialog, &d);
@@ -252,7 +260,9 @@ void handle_preferences(void)
 	placer->add(w_header);
 	placer->add(new w_spacer, true);
 	placer->add(w_player);
+#ifndef A1_NO_NETWORK
 	placer->add(w_online);
+#endif
 	placer->add(w_graphics);
 	placer->add(w_sound);
 	placer->add(w_controls);
@@ -4017,7 +4027,12 @@ InfoTree network_preferences_tree()
 	for (int i = 0; i < 2; i++)
 		root.add_color("color", network_preferences->metaserver_colors[i], i);
 
+#ifndef A1_NO_NETWORK
 	root.put_child("star_protocol", StarPreferencesTree());
+#else
+	if (!star_protocol_passthrough.empty())
+		root.put_child("star_protocol", star_protocol_passthrough);
+#endif
 	
 	return root;
 }
@@ -4179,7 +4194,7 @@ static void default_network_preferences(network_preferences_data *preferences)
 	obj_clear(preferences->join_address);
 	preferences->game_port= DEFAULT_GAME_PORT;
 	preferences->game_protocol= _network_game_protocol_default;
-#if !defined(DISABLE_NETWORKING)
+#if !defined(DISABLE_NETWORKING) && !defined(A1_NO_NETWORK)
 	DefaultStarPreferences();
 #endif // !defined(DISABLE_NETWORKING)
 	preferences->use_netscript = false;
@@ -5069,8 +5084,13 @@ void parse_network_preferences(InfoTree root, std::string version)
 			color.read_color(network_preferences->metaserver_colors[index]);
 	}
 	
+#ifndef A1_NO_NETWORK
 	for (const InfoTree &child : root.children_named("star_protocol"))
 		StarGameProtocol::ParsePreferencesTree(child, version);
+#else
+	for (const InfoTree &child : root.children_named("star_protocol"))
+		star_protocol_passthrough = child;
+#endif
 }
 
 void parse_environment_preferences(InfoTree root, std::string version)

@@ -39,10 +39,14 @@ Mar 1, 2002 (Woody Zenfell):
 
 #include    "player.h"  // for MAXIMUM_NUMBER_OF_PLAYERS
 #include    "network.h"
+#ifndef A1_NO_NETWORK
 #include    "network_private.h" // for JoinerSeekingGathererAnnouncer
+#endif
 #include    "FileHandler.h"
+#ifndef A1_NO_NETWORK
 #include    "network_metaserver.h"
 #include    "metaserver_dialogs.h"
+#endif
 
 #include    "shared_widgets.h"
 #include    "preferences_widgets_sdl.h"
@@ -234,6 +238,7 @@ typedef DialogPtr NetgameOutcomeData;
 extern struct net_rank rankings[MAXIMUM_NUMBER_OF_PLAYERS];
 
 
+#ifndef A1_NO_NETWORK
 //class MetaserverClient;
 //class GlobalMetaserverChatNotificationAdapter;
 class GatherDialog : public GatherCallbacks, public ChatCallbacks, public GlobalMetaserverChatNotificationAdapter
@@ -439,6 +444,7 @@ protected:
 	ToggleWidget*       m_useRemoteHub;
 	SelectorWidget*         m_latencyToleranceWidget;
 };
+#endif // A1_NO_NETWORK
 
 
 // (Postgame Carnage Report routines)

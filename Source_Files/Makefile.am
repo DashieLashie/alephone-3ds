@@ -1,7 +1,13 @@
 ## Process this file with automake to produce Makefile.in 
 
+if MAKE_NETWORK
+NETWORK_SUBDIRS = TCPMess
+METASERVER_LIB = Network/Metaserver/libmetaserver.a
+TCPMESS_LIB = TCPMess/libtcpmess.a
+endif
+
 SUBDIRS = CSeries Files Videos GameWorld Input Lua Misc	\
-   ModelView Network RenderMain RenderOther Sound TCPMess XML
+   ModelView Network RenderMain RenderOther Sound $(NETWORK_SUBDIRS) XML
 
 if STANDALONE_HUB
 bin_PROGRAMS = standalone_hub
@@ -23,15 +29,15 @@ alephone_SOURCES = shell.h \
 alephone_LDADD = \
   CSeries/libcseries.a Files/libfiles.a Videos/libvideos.a \
   GameWorld/libgameworld.a Input/libinput.a Lua/liba1lua.a Misc/libmisc.a \
-  ModelView/libmodelview.a Network/libnetwork.a Network/Metaserver/libmetaserver.a \
+  ModelView/libmodelview.a Network/libnetwork.a $(METASERVER_LIB) \
   RenderMain/librendermain.a RenderOther/librenderother.a Sound/libsound.a \
   XML/libxml.a \
   \
   CSeries/libcseries.a Files/libfiles.a Videos/libvideos.a \
   GameWorld/libgameworld.a Input/libinput.a Lua/liba1lua.a Misc/libmisc.a \
-  ModelView/libmodelview.a Network/libnetwork.a Network/Metaserver/libmetaserver.a \
+  ModelView/libmodelview.a Network/libnetwork.a $(METASERVER_LIB) \
   RenderMain/librendermain.a RenderOther/librenderother.a Sound/libsound.a \
-  TCPMess/libtcpmess.a XML/libxml.a
+  $(TCPMESS_LIB) XML/libxml.a
 
 standalone_hub_SOURCES = shell.h shell.cpp shell_misc.cpp shell_options.h shell_options.cpp Network/StandaloneHub/standalone_hub_main.cpp
 

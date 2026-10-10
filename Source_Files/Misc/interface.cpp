@@ -158,7 +158,9 @@ extern TP2PerfGlobals perf_globals;
 
 #include "sdl_dialogs.h"
 #include "sdl_widgets.h"
+#ifndef A1_NO_NETWORK
 #include "network_dialog_widgets_sdl.h"
+#endif
 
 /* Change this when marathon changes & replays are no longer valid */
 enum recording_version {
@@ -542,6 +544,94 @@ static void construct_single_player_start(player_start_data* outStartArray, shor
         strncpy(outStartArray[0].name, player_preferences->name, MAXIMUM_PLAYER_START_NAME_LENGTH+1);
 				
         set_player_start_doesnt_auto_switch_weapons_status(&outStartArray[0], dont_switch_to_new_weapon());
+}
+
+// This should be safe to use whether starting or resuming and whether single-player or multiplayer.
+void match_starts_with_existing_players(player_start_data* ioStartArray, short* ioStartCount)
+{
+	// This code could be smarter, but it doesn't run very often, doesn't get big data sets, etc.
+	// so I'm not going to worry about it.
+
+	bool startAssigned[MAXIMUM_NUMBER_OF_PLAYERS];
+	int8 startAssignedToPlayer[MAXIMUM_NUMBER_OF_PLAYERS];
+	for (int i = 0; i < MAXIMUM_NUMBER_OF_PLAYERS; i++)
+	{
+		startAssigned[i] = false;
+		startAssignedToPlayer[i] = NONE;
+	}
+
+	// First, match starts to players by name.
+	for (int s = 0; s < *ioStartCount; s++)
+	{
+		for (int p = 0; p < dynamic_world->player_count; p++)
+		{
+			if (startAssignedToPlayer[p] == NONE)
+			{
+				if (strcmp(ioStartArray[s].name, get_player_data(p)->name) == 0)
+				{
+					startAssignedToPlayer[p] = s;
+					startAssigned[s] = true;
+					break;
+				}
+			}
+		}
+	}
+
+	// Match remaining starts to remaining players arbitrarily.
+	for (int s = 0; s < *ioStartCount; s++)
+	{
+		if (!startAssigned[s])
+		{
+			for (int p = 0; p < dynamic_world->player_count; p++)
+			{
+				if (startAssignedToPlayer[p] == NONE)
+				{
+					startAssignedToPlayer[p] = s;
+					startAssigned[s] = true;
+					break;
+				}
+			}
+		}
+	}
+
+	// Create new starts for any players not covered.
+	int p = 0;
+	while (*ioStartCount < dynamic_world->player_count)
+	{
+		if (startAssignedToPlayer[p] == NONE)
+		{
+			player_data* thePlayer = get_player_data(p);
+			ioStartArray[*ioStartCount].team = thePlayer->team;
+			ioStartArray[*ioStartCount].color = thePlayer->color;
+			ioStartArray[*ioStartCount].identifier = NONE;
+			strncpy(ioStartArray[*ioStartCount].name, thePlayer->name, MAXIMUM_PLAYER_START_NAME_LENGTH + 1);
+			startAssignedToPlayer[p] = *ioStartCount;
+			startAssigned[*ioStartCount] = true;
+			(*ioStartCount)++;
+		}
+
+		p++;
+	}
+
+	// Assign remaining starts to players that don't exist yet
+	p = dynamic_world->player_count;
+	for (int s = 0; s < *ioStartCount; s++)
+	{
+		if (!startAssigned[s])
+		{
+			startAssignedToPlayer[p] = s;
+			startAssigned[s] = true;
+			p++;
+		}
+	}
+
+	// Reorder starts to match players - this is particularly unclever
+	player_start_data theOriginalStarts[MAXIMUM_NUMBER_OF_PLAYERS];
+	memcpy(theOriginalStarts, ioStartArray, sizeof(theOriginalStarts));
+	for (p = 0; p < *ioStartCount; p++)
+	{
+		ioStartArray[p] = theOriginalStarts[startAssignedToPlayer[p]];
+	}
 }
 
 // This should be safe to use whether starting or resuming, and whether single- or multiplayer.
@@ -3710,6 +3800,9 @@ void show_movie(short index)
 size_t should_restore_game_networked(FileSpecifier& file)
 {
 	// We return -1 (NONE) for "cancel", 0 for "not networked", and 1 for "networked".
+#ifdef A1_NO_NETWORK
+	return 0; // without network play every saved game resumes as single-player
+#else
 	size_t theResult = saved_game_was_networked(file);
 	if (theResult != UNONE)
 		return theResult;
@@ -3750,4 +3843,5 @@ size_t should_restore_game_networked(FileSpecifier& file)
         }
 
         return theResult;
+#endif
 }

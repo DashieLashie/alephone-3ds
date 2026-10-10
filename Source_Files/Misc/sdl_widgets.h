@@ -57,7 +57,9 @@
 #include	<set>
 #include <functional>
 
+#ifndef A1_NO_NETWORK
 #include "metaserver_messages.h" // for GameListMessage, for w_games_in_room and MetaserverPlayerInfo, for w_players_in_room
+#endif
 #include "network.h" // for prospective_joiner_info
 
 #include	"binders.h"
@@ -910,6 +912,7 @@ private:
 	ControlHitCallback m_callback;
 };
 
+#ifndef A1_NO_NETWORK
 
 /*
  *	Lists for metaserver dialog; moved from SdlMetaserverClientUi.cpp
@@ -1040,6 +1043,8 @@ private:
 	void draw_item(const MetaserverPlayerInfo& item, SDL_Surface* s,
 		int16 x, int16 y, uint16 width, bool selected) const;
 };
+
+#endif // A1_NO_NETWORK
 
 
 
@@ -1353,7 +1358,7 @@ private:
 	w_file_chooser* m_file_chooser;
 };
 
-
+#ifndef A1_NO_NETWORK
 class GameListWidget
 {
 public:
@@ -1431,6 +1436,7 @@ public:
 private:
 	w_players_in_game2* m_pig;
 };
+#endif // A1_NO_NETWORK
 
 // There are no colour pickers in sdl; we never try to actually construct one of these guys
 class ColourPickerWidget : public Bindable<RGBColor> {};

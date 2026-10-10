@@ -59,6 +59,7 @@
 #include "Plugins.h"
 #include "FilmProfile.h"
 #include "ScenarioChooser.h"
+#include "Scenario.h"
 
 #include "mytm.h"	// mytm_initialize(), for platform-specific shell_*.h
 
@@ -601,7 +602,7 @@ void shutdown_application(void)
 
 bool networking_available(void)
 {
-#if !defined(DISABLE_NETWORKING)
+#if !defined(DISABLE_NETWORKING) && !defined(A1_NO_NETWORK)
 	return true;
 #else
 	return false;
@@ -1270,12 +1271,14 @@ static void process_game_key(const SDL_Event &event)
 		case SDLK_o:
 			item = iLoadGame;
 			break;
+#ifndef A1_NO_NETWORK
 		case SDLK_g:
 			item = iGatherGame;
 			break;
 		case SDLK_j:
 			item = iJoinGame;
 			break;
+#endif
 		case SDLK_p:
 			item = iPreferences;
 			break;

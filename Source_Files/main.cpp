@@ -27,7 +27,7 @@ int main(int argc, char** argv)
 		"GNU Library General Public License.\n"
 		"For details, see the file COPYING.SDL.\n"
 #endif
-#if !defined(DISABLE_NETWORKING)
+#if !defined(DISABLE_NETWORKING) && !defined(A1_NO_NETWORK)
 		"\nBuilt with network play enabled.\n"
 #endif
 		, app_name_version, A1_HOMEPAGE_URL

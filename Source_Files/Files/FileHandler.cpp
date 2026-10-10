@@ -77,7 +77,7 @@
 #include "preferences.h"
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <boost/filesystem.hpp>
+#include "a1_filesystem.h"
 
 #ifdef HAVE_NFD
 #include "nfd.h"
@@ -85,8 +85,7 @@
 #endif
 
 namespace io = boost::iostreams;
-namespace sys = boost::system;
-namespace fs = boost::filesystem;
+namespace fs = a1fs;
 
 // From shell_sdl.cpp
 extern vector<DirectorySpecifier> data_search_path;
@@ -101,10 +100,10 @@ constexpr int o_binary = O_BINARY;
 constexpr int o_binary = 0;
 #endif
 
-static int to_posix_code_or_unknown(sys::error_code ec)
+static int to_posix_code_or_unknown(fs::error_code ec)
 {
 	const auto cond = ec.default_error_condition();
-	return cond.category() == sys::generic_category() ? cond.value() : unknown_filesystem_error;
+	return cond.category() == fs::generic_category() ? cond.value() : unknown_filesystem_error;
 }
 
 #ifdef __WIN32__
@@ -388,7 +387,7 @@ bool FileSpecifier::Create(Typecode Type)
 // Create directory
 bool FileSpecifier::MakeDirectory()
 {
-	sys::error_code ec;
+	fs::error_code ec;
 	const bool created_dir = fs::create_directory(utf8_to_path(name), ec);
 	err = ec.value() == 0 ? (created_dir ? 0 : EEXIST) : to_posix_code_or_unknown(ec);
 	return err == 0;
@@ -516,7 +515,7 @@ bool FileSpecifier::Exists()
 
 bool FileSpecifier::IsDir()
 {
-	sys::error_code ec;
+	fs::error_code ec;
 	const bool is_dir = fs::is_directory(utf8_to_path(name), ec);
 	err = to_posix_code_or_unknown(ec);
 	return err == 0 && is_dir;
@@ -525,7 +524,7 @@ bool FileSpecifier::IsDir()
 // Get modification date
 TimeType FileSpecifier::GetDate()
 {
-	sys::error_code ec;
+	fs::error_code ec;
 	const auto mtime = fs::last_write_time(utf8_to_path(name), ec);
 	err = to_posix_code_or_unknown(ec);
 	return err == 0 ? mtime : 0;
@@ -691,7 +690,7 @@ not_shapes: ;
 // Delete file
 bool FileSpecifier::Delete()
 {
-	sys::error_code ec;
+	fs::error_code ec;
 	const bool removed = fs::remove(utf8_to_path(name), ec);
 	err = ec.value() == 0 ? (removed ? 0 : ENOENT) : to_posix_code_or_unknown(ec);
 	return err == 0;
@@ -699,7 +698,7 @@ bool FileSpecifier::Delete()
 
 bool FileSpecifier::Rename(const FileSpecifier& Destination)
 {
-	sys::error_code ec;
+	fs::error_code ec;
 	fs::rename(utf8_to_path(name), utf8_to_path(Destination.name), ec);
 	err = to_posix_code_or_unknown(ec);
 	return err == 0;
@@ -881,11 +880,11 @@ bool FileSpecifier::ReadDirectory(vector<dir_entry> &vec)
 {
 	vec.clear();
 	
-	sys::error_code ec;
+	fs::error_code ec;
 	for (fs::directory_iterator it(utf8_to_path(name), ec), end; it != end; it.increment(ec))
 	{
 		const auto& entry = *it;
-		sys::error_code ignored_ec;
+		fs::error_code ignored_ec;
 		const auto type = entry.status(ignored_ec).type();
 		const bool is_dir = type == fs::directory_file;
 		

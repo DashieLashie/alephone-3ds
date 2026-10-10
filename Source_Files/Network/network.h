@@ -28,9 +28,22 @@ Tuesday, June 21, 1994 3:26:46 PM
 */
 #include "cseries.h"
 #include "cstypes.h"
+#ifndef A1_NO_NETWORK
 #include "CommunicationsChannel.h"
+#endif
 #include "network_capabilities.h"
+#ifndef A1_NO_NETWORK
 #include "Pinger.h"
+#else
+// Keep this header usable without asio; the prototypes below only need names.
+#include <memory>
+class CommunicationsChannel;
+class CommunicationsChannelFactory;
+class NetworkInterface;
+class IPaddress;
+struct UDPpacket;
+class Pinger;
+#endif
 
 // This file should be used only for stuff that folks outside the network subsystem care about
 // (i.e. it's the interface to the subsystem)

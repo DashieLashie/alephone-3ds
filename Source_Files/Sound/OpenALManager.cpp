@@ -141,7 +141,7 @@ void OpenALManager::SetMusicVolume(float volume) {
 }
 
 void OpenALManager::ResyncPlayers(bool music_players_only) {
-	SDL_LockAudio();
+	audio_backend->Lock();
 
 	for (auto& player : audio_players_queue) 
 	{
@@ -151,31 +151,31 @@ void OpenALManager::ResyncPlayers(bool music_players_only) {
 		}
 	}
 
-	SDL_UnlockAudio();
+	audio_backend->Unlock();
 }
 
 void OpenALManager::Start() {
-	SDL_PauseAudio(is_using_recording_device); //Start playing only if not recording playback
-	process_audio_active = SDL_GetAudioStatus() != SDL_AUDIO_STOPPED;
+	audio_backend->Pause(is_using_recording_device); //Start playing only if not recording playback
+	process_audio_active = !audio_backend->IsStopped();
 }
 
 void OpenALManager::Pause(bool paused) {
 	if (!process_audio_active || paused_audio == paused) return;
 
 	paused_audio = paused;
-	SDL_PauseAudio(paused_audio);
+	audio_backend->Pause(paused_audio);
 	elapsed_pause_time = machine_tick_count() - elapsed_pause_time;
 }
 
 void OpenALManager::Stop() {
-	SDL_PauseAudio(true);
+	audio_backend->Pause(true);
 	StopAllPlayers();
 	process_audio_active = false;
 }
 
 void OpenALManager::ToggleDeviceMode(bool recording_device) {
 	is_using_recording_device = recording_device;
-	SDL_PauseAudio(is_using_recording_device);
+	audio_backend->Pause(is_using_recording_device);
 }
 
 std::shared_ptr<SoundPlayer> OpenALManager::PlaySound(const Sound& sound, const SoundParameters& parameters) {
@@ -218,7 +218,7 @@ std::unique_ptr<AudioPlayer::AudioSource> OpenALManager::PickAvailableSource(con
 }
 
 void OpenALManager::StopAllPlayers() {
-	SDL_LockAudio();
+	audio_backend->Lock();
 
 	for (auto& audioPlayer : audio_players_queue) {
 		RetrieveSource(audioPlayer);
@@ -231,7 +231,7 @@ void OpenALManager::StopAllPlayers() {
 		audioPlayer->is_active = false;
 	}
 
-	SDL_UnlockAudio();
+	audio_backend->Unlock();
 }
 
 void OpenALManager::RetrieveSource(const std::shared_ptr<AudioPlayer>& player) {
@@ -389,26 +389,24 @@ OpenALManager::OpenALManager(const AudioParameters& parameters) {
 
 	auto openalFormat = GetBestOpenALSupportedFormat();
 	assert(openalFormat && "Audio format not found or not supported");
-	SDL_AudioSpec desired = {};
-	desired.freq = parameters.rate;
+	AudioBackend::Spec desired;
+	desired.rate = parameters.rate;
 	desired.format = mapping_openal_sdl_format.at(openalFormat);
 	desired.channels = static_cast<int>(parameters.channel_type);
 	desired.samples = parameters.sample_frame_size;
-	desired.callback = MixerCallback;
-	desired.userdata = reinterpret_cast<void*>(this);
 
-	if (SDL_OpenAudio(&desired, &sdl_audio_specs_obtained) < 0) {
+	if (!audio_backend->Open(desired, audio_spec_obtained, MixerCallback, reinterpret_cast<void*>(this))) {
 		CleanEverything();
 	} else {
-		audio_parameters.rate = sdl_audio_specs_obtained.freq;
-		audio_parameters.channel_type = static_cast<ChannelType>(sdl_audio_specs_obtained.channels);
-		openal_rendering_format = mapping_sdl_openal_format.at(sdl_audio_specs_obtained.format);
+		audio_parameters.rate = audio_spec_obtained.rate;
+		audio_parameters.channel_type = static_cast<ChannelType>(audio_spec_obtained.channels);
+		openal_rendering_format = mapping_sdl_openal_format.at(audio_spec_obtained.format);
 	}
 }
 
 void OpenALManager::MixerCallback(void* usr, uint8* stream, int len) {
 	auto manager = (OpenALManager*)usr;
-	int frameSize = manager->sdl_audio_specs_obtained.channels * SDL_AUDIO_BITSIZE(manager->sdl_audio_specs_obtained.format) / 8;
+	int frameSize = manager->audio_spec_obtained.channels * SDL_AUDIO_BITSIZE(manager->audio_spec_obtained.format) / 8;
 	manager->GetPlayBackAudio(stream, len / frameSize);
 }
 
@@ -476,5 +474,5 @@ void OpenALManager::Shutdown() {
 
 OpenALManager::~OpenALManager() {
 	CleanEverything();
-	SDL_CloseAudio();
+	audio_backend->Close();
 }

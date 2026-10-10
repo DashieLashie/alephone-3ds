@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin name="A1 Verify Harness" version="1.0" description="Stage 2 play/verify driver: saves, level change, log" solo_lua="harness.lua"/>

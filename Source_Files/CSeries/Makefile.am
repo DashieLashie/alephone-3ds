@@ -4,6 +4,7 @@ noinst_LIBRARIES = libcseries.a
 libcseries_a_SOURCES = byte_swapping.h BStream.h csalerts.h		\
   csdialogs.h cscluts.h cseries.h csfonts.h csmacros.h	\
   csmisc.h cspaths.h cspixels.h csstrings.h cstypes.h FilmProfile.h mytm.h	\
+  a1_filesystem.h							\
 									\
   byte_swapping.cpp BStream.cpp csalerts_sdl.cpp cscluts_sdl.cpp	\
   csdialogs_sdl.cpp csmisc_sdl.cpp cspaths_sdl.cpp csstrings.cpp FilmProfile.cpp	\

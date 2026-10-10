@@ -518,6 +518,7 @@ static void parse_tab(InfoTree root)
 static void parse_metaserver(InfoTree root)
 {
 	start_parse_widget(METASERVER_WIDGETS);
+#ifndef A1_NO_NETWORK
 	for (const InfoTree &child : root.children_named("games"))
 	{
 		start_parse_widget(METASERVER_GAMES);
@@ -548,6 +549,7 @@ static void parse_metaserver(InfoTree root)
 			}
 		}
 	}
+#endif
 	for (const InfoTree &child : root.children_named("players"))
 	{
 		start_parse_widget(METASERVER_PLAYERS);
@@ -820,6 +822,7 @@ static void set_theme_defaults(void)
 
 	dialog_theme[METASERVER_PLAYERS].spaces[0] = 8;
 
+#ifndef A1_NO_NETWORK
 	dialog_theme[METASERVER_GAMES].spaces[w_games_in_room::GAME_SPACING] = 4;
 	dialog_theme[METASERVER_GAMES].spaces[w_games_in_room::GAME_ENTRIES] = 3;
 	dialog_theme[METASERVER_GAMES].states[w_games_in_room::GAME].colors[FOREGROUND_COLOR] = make_color(0xff, 0xff, 0xff);
@@ -833,6 +836,7 @@ static void set_theme_defaults(void)
 	dialog_theme[METASERVER_GAMES].states[w_games_in_room::SELECTED_INCOMPATIBLE_GAME].colors[BACKGROUND_COLOR] = make_color(0xff, 0xff, 0xff);
 	dialog_theme[METASERVER_GAMES].states[w_games_in_room::SELECTED_RUNNING_GAME].colors[FOREGROUND_COLOR] = make_color(0x7f, 0x7f, 0x7f);
 	dialog_theme[METASERVER_GAMES].states[w_games_in_room::SELECTED_RUNNING_GAME].colors[BACKGROUND_COLOR] = make_color(0xff, 0xff, 0xff);
+#endif
 
 }
 

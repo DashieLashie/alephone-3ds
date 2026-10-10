@@ -4,7 +4,10 @@
 # Usage (from the repo root, on any Docker host):
 #   docker build -t aleph-host-baseline scripts/3ds/host-baseline
 #   docker run --rm -v "$PWD":/src:ro -v aleph-host-build:/build \
-#       aleph-host-baseline bash /src/scripts/3ds/host-baseline/build.sh
+#       aleph-host-baseline bash /src/scripts/3ds/host-baseline/build.sh [configure args...]
+#
+# Any arguments are passed to ./configure unchanged (stage 2 uses the
+# 3DS feature-set flags, see build-3ds-features.sh).
 #
 # The source tree is copied into the /build volume so the autotools/compiler
 # output never lands in the checkout.
@@ -16,7 +19,7 @@ tar -C /src --exclude=./build --exclude='./data/Scenarios/Marathon 2' -cf - . | 
 cd /build/src
 {
   autoreconf -i
-  ./configure
+  ./configure "$@"
 } 2>&1 | tee /build/configure.log
 make -j"$(nproc)" 2>&1 | tee /build/make.log
 ls -la Source_Files/alephone
