@@ -1,9 +1,9 @@
 # Stage 5 test 5: remapping in Preferences > Controls with the D-Pad, A, B
-# and START (the dialogs are opened by touch). Nothing is focused when the
-# dialog opens (the first A does nothing); D-Pad down focuses the tab bar
-# (A there switches tabs), then walks the bindings row by row: keyboard,
-# controller (the mouse column's look entries are not focusable). After
-# three downs the controller binding of "Look Up" (C-Stick Up) is focused.
+# and START (the dialogs are opened by touch). The tab bar is focused when
+# the dialog opens (A there would switch tabs); D-Pad down walks the
+# bindings row by row: keyboard, controller (the mouse column's look
+# entries are not focusable). After two downs the controller binding of
+# "Look Up" (C-Stick Up) is focused.
 wait 1000
 touch 242 158          # PREFERENCES
 wait 150
@@ -13,8 +13,7 @@ touch 160 125          # CONTROLS
 wait 150
 untouch
 wait 2000
-tap A
-tap DOWN
+screens remap-open
 tap DOWN
 tap DOWN
 log --- A: wait for a button; Y binds Y (and unbinds Aux Trigger's Y) ---
@@ -38,9 +37,7 @@ wait 150
 untouch
 wait 2000
 screens remap-after-cancel
-log --- bind again (A on tab bar, 3x DOWN, A, Y) and ACCEPT by touch ---
-tap A
-tap DOWN
+log --- bind again (2x DOWN from the tab bar, A, Y) and ACCEPT by touch ---
 tap DOWN
 tap DOWN
 tap A

@@ -1,4 +1,5 @@
-# Stage 5 test 4 (exploratory): the Controls dialog's tabs.
+# Stage 5 test 4 (exploratory): the Controls dialog's tabs. The tab bar is
+# focused when the dialog opens, so A switches tabs at once.
 wait 1000
 touch 242 158          # PREFERENCES
 wait 150
@@ -9,9 +10,6 @@ wait 150
 untouch
 wait 2000
 screens controls
-tap DOWN
-wait 300
-screens controls-d1
 tap A
 wait 800
-screens controls-d1-a
+screens controls-a

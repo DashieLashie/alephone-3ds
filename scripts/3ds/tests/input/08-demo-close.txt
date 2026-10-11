@@ -1,0 +1,10 @@
+# Stage 5 test 8: HOME > Close while the main menu's demo plays. On the
+# console (hardware session) the main loop ended 14.4 s after the close
+# request when a demo was running, against 0.2 s from a game (test 06).
+# The demo starts after 30 s idle at the menu, then loads its level.
+wait 100000
+screens demo
+log --- HOME for 2 s, then Close ---
+home 2000
+quit
+wait 30000

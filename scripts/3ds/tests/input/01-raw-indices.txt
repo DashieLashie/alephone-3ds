@@ -1,7 +1,8 @@
 # Stage 5 test 1: which SDL joystick/controller indices the N3DS backend
 # reports. Run with --input-debug; read the "[3ds] input" lines.
-# At the main menu only the D-Pad and A act (A is left out here), and a touch
-# on an empty corner does nothing.
+# At the main menu only the D-Pad and A act (A is left out here: BEGIN NEW
+# GAME is highlighted from the start), and a touch on an empty corner does
+# nothing.
 wait 1000
 log --- buttons (each tapped once) ---
 tap B

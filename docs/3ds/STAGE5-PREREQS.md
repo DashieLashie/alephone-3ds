@@ -61,6 +61,13 @@ size 1 846 668 bytes
 sha256 a12d052f9b8a025d2c26e56874267bde52cf001ba58b4644e8370d06cff39dd4
 ```
 
+**Refreshed** after each approved commit: `3ds-port-2026-10-11-1dfa858.bundle`
+(prerequisites), and `3ds-port-2026-10-11-015e63c.bundle` (stage 5,
+2026-10-11): `is okay`, 2 188 211 bytes, sha256
+`604a74f03b3b6714d1d93d13a3cf4949558737cd9fd8663b11b6f88ada850bc8`;
+restored into a scratch repository (tag fetched at depth 1, then the
+bundle), tree `2156fa64…` identical to `HEAD`'s.
+
 The bundle is incremental: its prerequisite `fc4c274` is upstream tag
 `release-20260930` (the shallow boundary). **Restore**, tested in a scratch
 directory: the restored tree matched the working copy (`diff -rq`, tracked
@@ -183,9 +190,12 @@ automake's compile line; `-c` → `-E -P` (dependency flags and `-o` removed),
 run with the `HEAD` and working-tree versions copied to the same path, then
 `cmp`; the volume's files are restored afterwards.
 
-**Hardware: pending** (item 1): does `psInit()` succeed under the Homebrew
-Launcher? Either way the game gets distinct names; the boot log line tells
-which source is used.
+**Hardware (2026-10-11, `STAGE5.md` "Hardware session"):** `psInit()`
+succeeds under the Homebrew Launcher: `[3ds] entropy: ps:ps
+(PS_GenerateRandomBytes)` in every run. `debug-entropy`: `unique_path`
+`a10fa4a2 856c9aad 3a595470`, image cache `08762a0b-…`, `7924f7ec-…`,
+`fa5f60c9-…`, 3 of 3 distinct. The Boost probe's expected FAIL
+(`fb135fdb-…` twice) reproduces on hardware too.
 
 ## 3. Audio thread stack
 
@@ -254,8 +264,10 @@ patching SDL. Revisit if the hardware peak is much higher, and when an Ogg
 decoder lands: Tremor uses `alloca` heavily, and music decoding may run on
 this thread.
 
-**Hardware: pending** (item 1): stack peak, core and timing with
-`debug-audio`.
+**Hardware (2026-10-11):** the audio thread runs on **core 1**
+(`APT_SetAppCpuTimeLimit(30)` succeeds there; Azahar refused it), priority
+0x19. Stack peak **9 KiB of 80 KiB** with the 8-sound burst and in
+gameplay, as in Azahar. **Decision confirmed:** keep SDL's 80 KiB.
 
 ## 6. Early fatal-alert error screen
 
@@ -294,8 +306,10 @@ format change is harmless.
 | Regression: missing folder (`scenario.txt` → `Nonexistent`, before `SDL_Init`) | pointer, as in stage 4 | "Aleph One cannot start" |
 
 Not covered: an error after the main window exists (the top screen keeps
-the game's frame). Nothing triggers one safely before input exists. On
-hardware, START/A to exit is still untested (item 1).
+the game's frame). Nothing triggers one safely before input exists.
+**Hardware (2026-10-11):** the missing-scenario screen ("Aleph One cannot
+start / Scenario folder not found: sdmc:/3ds/alephone/Marathon2") shows on
+the bottom screen and **A exits** cleanly.
 
 ## 4. Linear heap size
 
@@ -351,7 +365,23 @@ would be checked by the boot log (`linear heap … free`), and a shortage
 would show at boot (SDL video/audio init fails), not in the middle of a
 game.
 
-**Decision:** pending until the hardware numbers are in (item 1).
+**Hardware (2026-10-11):** linear use is 2 112 KiB at boot, at the menu,
+in gameplay, in the demo and at exit (30 656 of 32 768 KiB free in every
+memory line); malloc peaked at about 25 MiB with a level loaded.
+
+**Decision (2026-10-11): 8 MiB**, as proposed (`PATCHES.md` 25).
+`u32 __ctru_linear_heap_size = 8 * 1024 * 1024;` in `a1_3ds_platform.cpp`.
+Build: 0 warnings; `nm` shows it as `D` (overrides the weak default).
+Azahar, test 06 (a level played) in both modes:
+
+| Mode | Heap | Linear free after the level | malloc free after the level |
+| --- | ---: | ---: | ---: |
+| New 3DS | 110 428 KiB (was 85 860) | 6 080 of 8 192 KiB | 84 239 KiB |
+| Old 3DS | 81 756 KiB (was 57 212) | 6 080 of 8 192 KiB | 55 549 KiB |
+
+(Old 3DS mode needs both `is_new_3ds=false` and `is_new_3ds\default=false`
+in Azahar's `qt-config.ini`; with only the first it still boots as a New
+3DS.) Hardware check of the new split: next console session.
 
 ## 1. Hardware run
 
@@ -391,7 +421,13 @@ The game links SDL2main, whose `N3DS_Init()` calls `osSetSpeedupEnable(true)`
 (`nm`: `osSetSpeedupEnable`, `SDL_main` in the ELF), so a New 3DS runs it at
 804 MHz with the L2 cache.
 
-### 1b. Hardware session: deferred
+### 1b. Hardware session (done 2026-10-11 in stage 5)
+
+Run in stage 5's hardware session: Phase 0, A and B as planned below,
+results in `STAGE5.md` "Hardware session". All four dependency tests
+pass on a New 3DS (Boost: the 1 expected FAIL).
+
+Planned:
 
 **Decision** (2026-10-11): stage 5 is controls only, and nothing in it depends
 on the hardware numbers. The first console session therefore moves into
@@ -457,6 +493,7 @@ user files it.
 the console profile name needs CFGU (`CFGU_GetConfigInfoBlk2`, block
 0x000A0000, UTF-16), and only hardware can verify it, so it moves to stage 5
 together with the hardware session. "Bob User" stays the default until then.
+**2026-10-11:** deferred again by the user to the next console session.
 
 **Platform name** (`PATCHES.md` 15): `alephversion.h` gets an
 `A1_PLATFORM_3DS` branch: `A1_DISPLAY_PLATFORM "Nintendo 3DS"`,
@@ -494,18 +531,36 @@ stage 5's input work. The thread's core decides the answer:
 
 Azahar figures are emulated timing and only relative.
 
+**Hardware (2026-10-11, New 3DS, audio thread on core 1):**
+
+| Situation | Callback avg / max per 23.22 ms buffer | Late (> 1.5 buffers) |
+| --- | --- | --- |
+| Main menu, silence | 6.1 ms (26%) / 7.5 ms | 0 |
+| 8-sound burst | 8.0 ms (34%) / 12.5 ms | 0 |
+| Demo and gameplay | 9-11 ms (40-48%); highest 5 s average 14.7 ms; highest single 26.2 ms | 0 |
+| **START dialog open ~100 s** (the dialog-stall test) | 6.1 ms (26%) / 7.5 ms | **0** |
+| HOME, keyboard applet, lid | paused by design (gaps of 1.0-175.8 s) | counted, expected |
+| Game cancelled (START > YES), a game start/end | | **1 gap of 3.9 s, 1 of 2.8 s** |
+
+**Answers:** the `yield()` busy-waits of dialogs do not starve the mixer
+(core 1 runs it whatever the main thread does). Mixing costs a quarter of
+the buffer time at rest and under half in gameplay; one callback in about
+45 minutes took longer than a buffer, without a late callback (SDL queues 3
+buffers). The 30% core-1 limit was not a problem. The only stalls are the
+two gaps at game/menu transitions, during fades: recorded, not fixed.
+
 ## Summary
 
 | # | Item | Status |
 | --- | --- | --- |
-| 1 | Hardware run | **Deferred** to stage 5's first console session; plan and tooling in 1b. The four dependency tests ran in Azahar (1a): probe, OpenAL loopback and libsndfile all passed; Boost 7/8 (the 1 FAIL is item 2's root cause, expected). Test harness fixes: sndfile log file, Boost probe stack |
-| 2 | Identical image-cache names | **Fixed** (`PATCHES.md` 14): ps:ps entropy with a tick/clock fallback. Verified in Azahar (ps:ps, forced fallback, and a control build reproducing the bug); non-3DS check passed. Hardware (is ps:ps allowed under the Homebrew Launcher?): pending |
-| 3 | Audio thread stack | **Measured, kept at 80 KiB**: 9 KiB peak with 8 voices in Azahar. The SDL hint cannot change it. Port-only probe `audio_probe.cpp`. **Found:** audio never ran in Azahar (no `dspfirm.cdc`); `run-azahar.sh` now stages an HLE placeholder |
-| 4 | Linear heap size | **Investigated** (source and binary): linear = 32 MiB whenever more than 56 MiB is available; only ~2.1 MiB used (framebuffers + audio ring). Proposal 8 MiB (+24 MiB for malloc). **Decision deferred**; default kept |
-| 5 | Audio stalls / CPU | **Deferred** (needs hardware and controls); probe ready |
-| 6 | Early fatal-alert screen | **Verified** in Azahar (scenario without Map/Shapes). **Fixed:** the top screen was black before the main window; it now shows the pointer. Regression of the pre-SDL path OK |
-| 7 | Cosmetics | **Platform name fixed** (`PATCHES.md` 15, "Nintendo 3DS"). Player name from CFGU **deferred** (needs hardware) |
-| 8 | Branch backup | **Done**: `~/Documents/Aleph_3ds-backups/3ds-port-2026-10-11-527e67c.bundle`, restore tested |
+| 1 | Hardware run | **Done** 2026-10-11 in stage 5's hardware session (`STAGE5.md`): the four dependency tests pass on a New 3DS (Boost: the expected FAIL), the game boots to the menu in 41.7-49.4 s. Azahar runs in 1a. Test harness fixes: sndfile log file, Boost probe stack |
+| 2 | Identical image-cache names | **Fixed** (`PATCHES.md` 14): ps:ps entropy with a tick/clock fallback. Verified in Azahar (ps:ps, forced fallback, and a control build reproducing the bug); non-3DS check passed. **Hardware: ps:ps works under the Homebrew Launcher**; 3 of 3 distinct names |
+| 3 | Audio thread stack | **Measured, kept at 80 KiB**: 9 KiB peak with 8 voices in Azahar and on hardware (core 1 on hardware). The SDL hint cannot change it. Port-only probe `audio_probe.cpp`. **Found:** audio never ran in Azahar (no `dspfirm.cdc`); `run-azahar.sh` now stages an HLE placeholder |
+| 4 | Linear heap size | **Decided: 8 MiB** (`PATCHES.md` 25). Hardware: 2.1 MiB used everywhere, gameplay included. +24 MiB for malloc (Old 3DS mode 57 → 81 MiB); Azahar both modes OK; hardware check next session |
+| 5 | Audio stalls / CPU | **Measured on hardware**: 26% at rest, 40-48% in gameplay, 0 late callbacks; dialogs do not starve the mixer. Two 2.8-3.9 s gaps at game/menu transitions (recorded) |
+| 6 | Early fatal-alert screen | **Verified** in Azahar (scenario without Map/Shapes). **Fixed:** the top screen was black before the main window; it now shows the pointer. Regression of the pre-SDL path OK. **Hardware:** screen shown, A exits |
+| 7 | Cosmetics | **Platform name fixed** (`PATCHES.md` 15, "Nintendo 3DS"). Player name from CFGU **deferred** to the next console session (user, 2026-10-11) |
+| 8 | Branch backup | **Done**, refreshed after each commit; latest `~/Documents/Aleph_3ds-backups/3ds-port-2026-10-11-015e63c.bundle` (stage 5), restore tested |
 | 9 | devkitPro report | **Drafted, not filed**: `docs/3ds/devkitpro-3dsx-ld-report.md`; reproducer `scripts/3ds/tests/exidx-repro/` fails with the stock script and passes with the fix (Azahar). Unreported upstream; 8 more devkitARM scripts share the pattern |
 | 10 | Emulator home | **Done**: `~/Applications/Azahar-2126.2` (still the latest stable); config paths rewritten; `run-azahar.sh` finds it without `AZAHAR=`; /tmp copy removed |
 

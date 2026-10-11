@@ -23,7 +23,41 @@ Engine changes are fenced with `A1_PLATFORM_3DS` and listed in
 | 3 | Touch: relative mouse look (toggle in prefs), absolute pointer in menus | **Done.** Toggle = Controls > "Touch Screen Aiming" (the mouse-aiming switch, relabelled) |
 | 4 | Text entry through libctru swkbd | **Done.** Tapping or pressing A on a text field opens the system keyboard with the field's text |
 | 5 | HOME menu / sleep: pause game and audio, resume cleanly | **Done.** Plus HOME > Close: exits in 0.2 s from a game (was 4.6 s) |
-| | Hardware (DoD: finish Marathon 2 level 1 with the built-in controls) | **Not done**: no console in this session. Checklist at the end |
+| | Hardware (DoD: finish Marathon 2 level 1 with the built-in controls) | **Not met yet.** Hardware session 2026-10-11: every control, touch, keyboard, HOME, lid and Close verified on a New 3DS; the level 1 play-through is still to do ("Hardware session") |
+
+## Stage status (2026-10-11, after the hardware session)
+
+**Achieved.** Full single-player control works **on a New 3DS**: every
+button, both sticks, ZL/ZR, touch pointer and drag-to-look, the map, the
+system keyboard, HOME, sleep and HOME > Close, with the 3DS defaults and
+the remapping dialog. The main menu and dialogs work with A from the start
+(`PATCHES.md` 23-24). The stage 3-5 prerequisites have their hardware
+answers: the four dependency tests pass, ps:ps entropy works, the audio
+thread runs on core 1 with 9 of 80 KiB stack and no late callbacks
+(dialogs included), and the linear heap is cut to 8 MiB (`PATCHES.md` 25,
++24 MiB for malloc). Details: "Hardware session" below.
+
+**Missing:**
+
+| # | Item | Kind | Blocks the next stage? |
+| --- | --- | --- | --- |
+| 1 | Level 1 played to the exit with the built-in controls (the definition of done) | verification; every control it uses is verified on hardware | no: first task of the next console session |
+| 2 | C-Stick and touch-look sensitivity tuning | depends on 1; defaults unchanged | no |
+| 3 | Log lock and 8 MiB linear heap seen on hardware | verification; both pass in Azahar, the next boot log shows them | no |
+| 4 | HOME > Close during the menu demo takes 14.4 s (hardware only) | bug, open; from a game 0.34 s | no: the HOME menu stays responsive |
+| 5 | 2.8-3.9 s audio gaps at game/menu transitions | observation | no |
+| 6 | Player name from the console profile (CFGU) | cosmetic, deferred by the user | no |
+
+**Moving on:** the next stage can start with stage 5 in this state. What is
+missing is verification of controls that each already work on hardware,
+plus two small open issues; none of it is needed to start other work. The
+game is slow (software renderer, 640x480 logical size letterboxed, about
+1.5 min to load a level from SD), which is the obvious candidate for the
+next stage, and the level 1 play-through is more useful once that improves.
+Sensitivity tuning stays valid across such work: the engine reads input
+once per 30 Hz world tick whatever the frame rate. The first console
+session of the next stage should run the "Next console session" list at the
+end of this document first.
 
 ## How the engine reads controllers
 
@@ -278,7 +312,7 @@ bypass.
 | `03-player-name.txt` | tap the Name field: keyboard hint "Name", initial "Bob User", answer "Durandal 3DS"; a cancelled second keyboard changes nothing; ACCEPT; reopen | pass; `name="Durandal 3DS"` in the prefs file |
 | `04-controls-explore.txt` | Controls dialog with 3DS defaults and names | pass (screenshot above) |
 | `05-remap-dpad.txt` | A starts binding ("waiting for button"), Y binds Y; START clears; B cancels the dialog (nothing saved); bind again + ACCEPT persists; RESET ALL KEYS restores | pass, every step captured |
-| `06-gameplay.txt` | new game (D-Pad + A); Circle Pad walks, C-Stick turns, ZR fires, touch drag looks, SELECT map, HOME 3 s pauses (B resumes), START dialog (B = no), HOME > Close | pass; exit 0.2 s after the close request |
+| `06-gameplay.txt` | new game (A; D-Pad + A before `PATCHES.md` 23); Circle Pad walks, C-Stick turns, ZR fires, touch drag looks, SELECT map, HOME 3 s pauses (B resumes), START dialog (B = no), HOME > Close | pass; exit 0.2 s after the close request |
 | `07-suspend-menus.txt` | HOME and sleep at the main menu; HOME with a dialog open and a finger held across it | pass: dialog redrawn, held touch ignored |
 
 Non-3DS check (`ppcheck.sh`, both volumes, 8 TUs): `shell.cpp`,
@@ -297,12 +331,14 @@ Non-3DS check (`ppcheck.sh`, both volumes, 8 TUs): `shell.cpp`,
 
 **Observations, not fixed:**
 
-- The main menu has no highlighted item until the D-Pad picks one, so A
-  alone does nothing there (upstream behaviour; D-Pad down then A starts a
-  game).
-- Dialogs open with nothing focused; the first D-Pad press focuses the first
-  item (in Controls: the tab bar, where A switches tabs). The mouse column's
-  look entries are not focusable, so D-Pad rows go keyboard → controller.
+- The main menu had no highlighted item until the D-Pad picked one, so A
+  alone did nothing there (upstream behaviour). **Changed** in the hardware
+  session: it starts on BEGIN NEW GAME (`PATCHES.md` 23).
+- Dialogs opened with nothing focused; the first D-Pad press focused the
+  first item. **Changed** in the hardware session: the first selectable
+  widget is focused unless the dialog chose one (`PATCHES.md` 24). The mouse
+  column's look entries are not focusable, so D-Pad rows go keyboard →
+  controller.
 - One run of `05` (out of 4) stopped logging 6 s into the script with the
   emulator still running, and was killed by the timeout; three reruns of
   the same script and every later run (about 10) completed. Azahar's own log
@@ -338,6 +374,186 @@ Still open from the prerequisites and due in the same session: the
 hardware numbers of `STAGE5-PREREQS.md` items 1-5 (entropy source, audio
 stack/timing, linear heap decision), and the player name from CFGU (item 7).
 
+## Hardware session
+
+Started 2026-10-11 on top of `015e63c` (stage 5 committed). New 3DS / New
+2DS, Homebrew Launcher, ftpd, 3dslink; Mac on the same network. Figures
+marked **(hardware)** are measured on the console; everything else is
+Azahar.
+
+### Housekeeping
+
+- Stage 5 committed as `015e63c`; bundle
+  `~/Documents/Aleph_3ds-backups/3ds-port-2026-10-11-015e63c.bundle`
+  (`STAGE5-PREREQS.md` item 8).
+- Emulated SD card: the test prefs file (name "Durandal 3DS") and the
+  stage 4 `Marathon 2 Preferences.bak` deleted, so Azahar starts from the
+  3DS defaults like a fresh card; the leftover `debug-input-script` removed.
+- New tool `scripts/3ds/sd-ftp.sh IP ls|get|put|putdir|touch|rm|mv|size`:
+  the console's SD card over ftpd with `curl` (macOS has no ftp client).
+  Tested against a local FTP server (pyftpdlib, names with spaces).
+
+### Decisions on the brief's deviations and upstream behaviours
+
+| Question | Decision |
+| --- | --- |
+| One controller button per action (SELECT map, L walk, R action) | **Kept**: the Controls dialog holds one controller code per action |
+| "Always run" on by default | **Kept**; to be confirmed in the level 1 play-through |
+| Main menu: A does nothing until the D-Pad highlights an item | **Changed**: starts on BEGIN NEW GAME (`PATCHES.md` 23) |
+| Dialogs open with nothing focused | **Changed**: first selectable widget focused unless the dialog chose one (`PATCHES.md` 24) |
+
+Both changes: `ppcheck.sh` byte-identical in both volumes, 3DS build 0
+warnings. Test scripts 01, 02, 04, 05 and 06 updated (they began with a
+D-Pad press to focus the first item, which now moves to the second); all 7
+pass in Azahar (details in `PATCHES.md` 23-24). HOME > Close from a game:
+0.19 s. Level 1 load in Azahar: 42 s from A on the chapter screen to the
+first gameplay capture.
+
+### Setup and tools
+
+- Console: New 3DS / New 2DS at `192.168.100.72`, Mac at `192.168.100.28`,
+  same subnet. The console clock reads 16 Jan 2012 (file dates and the
+  engine's `Aleph One Log.txt` header only; `log.txt` uses times from boot).
+- **macOS Local Network privacy:** `curl` from Anaconda (first in `PATH`)
+  failed to reach the console in 0 ms ("Couldn't connect"), while `nc` and
+  `/usr/bin/curl` worked: only Apple's binaries (or ones granted access)
+  may open LAN connections. `sd-ftp.sh` uses `/usr/bin/curl`. devkitPro's
+  `3dslink` worked from the shell (outside Claude Code's sandbox).
+- `3dslink` finds the console by broadcast; `NETLOAD_IP` was not needed.
+  Sends were queued in a retry loop, so each program went across as soon as
+  the Homebrew Launcher's NetLoader (Y) was listening.
+- Logs and captures of every run: `build-3ds/hw/` (`phaseA/`, `phaseB/`,
+  `run3/`, and the 3dslink streams `*-3dslink.txt`; not in git).
+
+### Phase 0 (ftpd)
+
+| Check | Result (hardware) |
+| --- | --- |
+| `sdmc:/3ds/dspfirm.cdc` | present, 49 756 bytes (a DSP1 dump, not Azahar's 4 KiB placeholder) |
+| `sdmc:/3ds/alephone/` | did not exist: no old prefs to remove |
+| Scenario upload | `sd-ftp.sh putdir "data/Scenarios/Marathon 2" /3ds/alephone/Marathon2.off`: 145 files, 51 441 934 bytes in 243 s (206 KiB/s); names and sizes verified against the local copy (145 match). Parked as `Marathon2.off` for Phase A's no-data run, renamed to `Marathon2` for Phase B. The submodule's `.git` pointer file (56 bytes) went along; harmless, and `putdir` now skips `.git` |
+
+### Phase A (3dslink, no scenario data)
+
+| Program | Result (hardware) |
+| --- | --- |
+| `aleph-probe.3dsx` (stage 0) | **RESULT: all passed** (8 PASS) |
+| `openal-loopback-test.3dsx` | **RESULT: all passed (0 failures)**, 18 PASS, peak sample 16382 |
+| `sndfile-vio-test.3dsx` | **RESULT: all passed (0 failures)**, 25 PASS |
+| `boost-probe.3dsx` | 7 PASS, 1 FAIL = the expected `uuid random_generator` (`fb135fdb-2482-4d31-aa8c-351caf595b56` twice, `std::random_device` without entropy; the game avoids it, `PATCHES.md` 14) |
+| the game, `cmake --build build-3ds --target run-3dslink` | `C++ exceptions: OK`; **`entropy: ps:ps (PS_GenerateRandomBytes)`**; `boot (New 3DS)`; `launched via 3dslink from 192.168.100.28`. "Aleph One cannot start / Scenario folder not found: sdmc:/3ds/alephone/Marathon2 (chosen by: default)" on the bottom screen; **A exits** (`STAGE5-PREREQS.md` item 6) |
+
+The game writes a comment-only `scenario.txt` template on first boot.
+
+### Phase B (data, `debug-audio`, `debug-entropy`, `debug-input`, `debug-screens`)
+
+Boot milestones **(hardware)**, ms from `main()`:
+
+| platform ready | `SDL_Init` | scenario chooser | base MML | fonts + plugins | preferences | sound | screen | `initialize_application()` | **main menu** |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 217 | 446 | 944 | 1 195 | 4 067 | 4 253 | 21 469 | 21 618 | 41 099 | **49 391** |
+
+Later runs reached the menu in 41.7 s. Azahar: 32.2 s, with a different
+profile: fonts + plugins takes 2.9 s on hardware (10.6 s in Azahar), but
+sound initialisation 17.2 s (3.2 s) and the step to
+`initialize_application()` done 19.5 s (6.7 s), i.e. file reads from the
+SD card. Level loading is slow for the same reason: about 1.5 min for
+level 1 (Azahar ~40 s). Boot and load time are later-stage work.
+
+Memory at the main menu **(hardware)**: heap 85 860 KiB (1 024 KiB main
+stack), malloc 13 537 KiB used / 71 298 KiB free; linear 32 768 KiB, 30 656
+KiB free (2 112 KiB used); APPLICATION region 126 976 KiB, all committed.
+Identical to Azahar's New 3DS mode.
+
+- `debug-entropy`: ps:ps, `unique_path` `a10fa4a2 856c9aad 3a595470`, image
+  cache `08762a0b-…`, `7924f7ec-…`, `fa5f60c9-…`: **3 of 3 distinct**,
+  cache empty afterwards.
+- The 8-sound burst was heard; BEGIN NEW GAME highlighted at the menu
+  (`PATCHES.md` 23 on hardware).
+- **Sticks at rest (hardware):** C-Stick exactly 0; Circle Pad settles at
+  (1433, 1638) of ±32767, about 5% off centre, inside the default 10% dead
+  zone. No drift: all 36 stick events fell in the 13 s the console was
+  being handled, none in the following 3 minutes.
+
+Audio probe, see `STAGE5-PREREQS.md` items 3 and 5.
+
+### Hardware checklist
+
+| Item | Result (hardware) |
+| --- | --- |
+| Every button | A, B, X, Y, L, R, ZL, ZR, START, SELECT, D-Pad x4, touch: all reported with the indices of the table above |
+| Circle Pad, C-Stick, ZL/ZR | walk, sidestep, turn, look, both triggers: pass |
+| Touch | pointer in the menus (PREFERENCES and PLAYER tapped) and drag-to-look in a game: pass |
+| Map | SELECT opens and closes it, D-Pad up/down zooms: "works perfectly" |
+| System keyboard, Preferences > Player > Name | hint "Name", initial "Bob User", typed name confirmed and kept (`keyboard: confirmed`); the applet counts as a 13.8 s suspension with audio paused |
+| START dialog | YES pre-focused, B = keep playing; open ~100 s with 0 late audio callbacks |
+| HOME in a game | paused, audio paused, any button resumes (175.8 s in the HOME menu) |
+| Lid | two 1.0 s sleeps: paused (grey), resumes on a button. **Decision:** stays paused after wake-up, as after HOME |
+| HOME > Close from a game | **0.34 s** to `exit` (felt like "about a second") |
+| Performance | playable but slow, as expected with the software renderer at the 640x480 logical size |
+
+### Findings
+
+1. **Log corruption (fixed, port only).** In the checklist run, 69 of
+   3 679 lines of `log.txt` contained binary bytes (ARM code) or were cut
+   mid-word (`CTRLAXI[3ds]  audio callback ...`). The `debug-audio` report
+   thread and the main thread both called `tee_write()` without a lock;
+   libctru's SD driver keeps one offset per descriptor, so two racing
+   `write()`s wrote at the same offset (one overwrote the other) and the
+   offset still advanced twice, leaving never-written gaps that showed
+   stale card data (recently written `.3dsx` files). Azahar cannot show it
+   (SD writes take microseconds there; about 40 ms on the card). Fix: a
+   `LightLock` around `tee_write()` (`a1_3ds_platform.cpp`). Azahar: test 06
+   with `--input-debug` and `debug-audio`, 78 input lines and 13 reports,
+   0 non-text bytes. Hardware: **still to be checked** in the SD log of a
+   run with the fix (the 3dslink stream was never affected: one socket,
+   no file offset).
+2. **HOME > Close during the main menu's demo took 14.4 s** (hardware):
+   after the close request the main thread pumped events three times
+   within 120 ms, then not at all for 14.3 s, then ended at once. From a
+   game: 0.34 s. Azahar does not reproduce it (12 ms; new test
+   `08-demo-close.txt`). The HOME menu stays responsive meanwhile, so it was
+   not noticed. **Open**; next step is timestamps inside `finish_game()` on
+   hardware.
+3. **Audio gaps at game transitions:** 3.9 s when a game was cancelled with
+   START > YES, and 2.8 s at a game start or end in the last run (no input
+   log there). The mixer did not run while the main thread switched
+   between game and menu. Short and during fades; recorded, not fixed.
+4. The unexplained stall seen once in Azahar (above, Observations) **did
+   not occur** on hardware: audio reports every 5 s were continuous through
+   all runs (about 45 minutes in total).
+
+### Decisions from the hardware numbers (`STAGE5-PREREQS.md`)
+
+| Item | Decision |
+| --- | --- |
+| 2, entropy | ps:ps works under the Homebrew Launcher; the fallback stays as a safety net |
+| 3, audio stack and core | keep SDL's 80 KiB (9 KiB used); core 1 is fine |
+| 4, linear heap | **8 MiB** (`PATCHES.md` 25): +24 MiB for malloc; Azahar New and Old 3DS modes pass test 06 |
+| 5, audio stalls / CPU | no change: 0 late callbacks outside suspensions; two 2.8-3.9 s gaps at game/menu transitions recorded |
+| 7, CFGU player name | deferred to the next console session (user) |
+| Lid wake-up | stays paused until a button, as after HOME (user) |
+
+### Definition of done
+
+**Not met yet:** Marathon 2 level 1 was not played to the exit (no time
+in this session). Every control it needs works on hardware. The C-Stick
+and touch-look sensitivity are therefore still the defaults (Controller
+Advanced: sensitivity 65536 = 1.0, dead zone 3276 = 10%; Mouse: 16384 =
+0.25).
+
+### Next console session
+
+1. ftpd: fetch `log.txt` (the run with the log lock) and check it has no
+   binary bytes: `LC_ALL=C grep -c '[^[:print:][:space:]]' log.txt` → 0.
+2. Boot with the 8 MiB linear heap (`PATCHES.md` 25): expect `heap 110428
+   KiB` and `linear heap 8192 KiB` in the boot memory lines.
+3. Play level 1 to the exit (the definition of done); tune the C-Stick
+   (Controls > CONTROLLER ADVANCED) and touch look (MOUSE ADVANCED) if
+   needed, and record the values from the prefs file.
+4. Optional: HOME > Close during the demo with timestamps in
+   `finish_game()` (finding 2); CFGU player name (prerequisite 7).
+
 ## Known limitations
 
 - The game and menu screens still use a 640x480 logical size letterboxed
@@ -356,5 +572,8 @@ stack/timing, linear heap decision), and the player name from CFGU (item 7).
 | `ports/3ds/CMakeLists.txt` | `input_3ds.cpp`, `--wrap` for 7 functions |
 | `Source_Files/…` (8 files) | `PATCHES.md` 16-22 |
 | `scripts/3ds/run-azahar.sh` | `--script`, `--input-debug`, `--reset-prefs` |
-| `scripts/3ds/tests/input/*.txt` | the 7 test scripts |
+| `scripts/3ds/tests/input/*.txt` | the 8 test scripts (`08-demo-close.txt` added in the hardware session) |
+| `scripts/3ds/sd-ftp.sh` (hardware session) | the console's SD card over ftpd with `/usr/bin/curl` |
+| `Source_Files/Misc/interface.cpp`, `sdl_dialogs.cpp` (hardware session) | default focus, `PATCHES.md` 23-24 |
+| `ports/3ds/source/a1_3ds_platform.cpp` (hardware session) | log tee lock; 8 MiB linear heap (`PATCHES.md` 25) |
 | `docs/3ds/STAGE5.md`, `docs/3ds/PATCHES.md`, `docs/3ds/img/stage5-*.png` | this document, patch log, screenshots |

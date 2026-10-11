@@ -1,8 +1,7 @@
-# Stage 5 test 6: a new game with the default controls. The main menu has
-# no highlighted item until the D-Pad picks one (A alone does nothing), so
-# this starts with DOWN (highlights BEGIN NEW GAME) and A.
+# Stage 5 test 6: a new game with the default controls. BEGIN NEW GAME is
+# highlighted when the main menu appears, so A alone starts a game.
 wait 1000
-tap DOWN
+screens g-menu
 tap A                  # BEGIN NEW GAME
 wait 3000
 screens g-chapter

@@ -14,7 +14,8 @@ and `STAGE3-PREREQS.md`, not repeated here.
 
 Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link);
 entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
-14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`).
+14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`),
+23-25 in stage 5's hardware session (default focus, linear heap).
 
 ## Summary
 
@@ -42,6 +43,9 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 | 20 | `Source_Files/Misc/preferences.cpp` | 3DS default bindings, always run, "Touch Screen Aiming" label | upstream controller defaults (**by design**) |
 | 21 | `Source_Files/Misc/sdl_widgets.cpp`, `sdl_widgets.h` | 3DS button names; text fields use the system keyboard | cursor positioning by click in text fields |
 | 22 | `Source_Files/Misc/interface.cpp` | HOME > Close skips quit screens, fades, scenario reload | none |
+| 23 | `Source_Files/Misc/interface.cpp` | main menu starts with BEGIN NEW GAME highlighted | none |
+| 24 | `Source_Files/Misc/sdl_dialogs.cpp` | dialogs focus their first widget when they set no default | none |
+| 25 | `ports/3ds/source/a1_3ds_platform.cpp`: `__ctru_linear_heap_size` (port file) | 8 MiB linear heap, +24 MiB for malloc | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -465,6 +469,66 @@ inside logging macros (4 and 20 lines, inspected). 0 diagnostics.
     `display_quit_screens()` skips the quit screens, and `finish_game()`
     skips its two `full_fade()`s and `load_environment_from_preferences()`
     (3.8 s in Azahar). HOME > Close from a game: 4.6 s → 0.2 s.
+
+## Default focus (23-24)
+
+Added 2026-10-11 (`STAGE5.md`, "Hardware session", decision 2). Upstream
+expects a mouse to find things and the keyboard as a shortcut: hover gives
+the highlight, so starting with nothing focused costs nothing on a desktop.
+On the 3DS the D-Pad is the only way to move focus, and A did nothing until
+it had moved once, at the main menu and in every dialog without a chosen
+default.
+
+23. **`Misc/interface.cpp`**: `display_main_menu()` sets
+    `highlighted_main_menu_item` to `iNewGame` instead of `-1`, so the
+    menu appears with BEGIN NEW GAME highlighted (also after a game or a
+    demo) and A starts a game. D-Pad down now goes to the next item (CONTINUE
+    SAVED GAME in Marathon 2).
+24. **`Misc/sdl_dialogs.cpp`**: `dialog::start()`, after `layout()`, calls
+    `activate_first_widget()` when the dialog chose no widget. Upstream has
+    the same call commented out at the top of `start()`. Dialogs that pick a
+    default keep it (18 `activate_widget()` call sites; e.g. YES in
+    `quit_without_saving()`, unchanged). A focused text field no longer
+    opens anything by itself on the 3DS (`SDL_StartTextInput` is wrapped,
+    entry 21), which is probably why upstream left the call out.
+
+**Non-3DS check** (2026-10-11, `ppcheck.sh`, `aleph-host-build` and
+`aleph-host-build-nonet`): `Misc/interface.cpp` and `Misc/sdl_dialogs.cpp`
+byte-identical, 0 diagnostics. 3DS build: 0 warnings.
+
+**Verification** (Azahar 2126.2, New 3DS mode): the 7 input scripts,
+updated for the new start focus (`STAGE5.md`, "Hardware session"), all
+pass. 01: after the D-Pad round trip BEGIN NEW GAME is highlighted again.
+02: Preferences opens with PLAYER focused (one D-Pad down + A opens
+GRAPHICS). 03: the Player dialog opens with Name focused and no keyboard;
+keyboards open only on the two taps. 04: A on the just-opened Controls
+dialog switches AIM → MOVE (the tab bar is focused). 05: two downs reach
+Look Up's controller binding; bind, clear, cancel, accept and reset as
+before. 06: A alone at the main menu starts a new game; HOME > Close exits
+0.19 s after the request. 07: unchanged (HOME/sleep, held touch ignored).
+
+## 25. Linear heap: `u32 __ctru_linear_heap_size = 8 MiB`
+
+Added 2026-10-11 (`STAGE5-PREREQS.md` item 4). libctru splits the
+application's memory into the malloc heap and the linear heap (memory the
+GPU and DSP can address); by default linear gets 32 MiB whenever more than
+56 MiB is available. The port uses 2 112 KiB of it (the double-buffered
+framebuffers and SDL's audio ring), and the hardware session measured the
+same at the menu, in gameplay, in the demo and at exit. Defining the weak
+symbol in `a1_3ds_platform.cpp` gives linear 8 MiB (~4x the use) and the
+rest to malloc:
+
+| | before | 8 MiB linear |
+| --- | ---: | ---: |
+| heap, New 3DS (hardware / Azahar) | 85 860 KiB | 110 428 KiB (Azahar) |
+| heap, Old 3DS mode (Azahar) | 57 212 KiB | 81 756 KiB |
+| malloc free after level 1 is loaded, Old 3DS mode | ~31 MiB | 55.5 MiB |
+| linear free after a level | 30 656 of 32 768 KiB | 6 080 of 8 192 KiB |
+
+`nm`: `__ctru_linear_heap_size` is `D` (was libctru's weak `V`). Too small
+a value would fail at boot (SDL video or audio init), not mid-game. A GPU
+renderer (citro3d: textures, command buffers) needs linear memory: revisit
+the size then. Hardware check of the new split: next console session.
 
 ## Not patched, by design
 

@@ -1342,8 +1342,13 @@ void display_main_menu(
 	game_state.last_ticks_on_idle= machine_tick_count();
 	game_state.user= _single_player;
 	game_state.flags= 0;
+#ifdef A1_PLATFORM_3DS
+	// No mouse hover on the 3DS: start on BEGIN NEW GAME so A works at once.
+	game_state.highlighted_main_menu_item= iNewGame;
+#else
 	game_state.highlighted_main_menu_item= -1;
-	
+#endif
+
 	Plugins::instance()->set_mode(Plugins::kMode_Menu);
 	change_screen_mode(_screentype_menu);
 	display_screen(MAIN_MENU_BASE);

@@ -39,8 +39,15 @@
 // Aleph One overflows during initialize_application(): SP walks below
 // 0x08000000 into unmapped memory and the next return jumps to 0. The used
 // size is measured and logged at each boot milestone (log_memory()).
+//
+// Linear heap (STAGE5-PREREQS.md item 4). libctru's default gives it 32 MiB
+// whenever more than 56 MiB is available; only the framebuffers (2100 KiB)
+// and SDL's audio ring (12 KiB) use it, also during gameplay on hardware.
+// 8 MiB keeps ~4x that and gives the other 24 MiB to malloc. A GPU renderer
+// (citro3d) would need more: revisit then.
 extern "C" {
 u32 __stacksize__ = 1024 * 1024;
+u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
 extern u32 __ctru_heap;   // heap base = bottom of the main stack
 }
 
@@ -131,9 +138,15 @@ int s_link_fd = -1;
 u32* s_soc_buffer = nullptr;
 const u32 kSocBufferSize = 0x100000;
 devoptab_t s_tee_devoptab;
+// Serialises tee_write(): threads other than the main one print too (the
+// debug-audio and debug-screens threads). Unlocked, two writes raced on the
+// SD file's offset: one overwrote the other's line and the offset still
+// advanced twice, leaving never-written gaps (stale card data) in log.txt.
+LightLock s_tee_lock;
 
 ssize_t tee_write(struct _reent*, void*, const char* ptr, size_t len)
 {
+	LightLock_Lock(&s_tee_lock);
 	if (s_log_fd >= 0)
 		write(s_log_fd, ptr, len);
 	if (s_link_fd >= 0)
@@ -152,11 +165,13 @@ ssize_t tee_write(struct _reent*, void*, const char* ptr, size_t len)
 			sent += n;
 		}
 	}
+	LightLock_Unlock(&s_tee_lock);
 	return len;
 }
 
 void install_tee()
 {
+	LightLock_Init(&s_tee_lock);
 	memset(&s_tee_devoptab, 0, sizeof(s_tee_devoptab));
 	s_tee_devoptab.name = "a1log";
 	s_tee_devoptab.write_r = tee_write;

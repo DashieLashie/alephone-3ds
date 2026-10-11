@@ -2291,6 +2291,14 @@ void dialog::start(bool play_sound)
 	// Layout dialog
 	layout();
 
+#ifdef A1_PLATFORM_3DS
+	// No mouse hover on the 3DS: without a focused widget A does nothing until
+	// the D-Pad moves. Keep a default the dialog chose (e.g. YES in
+	// quit_without_saving()).
+	if (!active_widget)
+		activate_first_widget();
+#endif
+
 	// Get frame images
 	frame_tl = get_theme_image(DIALOG_FRAME, DEFAULT_STATE, TL_IMAGE);
 	frame_tr = get_theme_image(DIALOG_FRAME, DEFAULT_STATE, TR_IMAGE);
