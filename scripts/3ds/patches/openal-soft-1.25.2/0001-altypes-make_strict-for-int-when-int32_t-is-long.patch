@@ -1,0 +1,41 @@
+OpenAL Soft 1.25.2: build fix for targets where int32_t is not `int`.
+
+Applied by scripts/3ds/build-openal.sh (patch -p1, from the source root).
+
+Problem: common/altypes.hpp maps the fixed-width types to its "strict"
+number wrappers via explicit specializations of al::make_strict<> for
+std::int8_t ... std::uint64_t, then defines
+
+    using sys_int  = al::make_strict_t<int>;
+    using sys_uint = al::make_strict_t<unsigned>;
+
+On arm-none-eabi (devkitARM, newlib) GCC defines __INT32_TYPE__ as
+`long int`, so std::int32_t is `long` and there is no specialization for
+plain `int`/`unsigned`. Every TU then fails with
+
+    common/altypes.hpp:114:7: error: no type named 'type' in 'struct al::make_strict<int>'
+    common/altypes.hpp:508:39: error: 'sys_uint' does not name a type
+
+Fix: add constrained partial specializations that map `int`/`unsigned` to
+i32/u32 only when they are distinct from int32_t/uint32_t and the same size.
+On targets where int32_t is int (all upstream-supported ones) the
+constraints are false and nothing changes. Not fixed upstream as of
+master on 2026-10-10.
+
+--- a/common/altypes.hpp
++++ b/common/altypes.hpp
+@@ -109,6 +109,14 @@
+ template<> struct make_strict<std::uint64_t> { using type = u64; };
+ template<> struct make_strict<float> { using type = f32; };
+ template<> struct make_strict<double> { using type = f64; };
++/* Targets where int32_t is not int (e.g. arm-none-eabi/newlib, where it is
++ * long): map the plain int types to the 32-bit strict types as well. */
++template<typename T> requires(std::same_as<T, int> && !std::same_as<int, std::int32_t>
++    && sizeof(int) == sizeof(std::int32_t))
++struct make_strict<T> { using type = i32; };
++template<typename T> requires(std::same_as<T, unsigned> && !std::same_as<unsigned, std::uint32_t>
++    && sizeof(unsigned) == sizeof(std::uint32_t))
++struct make_strict<T> { using type = u32; };
+ 
+ template<typename T>
+ using make_strict_t = typename make_strict<T>::type;

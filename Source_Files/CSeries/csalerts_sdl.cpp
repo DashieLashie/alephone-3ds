@@ -119,6 +119,10 @@ void system_launch_url_in_browser(const char *url)
 {
 #if defined(__WIN32__)
 	ShellExecuteW(NULL, L"open", utf8_to_wide(url).c_str(), NULL, NULL, SW_SHOWNORMAL);
+#elif defined(A1_PLATFORM_3DS)
+	// Stub: the 3DS cannot fork/exec a browser (newlib has no execlp).
+	// launch_url_in_browser() has already printed the URL to stderr.
+	(void) url;
 #else
 	pid_t pid = fork();
 	if (pid == 0)

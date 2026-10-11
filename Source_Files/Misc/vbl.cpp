@@ -573,7 +573,11 @@ bool setup_for_replay_from_file(
 		replay.extension_header.extension_type = recording_extension_type::none;
 		replay.extension_header.length = 0;
 
+#ifdef A1_PLATFORM_3DS // int32 is long on newlib ARM; GetLength takes int32&
+		int32 file_length;
+#else
 		int file_length;
+#endif
 		FilmFile.GetLength(file_length);
 
 		successful = file_length > replay.header.length ? handle_replay_extension() : use_map_file(replay.header.map_checksum);
@@ -1071,7 +1075,11 @@ uint8* pack_recording_extension_header(uint8* Stream, recording_extension_header
 	for (size_t k = 0; k < Count; k++, ObjPtr++)
 	{
 		ValueToStream(S, ObjPtr->length);
+#ifdef A1_PLATFORM_3DS // no int overload when int32 is long; same 4 bytes
+		ValueToStream(S, static_cast<int32>(ObjPtr->extension_type));
+#else
 		ValueToStream(S, static_cast<int>(ObjPtr->extension_type));
+#endif
 	}
 
 	assert(static_cast<size_t>(S - Stream) == (Count * SIZEOF_recording_extension_header));
@@ -1086,7 +1094,11 @@ uint8* unpack_recording_extension_header(uint8* Stream, recording_extension_head
 	for (size_t k = 0; k < Count; k++, ObjPtr++)
 	{
 		StreamToValue(S, ObjPtr->length);
+#ifdef A1_PLATFORM_3DS // no int& overload when int32 is long; same 4 bytes
+		int32 extension_type;
+#else
 		int extension_type;
+#endif
 		StreamToValue(S, extension_type);
 		ObjPtr->extension_type = static_cast<recording_extension_type>(extension_type);
 	}
