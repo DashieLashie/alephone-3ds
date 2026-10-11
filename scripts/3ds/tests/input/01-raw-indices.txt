@@ -1,0 +1,50 @@
+# Stage 5 test 1: which SDL joystick/controller indices the N3DS backend
+# reports. Run with --input-debug; read the "[3ds] input" lines.
+# At the main menu only the D-Pad and A act (A is left out here), and a touch
+# on an empty corner does nothing.
+wait 1000
+log --- buttons (each tapped once) ---
+tap B
+tap X
+tap Y
+tap L
+tap R
+tap ZL
+tap ZR
+tap SELECT
+tap START
+tap UP
+tap DOWN
+tap LEFT
+tap RIGHT
+log --- Circle Pad: right, left, up, down ---
+circle 160 0
+wait 150
+circle -160 0
+wait 150
+circle 0 160
+wait 150
+circle 0 -160
+wait 150
+circle 0 0
+wait 150
+log --- C-Stick: right, left, up, down ---
+cstick 160 0
+wait 150
+cstick -160 0
+wait 150
+cstick 0 160
+wait 150
+cstick 0 -160
+wait 150
+cstick 0 0
+wait 150
+log --- touch: corner (2,2) then (20,30) ---
+touch 2 2
+wait 100
+touch 20 30
+wait 100
+untouch
+wait 500
+screens raw
+wait 500

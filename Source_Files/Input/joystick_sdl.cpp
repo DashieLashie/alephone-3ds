@@ -115,6 +115,24 @@ static const std::vector<AxisInfo> axis_mappings = {
 	{ 9, _flags_pitch, false }
 };
 
+#ifdef A1_PLATFORM_3DS
+// New 3DS C-Stick response (docs/3ds/STAGE5.md). The stick is a small nub
+// with little travel, so upstream's linear response makes fine aiming hard
+// and full-speed turns slow. Deflection past the dead zone is rescaled so
+// that 90% counts as full (SDL maps the HID range +/-160 to +/-32767, and a
+// stick seldom reaches its last few units), then squared: half deflection
+// turns at a quarter speed. Holding full deflection on the yaw axis ramps
+// the speed up to 2x over half a second (kYawRampTicks ticks).
+static const int kYawRampTicks = 15;
+static int full_yaw_ticks = 0;
+
+static float stick_deflection_3ds(int value, int deadzone)
+{
+	float x = (value - deadzone) / static_cast<float>(32767 - deadzone) / 0.9f;
+	return x < 1.f ? x : 1.f;
+}
+#endif
+
 static int axis_mapped_to_action(int action, bool* negative) {
 	auto codeset = input_preferences->key_bindings[action];
 	for (auto it = codeset.begin(); it != codeset.end(); ++it) {
@@ -174,6 +192,9 @@ int process_joystick_axes(int flags) {
 		return flags;
 	
 	float angular_deltas[NUMBER_OF_ABSOLUTE_POSITION_VALUES] = { 0, 0 };
+#ifdef A1_PLATFORM_3DS
+	bool full_yaw = false;
+#endif
 	for (auto it = axis_mappings.begin(); it != axis_mappings.end(); ++it) {
 		const AxisInfo info = *it;
 		bool negative = false;
@@ -197,12 +218,26 @@ int process_joystick_axes(int flags) {
 		
 		int val = axis_values[axis] * (negative ? -1 : 1);
 		if (val > controller_deadzone) {
+#ifdef A1_PLATFORM_3DS
+			float x = stick_deflection_3ds(val, controller_deadzone);
+			float response = x * x;
+			if (info.abs_pos_index == _flags_yaw) {
+				full_yaw = full_yaw || x >= 0.95f;
+				response *= 1.f + full_yaw_ticks / static_cast<float>(kYawRampTicks);
+			}
+			float norm = response * (static_cast<float>(controller_sensitivity) / FIXED_ONE);
+#else
 			float norm = val/32767.f * (static_cast<float>(controller_sensitivity) / FIXED_ONE);
+#endif
 			constexpr float angle_per_norm = 768/63.f;
 			angular_deltas[info.abs_pos_index] += norm * (info.negative ? -1.0 : 1.0) * angle_per_norm;
 		}
 	}
 	
+#ifdef A1_PLATFORM_3DS
+	full_yaw_ticks = full_yaw ? (full_yaw_ticks < kYawRampTicks ? full_yaw_ticks + 1 : kYawRampTicks) : 0;
+#endif
+
 	// return this tick's action flags augmented with movement data
 	const fixed_angle dyaw = static_cast<fixed_angle>(angular_deltas[_flags_yaw] * FIXED_ONE);
 	const fixed_angle dpitch = static_cast<fixed_angle>(angular_deltas[_flags_pitch] * FIXED_ONE) * (input_preferences->controller_aim_inverted ? -1 : 1);

@@ -1,0 +1,17 @@
+# Stage 5 test 4 (exploratory): the Controls dialog's tabs.
+wait 1000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 1500
+touch 160 125          # CONTROLS
+wait 150
+untouch
+wait 2000
+screens controls
+tap DOWN
+wait 300
+screens controls-d1
+tap A
+wait 800
+screens controls-d1-a

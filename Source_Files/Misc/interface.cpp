@@ -2394,7 +2394,13 @@ static void display_quit_screens(
 {
 	struct screen_data *screen_data= get_screen_data(_display_quit_screens);
 
+#ifdef A1_PLATFORM_3DS
+	// HOME > Close: the system is waiting for the application to end and
+	// the HOME menu covers the screen; skip the quit screens and their fades.
+	if(screen_data->screen_count && !a1_3ds::exit_requested())
+#else
 	if(screen_data->screen_count)
+#endif
 	{
 		game_state.state= _display_quit_screens;
 		game_state.current_screen= 0;
@@ -2921,9 +2927,17 @@ static void finish_game(
 	/* Fade out! (Pray) */ // should be interface_color_table for valkyrie, but doesn't work.
 	Music::instance()->ClearLevelPlaylist();
 	Music::instance()->Fade(0, MACHINE_TICKS_PER_SECOND / 2, Music::FadeType::Sinusoidal);
+#ifdef A1_PLATFORM_3DS
+	// HOME > Close: nobody sees the fades (see display_quit_screens()).
+	if (!a1_3ds::exit_requested())
+	{
+#endif
 	full_fade(_cinematic_fade_out, interface_color_table);
 	paint_window_black();
 	full_fade(_end_cinematic_fade_out, interface_color_table);
+#ifdef A1_PLATFORM_3DS
+	}
+#endif
 
 	show_cursor();
 
@@ -2969,6 +2983,11 @@ static void finish_game(
 	set_local_player_index(NONE);
 	set_current_player_index(NONE);
 	
+#ifdef A1_PLATFORM_3DS
+	// HOME > Close: reloading the scenario files for the menu takes ~4 s
+	// (Azahar) while the system waits for the application to end.
+	if (!a1_3ds::exit_requested())
+#endif
 	load_environment_from_preferences();
 	if ((game_state.user == _replay && shell_options.replay_directory.empty()) || game_state.user == _demo)
 	{

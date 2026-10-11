@@ -1,0 +1,23 @@
+# Stage 5 test 2 (exploratory): open Preferences with a tap (bottom-screen
+# coordinates = top-screen coordinates minus the 40-pixel left border),
+# capture the dialog, step through it with the D-Pad, close it with B.
+wait 1000
+log --- tap PREFERENCES ---
+touch 242 158
+wait 150
+untouch
+wait 1500
+screens prefs
+tap DOWN
+tap DOWN
+wait 300
+screens prefs-down2
+tap A
+wait 1500
+screens prefs-sub
+tap B
+wait 1000
+screens prefs-back
+tap B
+wait 1000
+screens menu-back

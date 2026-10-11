@@ -13,7 +13,8 @@ identical, and both files pass `-fsyntax-only` with 0 diagnostics. Earlier stage
 and `STAGE3-PREREQS.md`, not repeated here.
 
 Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link);
-entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`).
+entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
+14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`).
 
 ## Summary
 
@@ -34,6 +35,13 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`).
 | 13 | `ports/3ds/source/a1_3ds_platform.cpp`: `__stacksize__` (new port file) | main stack size | none |
 | 14 | `Source_Files/Files/WadImageCache.cpp`, `Source_Files/CSeries/a1_filesystem.h` | entropy source | none |
 | 15 | `Source_Files/Misc/alephversion.h` | platform name | none |
+| 16 | `Source_Files/shell.cpp` | input init; HOME > Close quits without a dialog | none |
+| 17 | `Source_Files/main.cpp` | "main loop ended" milestone (log only) | none |
+| 18 | `Source_Files/Input/mouse_sdl.cpp` | touch screen mode follows mouse aiming | none |
+| 19 | `Source_Files/Input/joystick_sdl.cpp` | C-Stick response curve and turn acceleration | linear stick response (**by design**) |
+| 20 | `Source_Files/Misc/preferences.cpp` | 3DS default bindings, always run, "Touch Screen Aiming" label | upstream controller defaults (**by design**) |
+| 21 | `Source_Files/Misc/sdl_widgets.cpp`, `sdl_widgets.h` | 3DS button names; text fields use the system keyboard | cursor positioning by click in text fields |
+| 22 | `Source_Files/Misc/interface.cpp` | HOME > Close skips quit screens, fades, scenario reload | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -410,6 +418,53 @@ byte-identical; 0 diagnostics.
 line, `g++ -E -P` with `HEAD`'s and the working tree's files from the same
 path, `cmp`, `-fsyntax-only`, in `aleph-host-build` and
 `aleph-host-build-nonet`.
+
+## Stage 5 input hooks (16-22)
+
+Added 2026-10-11 (`STAGE5.md`). All guarded by `#ifdef A1_PLATFORM_3DS`;
+the 3DS side is `ports/3ds/source/input_3ds.cpp` behind
+`a1_3ds_platform.h`. Port-only, no engine edit: the touch screen event
+filter, the APT hook, the bottom-screen legend, and `-Wl,--wrap` on
+`SDL_StartTextInput` (SDL's N3DS driver opens a blocking keyboard as soon as
+a text field gains focus) and on six libctru HID functions (test scripts,
+keyboard debounce, stick priming).
+
+**Non-3DS check** (2026-10-11, `ppcheck.sh`, `aleph-host-build` and
+`aleph-host-build-nonet`): `shell.cpp`, `Misc/interface.cpp`,
+`Input/mouse_sdl.cpp`, `Input/joystick_sdl.cpp`, `Misc/sdl_widgets.cpp`
+and `Misc/sdl_dialogs.cpp` (for `sdl_widgets.h`) are byte-identical;
+`main.cpp` and `Misc/preferences.cpp` differ only in `__LINE__` values
+inside logging macros (4 and 20 lines, inspected). 0 diagnostics.
+
+16. **`shell.cpp`**: `a1_3ds::input_init()` after `initialize_joystick()`.
+    In `process_event()`, `SDL_QUIT` during a game when the system asked the
+    application to close (`a1_3ds::exit_requested()`) goes straight to
+    `set_game_state(_quit_game)` instead of the "cancel the game in
+    progress?" dialog.
+17. **`main.cpp`**: `boot_mark("main loop ended")` after `main_event_loop()`,
+    to time exits.
+18. **`Input/mouse_sdl.cpp`**: `enter_mouse()` / `exit_mouse()` (mouse
+    aiming on/off, i.e. gameplay input active or not) call
+    `a1_3ds::set_touch_look(true/false)`: drag-to-look in a game, a pointer
+    elsewhere.
+19. **`Input/joystick_sdl.cpp`**: in `process_joystick_axes()`, the aim
+    axes' response is `x²` of the deflection past the dead zone (rescaled so
+    90% is full) instead of linear, and holding full yaw deflection ramps the
+    speed to 2x over 15 ticks.
+20. **`Misc/preferences.cpp`**: a 3DS `default_key_bindings` table (one
+    controller code per action; keyboard and mouse codes as upstream),
+    `_inputmod_interchange_run_walk` added to the default modifiers, and the
+    "Mouse Aiming" toggle labelled "Touch Screen Aiming".
+21. **`Misc/sdl_widgets.cpp`**: the controller key names are the 3DS's
+    ("ZR", "C-Stick Up", "SELECT", ...). `w_text_entry::click()` opens the
+    system keyboard (`a1_3ds::text_input()`) with the field's text and
+    label, and filters the result like typed text; it no longer positions a
+    cursor. **`sdl_widgets.h`**: `w_static_text::get_text()` (for the
+    label).
+22. **`Misc/interface.cpp`**: when the system asked to close,
+    `display_quit_screens()` skips the quit screens, and `finish_game()`
+    skips its two `full_fade()`s and `load_environment_from_preferences()`
+    (3.8 s in Azahar). HOME > Close from a game: 4.6 s → 0.2 s.
 
 ## Not patched, by design
 

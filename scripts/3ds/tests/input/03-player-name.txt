@@ -1,0 +1,36 @@
+# Stage 5 test 3: text entry. Preferences > Player, tap the Name field: the
+# keyboard opens with "Bob User" (scripted answer "Durandal 3DS"). A second
+# tap is cancelled (no change). ACCEPT, reopen Player: the name persisted.
+wait 1000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 1500
+touch 160 76           # PLAYER
+wait 150
+untouch
+wait 1500
+swkbd Durandal 3DS
+touch 178 114          # the Name field
+wait 150
+untouch
+wait 1000
+screens player-named
+swkbd-cancel
+touch 178 114
+wait 150
+untouch
+wait 800
+touch 135 175          # ACCEPT
+wait 150
+untouch
+wait 1500
+touch 160 76           # PLAYER again
+wait 150
+untouch
+wait 1500
+screens player-reopened
+tap B
+wait 800
+tap B
+wait 800

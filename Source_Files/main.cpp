@@ -67,6 +67,9 @@ int main(int argc, char** argv)
 
 		// Run the main loop
 		main_event_loop();
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::boot_mark("main loop ended");
+#endif
 
 	}
 	catch (std::exception& e) {

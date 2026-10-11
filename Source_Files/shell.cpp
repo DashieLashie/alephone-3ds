@@ -115,7 +115,7 @@
 #include "shell_options.h"
 
 #ifdef A1_PLATFORM_3DS
-#include "a1_3ds_platform.h"	// boot_mark(): timed boot log
+#include "a1_3ds_platform.h"	// boot_mark(): timed boot log; input_init()
 #endif
 
 #ifdef HAVE_STEAM
@@ -285,6 +285,9 @@ void initialize_application(void)
 
 	log_dir = get_data_path(kPathLogs);
 	initialize_joystick();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::input_init();	// touch screen, HOME menu/sleep, keyboard
+#endif
 
 	const string default_data_env = a1_getenv("ALEPHONE_DEFAULT_DATA");
 #ifndef SCENARIO_IS_BUNDLED
@@ -1464,6 +1467,13 @@ static void process_event(const SDL_Event &event)
 		break;
 		
 	case SDL_QUIT:
+#ifdef A1_PLATFORM_3DS
+		// HOME > Close: the system waits for the application to end, so
+		// no "are you sure" dialog (it could not be answered anyway).
+		if (get_game_state() == _game_in_progress && a1_3ds::exit_requested())
+			set_game_state(_quit_game);
+		else
+#endif
 		if (get_game_state() == _game_in_progress)
 			do_menu_item_command(mGame, iQuitGame, false);
 		else

@@ -1,0 +1,24 @@
+# Stage 5 test 7: HOME menu and sleep outside gameplay, and a dialog being
+# redrawn afterwards. Run without --input-debug to capture the legend.
+wait 1000
+screens legend
+log --- HOME at the main menu ---
+home 2000
+wait 500
+log --- sleep at the main menu ---
+sleep 2000
+wait 500
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 1500
+log --- HOME with a dialog open; a touch held on return is ignored ---
+touch 160 76           # held over PLAYER while "in" the HOME menu...
+home 2000
+wait 300
+untouch                # ...and lifted afterwards: must not open PLAYER
+wait 1000
+screens dialog-after-home
+tap B
+wait 1000
+screens menu-after-dialog

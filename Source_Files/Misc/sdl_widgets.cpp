@@ -69,6 +69,9 @@
 
 #include <functional>
 #include <sstream>
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"	// text_input(): the system keyboard
+#endif
 
 /*
  *  Widget base class
@@ -1402,6 +1405,36 @@ void w_text_entry::click(int x, int y)
 	bool was_active = active;
 	get_owning_dialog()->activate_widget(this);
 	
+#ifdef A1_PLATFORM_3DS
+	// No keyboard: A or a tap on the field opens the system keyboard, with
+	// the field's text to edit. Its result goes through the same filters as
+	// typed text (Mac Roman, printable, digits for number fields, length).
+	(void) was_active;
+	if (!enabled)
+		return;
+	a1_3ds::TextKind kind = a1_3ds::TextKind::Normal;
+	if (dynamic_cast<w_password_entry*>(this))
+		kind = a1_3ds::TextKind::Password;
+	else if (dynamic_cast<w_number_entry*>(this))
+		kind = a1_3ds::TextKind::Number;
+	std::string text = mac_roman_to_utf8(buf);
+	const std::string hint = associated_label && associated_label->get_text() ? associated_label->get_text() : "";
+	if (a1_3ds::text_input(hint, text, max_chars - 1, kind))
+	{
+		std::string accepted;
+		for (char c : utf8_to_mac_roman(text))
+		{
+			uint16 uc = static_cast<unsigned char>(c);
+			bool ok = (kind == a1_3ds::TextKind::Number) ? (uc >= '0' && uc <= '9')
+			                                              : (uc >= ' ' && (uc < 0x80 || enable_mac_roman));
+			if (ok && accepted.size() + 1 < max_chars)
+				accepted += c;
+		}
+		set_text(accepted.c_str());
+		play_dialog_sound(DIALOG_TYPE_SOUND);
+	}
+	return;
+#endif
 	// Don't reposition cursor if:
 	// - we were inactive before this click
 	// - our text field is empty
@@ -1540,6 +1573,20 @@ static const char* get_joystick_button_key_name(int offset)
 				  SDL_CONTROLLER_AXIS_MAX <= 12,
 				  "SDL changed the number of buttons/axes again!");
 
+#ifdef A1_PLATFORM_3DS
+	// The console's own names (SDL's N3DS mapping: Circle Pad = left stick,
+	// C-Stick = right stick, ZL/ZR = triggers, SELECT = Back).
+	static const char* buttons[] = {
+		"A", "B", "X", "Y", "SELECT", "HOME", "START",
+		"(L3)", "(R3)", "L", "R", "D-Pad Up", "D-Pad Down", "D-Pad Left", "D-Pad Right",
+		"Misc", "Paddle 1", "Paddle 2", "Paddle 3", "Paddle 4", "TP Button",
+	};
+
+	static const char* axes[] = {
+		"Circle Right", "Circle Down", "C-Stick Right", "C-Stick Down", "ZL", "ZR",
+		"Circle Left", "Circle Up", "C-Stick Left", "C-Stick Up", "ZL Neg", "ZR Neg"
+	};
+#else
 	static const char* buttons[] = {
 		"A", "B", "X", "Y", "Back", "Guide", "Start",
 		"LS", "RS", "LB", "RB", "Up", "Down", "Left", "Right",
@@ -1551,6 +1598,7 @@ static const char* get_joystick_button_key_name(int offset)
 		"LS Right", "LS Down", "RS Right", "RS Down", "LT", "RT",
 		"LS Left", "LS Up", "RS Left", "RS Up", "LT Neg", "RT Neg"
 	};
+#endif
 
 	if (offset < SDL_CONTROLLER_BUTTON_MAX)
 	{

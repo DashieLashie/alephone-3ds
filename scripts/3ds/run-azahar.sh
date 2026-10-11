@@ -16,7 +16,15 @@
 #   --timeout N    stop the emulator after N seconds (default: run until closed)
 #   --screens      have the game save its screens (sdmc:/3ds/alephone/debug-screens flag)
 #                  at the error screen and 3 s / 8 s after the main menu appears; they are
-#                  copied as PNGs to build-3ds/azahar-screens/ afterwards
+#                  copied as PNGs to build-3ds/azahar-screens/ afterwards (as are the
+#                  captures of a script's "screens" command, with or without --screens)
+#   --input-debug  log every input event (sdmc:/3ds/alephone/debug-input flag); the bottom
+#                  screen shows them instead of the controls legend
+#   --script FILE  run FILE as sdmc:/3ds/alephone/debug-input-script once the main menu is
+#                  up (scripted buttons, sticks, touches, HOME/sleep; see
+#                  ports/3ds/source/input_3ds.cpp and scripts/3ds/tests/input/)
+#   --reset-prefs  move the game's preferences aside first (to <file>.bak), so it starts
+#                  with the defaults
 #   -h, --help     this text
 #
 # Environment:
@@ -35,6 +43,9 @@ copy_data=1
 fresh=0
 timeout=0
 screens=0
+input_debug=0
+script=
+reset_prefs=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -42,6 +53,9 @@ while [ $# -gt 0 ]; do
 		--fresh) fresh=1 ;;
 		--timeout) shift; timeout=${1:?--timeout needs a number of seconds} ;;
 		--screens) screens=1 ;;
+		--input-debug) input_debug=1 ;;
+		--script) shift; script=${1:?--script needs a file} ;;
+		--reset-prefs) reset_prefs=1 ;;
 		-h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
 		-*) echo "run-azahar: unknown option $1" >&2; exit 2 ;;
 		*) threedsx=$1 ;;
@@ -113,6 +127,24 @@ if [ "$screens" = 1 ]; then
 else
 	rm -f "$userdir/debug-screens"
 fi
+if [ "$input_debug" = 1 ]; then
+	: > "$userdir/debug-input"
+else
+	rm -f "$userdir/debug-input"
+fi
+if [ -n "$script" ]; then
+	[ -f "$script" ] || die "script $script not found"
+	cp "$script" "$userdir/debug-input-script"
+else
+	rm -f "$userdir/debug-input-script"
+fi
+if [ "$reset_prefs" = 1 ]; then
+	for prefs in "$userdir"/*Preferences; do
+		[ -f "$prefs" ] || continue
+		mv "$prefs" "$prefs.bak"
+		echo "run-azahar: moved $(basename "$prefs") to $(basename "$prefs").bak"
+	done
+fi
 
 if [ "$copy_data" = 1 ]; then
 	src=${SCENARIO_SRC:-"$repo/data/Scenarios/Marathon 2"}
@@ -152,7 +184,7 @@ done
 status=0
 
 echo
-if [ "$screens" = 1 ]; then
+if [ "$screens" = 1 ] || [ -n "$script" ]; then
 	out="$repo/build-3ds/azahar-screens"
 	rm -rf "$out"
 	mkdir -p "$out"

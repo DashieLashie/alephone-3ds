@@ -1,0 +1,58 @@
+# Stage 5 test 6: a new game with the default controls. The main menu has
+# no highlighted item until the D-Pad picks one (A alone does nothing), so
+# this starts with DOWN (highlights BEGIN NEW GAME) and A.
+wait 1000
+tap DOWN
+tap A                  # BEGIN NEW GAME
+wait 3000
+screens g-chapter
+tap A                  # past the chapter screen
+wait 10000
+screens g-start
+log --- Circle Pad up 2 s (walk forward) ---
+circle 0 150
+wait 2000
+circle 0 0
+wait 300
+screens g-forward
+log --- C-Stick right 1 s (turn) ---
+cstick 150 0
+wait 1000
+cstick 0 0
+wait 300
+screens g-turned
+log --- ZR 1 s (fire) ---
+press ZR
+wait 1000
+release ZR
+wait 300
+screens g-fired
+log --- touch drag left 200 px over 600 ms (touch look) ---
+drag 260 120 60 120 600
+untouch
+wait 300
+screens g-touchlook
+log --- SELECT (map) ---
+tap SELECT
+wait 500
+screens g-map
+tap SELECT
+wait 300
+log --- HOME for 3 s ---
+home 3000
+wait 1000
+screens g-after-home
+log --- B resumes (any button) ---
+tap B
+wait 1000
+screens g-resumed
+log --- START (quit menu) then B (keep playing) ---
+tap START
+wait 1000
+screens g-start-menu
+tap B
+wait 1000
+screens g-after-start-menu
+log --- HOME > Close ---
+quit
+wait 5000

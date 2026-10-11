@@ -185,6 +185,9 @@ public:
 
         // ZZZ addition: change text after creation
         void set_text(const char* t);
+#ifdef A1_PLATFORM_3DS
+	const char* get_text() const { return text; }	// keyboard hint (w_text_entry::click)
+#endif
         
 	bool is_selectable(void) const {return false;}
 

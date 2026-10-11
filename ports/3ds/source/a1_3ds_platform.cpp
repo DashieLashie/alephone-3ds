@@ -58,6 +58,8 @@ void entropy_selftest();
 void audio_load_selftest();
 // source/audio_probe.cpp
 void audio_probe_log();
+// source/input_3ds.cpp
+void input_script_start();
 
 namespace {
 
@@ -556,6 +558,18 @@ void print_wrapped(const std::string& text, size_t width)
 
 } // namespace
 
+// Used by input_3ds.cpp (script timing and the "screens" command).
+double elapsed_ms()
+{
+	return ms_since_boot();
+}
+
+void save_screens(const std::string& tag)
+{
+	dump_screen(0, ("screen-" + tag + "-top.bmp").c_str());
+	dump_screen(1, ("screen-" + tag + "-bottom.bmp").c_str());
+}
+
 // --- entropy -------------------------------------------------------------------
 
 namespace {
@@ -842,6 +856,7 @@ void main_menu_displayed()
 		audio_load_selftest();
 		threadCreate(audio_report_thread, nullptr, 16 * 1024, 0x3f, -2, true);
 	}
+	input_script_start();
 }
 
 // --- error screen ------------------------------------------------------------

@@ -35,6 +35,9 @@
 #include "shell.h"
 #include "preferences.h"
 #include "screen.h"
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"	// set_touch_look(): the touch screen is the mouse
+#endif
 
 // Global variables
 static bool mouse_active = false;
@@ -60,6 +63,9 @@ void enter_mouse(short type)
 		snapshot_delta_scrollwheel = 0;
 		snapshot_delta_x = snapshot_delta_y = 0;
 		button_mask = 0;	// Disable all buttons (so a shot won't be fired if we enter the game with a mouse button down from clicking a GUI widget)
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::set_touch_look(true);
+#endif
 	}
 }
 
@@ -73,6 +79,9 @@ void exit_mouse(short type)
 	if (type != _keyboard_or_game_pad) {
 		SDL_SetRelativeMouseMode(SDL_FALSE);
 		mouse_active = false;
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::set_touch_look(false);
+#endif
 	}
 }
 

@@ -296,6 +296,15 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/selftest.cpp
 # items 3 and 5). The engine's SDL_OpenAudio() call goes through it.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/audio_probe.cpp")
 target_link_options(alephone PRIVATE "LINKER:--wrap=SDL_OpenAudio")
+# Input: touch screen, HOME menu/sleep, system keyboard, debug-input log and
+# the debug-input-script injector (docs/3ds/STAGE5.md). The HID functions SDL's
+# N3DS joystick/touch code calls are wrapped so a script can feed them, and
+# SDL_StartTextInput so a focused text field does not open the keyboard.
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/input_3ds.cpp")
+foreach(_a1_wrapped hidScanInput hidKeysDown hidKeysUp hidCircleRead irrstCstickRead
+                    hidTouchRead SDL_StartTextInput)
+  target_link_options(alephone PRIVATE "LINKER:--wrap=${_a1_wrapped}")
+endforeach()
 set_source_files_properties("${_a1_platform_src}" PROPERTIES COMPILE_DEFINITIONS
   "A1_3DS_USER_DIR=\"${A1_3DS_USER_DIR}\";A1_3DS_DEFAULT_SCENARIO=\"${A1_3DS_DEFAULT_SCENARIO}\"")
 foreach(_a1_v A1_3DS_USER_DIR A1_3DS_DEFAULT_SCENARIO)

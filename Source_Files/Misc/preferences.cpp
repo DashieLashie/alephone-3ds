@@ -1825,6 +1825,47 @@ static const char *action_name[NUM_KEYS] = {
 	"Action", "Auto Map", "Aux Trigger"
 };
 
+#ifdef A1_PLATFORM_3DS
+// Nintendo 3DS defaults (docs/3ds/STAGE5.md). SDL reports the console's
+// controls as a game controller: Circle Pad = left stick, C-Stick = right
+// stick, ZL/ZR = triggers, L/R = shoulders, SELECT = Back. The Controls
+// dialog shows one controller button per action and keeps only that one
+// when it is accepted, so no action gets two controller buttons here.
+// The keyboard and mouse entries are upstream's (harmless without them).
+#define A1_3DS_PAD_BUTTON(b) static_cast<SDL_Scancode>(AO_SCANCODE_BASE_JOYSTICK_BUTTON + SDL_CONTROLLER_BUTTON_##b)
+#define A1_3DS_PAD_AXIS_POS(a) static_cast<SDL_Scancode>(AO_SCANCODE_BASE_JOYSTICK_AXIS_POSITIVE + SDL_CONTROLLER_AXIS_##a)
+#define A1_3DS_PAD_AXIS_NEG(a) static_cast<SDL_Scancode>(AO_SCANCODE_BASE_JOYSTICK_AXIS_NEGATIVE + SDL_CONTROLLER_AXIS_##a)
+static key_binding_map default_key_bindings = {
+	{ 0, { SDL_SCANCODE_W, A1_3DS_PAD_AXIS_NEG(LEFTY) } },		// Move Forward: Circle Pad up
+	{ 1, { SDL_SCANCODE_S, A1_3DS_PAD_AXIS_POS(LEFTY) } },		// Move Backward: Circle Pad down
+	{ 2, { SDL_SCANCODE_LEFT, A1_3DS_PAD_AXIS_NEG(RIGHTX) } },	// Turn Left: C-Stick left
+	{ 3, { SDL_SCANCODE_RIGHT, A1_3DS_PAD_AXIS_POS(RIGHTX) } },	// Turn Right: C-Stick right
+	{ 4, { SDL_SCANCODE_A, A1_3DS_PAD_AXIS_NEG(LEFTX) } },		// Sidestep Left: Circle Pad left
+	{ 5, { SDL_SCANCODE_D, A1_3DS_PAD_AXIS_POS(LEFTX) } },		// Sidestep Right: Circle Pad right
+	{ 6, { SDL_SCANCODE_Q } },					// Glance Left
+	{ 7, { SDL_SCANCODE_E } },					// Glance Right
+	{ 8, { SDL_SCANCODE_UP, A1_3DS_PAD_AXIS_NEG(RIGHTY) } },	// Look Up: C-Stick up
+	{ 9, { SDL_SCANCODE_DOWN, A1_3DS_PAD_AXIS_POS(RIGHTY) } },	// Look Down: C-Stick down
+	{ 10, { SDL_SCANCODE_V, A1_3DS_PAD_BUTTON(X) } },		// Recenter View: X
+	{ 11, { SDL_SCANCODE_F, static_cast<SDL_Scancode>(AO_SCANCODE_MOUSESCROLL_UP),
+		A1_3DS_PAD_BUTTON(DPAD_LEFT) } },			// Previous Weapon: D-Pad left
+	{ 12, { SDL_SCANCODE_R, static_cast<SDL_Scancode>(AO_SCANCODE_MOUSESCROLL_DOWN),
+		A1_3DS_PAD_BUTTON(DPAD_RIGHT) } },			// Next Weapon: D-Pad right
+	{ 13, { SDL_SCANCODE_SPACE, static_cast<SDL_Scancode>(AO_SCANCODE_BASE_MOUSE_BUTTON + SDL_BUTTON_LEFT - 1),
+		A1_3DS_PAD_AXIS_POS(TRIGGERRIGHT) } },			// Trigger: ZR
+	{ 14, { SDL_SCANCODE_LSHIFT, static_cast<SDL_Scancode>(AO_SCANCODE_BASE_MOUSE_BUTTON + SDL_BUTTON_RIGHT - 1),
+		A1_3DS_PAD_AXIS_POS(TRIGGERLEFT) } },			// 2nd Trigger: ZL
+	{ 15, { SDL_SCANCODE_LALT } },					// Turn -> Sidestep
+	{ 16, { SDL_SCANCODE_LCTRL, A1_3DS_PAD_BUTTON(LEFTSHOULDER) } },	// Run/Swim: L (walk: always run is on)
+	{ 17, { SDL_SCANCODE_LGUI } },					// Move -> Look
+	{ 18, { SDL_SCANCODE_TAB, A1_3DS_PAD_BUTTON(RIGHTSHOULDER) } },	// Action: R
+	{ 19, { SDL_SCANCODE_M, A1_3DS_PAD_BUTTON(BACK) } },		// Auto Map: SELECT
+	{ 20, { SDL_SCANCODE_GRAVE, A1_3DS_PAD_BUTTON(Y) } },		// Aux Trigger: Y
+};
+#undef A1_3DS_PAD_BUTTON
+#undef A1_3DS_PAD_AXIS_POS
+#undef A1_3DS_PAD_AXIS_NEG
+#else
 static key_binding_map default_key_bindings = {
 	{ 0, { SDL_SCANCODE_W,
 		   static_cast<SDL_Scancode>(AO_SCANCODE_BASE_JOYSTICK_AXIS_NEGATIVE + SDL_CONTROLLER_AXIS_LEFTY)
@@ -1892,6 +1933,7 @@ static key_binding_map default_key_bindings = {
 		static_cast<SDL_Scancode>(AO_SCANCODE_BASE_JOYSTICK_BUTTON + SDL_CONTROLLER_BUTTON_Y)
 	} },
 };
+#endif
 
 static const char *shell_action_name[NUMBER_OF_SHELL_KEYS] = {
 	"Inventory Left", "Inventory Right", "Switch Player View", "Volume Up", "Volume Down", "Zoom Map In", "Zoom Map Out", "Toggle FPS", "Chat/Console", "Network Stats"
@@ -2792,7 +2834,13 @@ static void controls_dialog(void *arg)
 	mouse_options->col_flags(1, placeable::kAlignLeft);
 
 	w_toggle *enable_mouse_w = new w_toggle(input_preferences->input_device == _mouse_yaw_pitch);
+#ifdef A1_PLATFORM_3DS
+	// No mouse: the touch screen drives mouse aiming (a1_3ds::set_touch_look),
+	// and the mouse feel and sensitivity settings apply to it.
+	mouse_options->dual_add(enable_mouse_w->label("Touch Screen Aiming"), d);
+#else
 	mouse_options->dual_add(enable_mouse_w->label("Mouse Aiming"), d);
+#endif
 	mouse_options->dual_add(enable_mouse_w, d);
 	
 	mouse_feel_w = new w_select_popup();
@@ -4268,6 +4316,11 @@ static void default_input_preferences(input_preferences_data *preferences)
 	preferences->hotkey_bindings = default_hotkey_bindings;
 	
 	preferences->modifiers = _inputmod_use_button_sounds;
+#ifdef A1_PLATFORM_3DS
+	// Always run: the Run/Swim button (L) walks. Holding a button to run
+	// while both thumbs are on the sticks is not practical.
+	preferences->modifiers |= _inputmod_interchange_run_walk;
+#endif
 
 	preferences->sens_horizontal = FIXED_ONE / 4;
 	preferences->sens_vertical = FIXED_ONE / 4;

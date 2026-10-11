@@ -84,6 +84,31 @@ struct Urng
 	}
 };
 
+// --- Input (docs/3ds/STAGE5.md; implementation: ports/3ds/source/input_3ds.cpp) ---
+
+// Call once after SDL_Init() and initialize_joystick(). Logs the controller
+// SDL reports, installs the touch screen translation (an SDL event filter),
+// the HOME menu / sleep handling (an APT hook) and the bottom screen legend.
+void input_init();
+
+// Touch screen mode. Pointer (the default): the bottom screen maps onto the
+// top screen's menu area and a tap is a left click. Look: finger motion
+// becomes relative mouse motion (mouse look) and taps do nothing. The engine
+// selects Look while gameplay input is active and mouse aiming is on
+// (Input/mouse_sdl.cpp), Pointer otherwise.
+void set_touch_look(bool look);
+
+// True once the system asked the application to close (HOME menu > Close,
+// or the power button). SDL then sends SDL_QUIT on every event poll.
+bool exit_requested();
+
+// The system keyboard (swkbd). `text` is UTF-8 in both directions: the
+// initial text on entry, the result on return. Returns false (and leaves
+// `text` alone) if the user cancelled. `max_chars` is the most characters
+// the field accepts.
+enum class TextKind { Normal, Number, Password };
+bool text_input(const std::string& hint, std::string& text, size_t max_chars, TextKind kind);
+
 } // namespace a1_3ds
 
 #endif
