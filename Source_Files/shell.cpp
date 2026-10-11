@@ -114,6 +114,10 @@
 
 #include "shell_options.h"
 
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"	// boot_mark(): timed boot log
+#endif
+
 #ifdef HAVE_STEAM
 #include "steamshim_child.h"
 #endif
@@ -247,6 +251,9 @@ void initialize_application(void)
 			fprintf(stderr, "Couldn't initialize SDL\n");
 		exit(1);
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("SDL_Init done");
+#endif
 #if defined(HAVE_SDL_IMAGE)
 	IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG);
 #endif
@@ -370,6 +377,9 @@ void initialize_application(void)
 
 	// Find data directories, construct search path
 	InitDefaultStringSets();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("scenario chooser done");
+#endif
 	
 #ifndef SCENARIO_IS_BUNDLED
 	default_data_dir = get_data_path(kPathDefaultData);
@@ -456,6 +466,10 @@ void initialize_application(void)
 	// Parse MML files
 	LoadBaseMMLScripts(true);
 
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("base MML loaded");
+#endif
+
 	// Check for presence of strings
 	if (!TS_IsPresent(strERRORS) || !TS_IsPresent(strFILENAMES)) {
 		throw std::runtime_error("Can't find required text strings (missing MML?)");
@@ -508,6 +522,9 @@ void initialize_application(void)
 
 	initialize_fonts(true);
 	Plugins::instance()->enumerate();			
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("fonts and plugins");
+#endif
 	
 	preferences_dir.MakeDirectory();
 	if (!get_data_path(kPathLegacyPreferences).empty())
@@ -515,6 +532,9 @@ void initialize_application(void)
 
 	// Load preferences
 	initialize_preferences();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("preferences loaded");
+#endif
 
 	local_data_dir.MakeDirectory();
 	saved_games_dir.MakeDirectory();
@@ -567,10 +587,16 @@ void initialize_application(void)
 	mytm_initialize();
 //	initialize_fonts();
 	SoundManager::instance()->Initialize(*sound_preferences);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("sound initialized");
+#endif
 	initialize_marathon_music_handler();
 	initialize_keyboard_controller();
 	initialize_gamma();
 	alephone::Screen::instance()->Initialize(&graphics_preferences->screen_mode);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("screen initialized");
+#endif
 	initialize_marathon();
 	initialize_screen_drawing();
 	initialize_dialogs();

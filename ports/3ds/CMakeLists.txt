@@ -16,7 +16,16 @@
 # not modified or rearranged by this file.
 #
 # Options:
-#   A1_3DS_PKGDATADIR  PKGDATADIR written to confpaths.h (provisional)
+#   A1_3DS_USER_DIR          prefs/saves/logs folder (default sdmc:/3ds/alephone)
+#   A1_3DS_DEFAULT_SCENARIO  scenario folder inside it unless scenario.txt says
+#                            otherwise (default Marathon2)
+#   NETLOAD_IP               3DS address for the run-3dslink target (empty:
+#                            3dslink finds the console by broadcast)
+#
+# Extra targets:
+#   run-3dslink   send alephone.3dsx to the Homebrew Launcher's NetLoader (Y)
+#                 and print the game's stdout/stderr (3dslink -s)
+#   run-azahar    scripts/3ds/run-azahar.sh: stage the SD card and start Azahar
 cmake_minimum_required(VERSION 3.24)   # $<LINK_GROUP:RESCAN,...>
 
 # --- Toolchain (must be settled before project()) -------------------------
@@ -54,8 +63,11 @@ set(A1_PORTLIBS "${DEVKITPRO}/portlibs/3ds")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Options ---------------------------------------------------------------
-set(A1_3DS_PKGDATADIR "sdmc:/3ds/alephone" CACHE STRING
-    "PKGDATADIR for confpaths.h (default data path). Provisional: 3DS runtime data paths are a later stage (docs/3ds/AUDIT.md f)")
+set(A1_3DS_USER_DIR "sdmc:/3ds/alephone" CACHE STRING
+    "Folder for preferences, saves, logs and scenario.txt (docs/3ds/STAGE4.md)")
+set(A1_3DS_DEFAULT_SCENARIO "Marathon2" CACHE STRING
+    "Scenario folder inside A1_3DS_USER_DIR, used unless scenario.txt names another")
+set(NETLOAD_IP "" CACHE STRING "The IP address of the 3DS for run-3dslink (empty: broadcast)")
 set(A1_3DS_SMDH_TITLE "Aleph One" CACHE STRING "SMDH title")
 set(A1_3DS_SMDH_DESCRIPTION "Marathon engine" CACHE STRING "SMDH short description")
 set(A1_3DS_SMDH_AUTHOR "Aleph One developers / 3DS port by DashieLashie" CACHE STRING "SMDH author")
@@ -120,9 +132,11 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${A1_CONFIG_H}" 
 # confpaths.h: automake generates it in the CSeries build directory as
 #   #define PKGDATADIR "$(pkgdatadir)"
 # (Source_Files/CSeries/Makefile.am); CSeries/cspaths_sdl.cpp includes it.
+# The 3DS branch of cspaths_sdl.cpp does not use it: what pkgdatadir holds
+# (MML, Plugins/Default_Theme) is the romfs, found with SDL_GetBasePath().
 set(A1_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(CONFIGURE OUTPUT "${A1_GENERATED_DIR}/confpaths.h"
-     CONTENT "#define PKGDATADIR \"@A1_3DS_PKGDATADIR@\"\n" @ONLY)
+     CONTENT "#define PKGDATADIR \"romfs:/\"\n" @ONLY)
 
 # --- Dependencies --------------------------------------------------------------
 # pkg-config is devkitPro's arm-none-eabi-pkg-config (found by the toolchain);
@@ -232,11 +246,14 @@ foreach(_u IN LISTS A1AM_UNITS)
   #   then CPPFLAGS (dependency include directories, here as -isystem).
   # "." (the build dir, for confpaths.h) -> generated/, top_builddir
   # (config.h) -> ports/3ds.
+  # ports/3ds/include (a1_3ds_platform.h, for the #ifdef A1_PLATFORM_3DS
+  # hooks) goes last: it is not part of automake's line.
   target_include_directories(${_t} PRIVATE
     "${A1_GENERATED_DIR}"
     "${A1AM_${_u}_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    ${A1AM_${_u}_INCLUDES})
+    ${A1AM_${_u}_INCLUDES}
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_compile_definitions(${_t} PRIVATE ${A1AM_${_u}_DEFINES})
   if(A1AM_${_u}_OPTIONS)
     target_compile_options(${_t} PRIVATE ${A1AM_${_u}_OPTIONS})
@@ -265,6 +282,63 @@ target_link_libraries(alephone PRIVATE "$<LINK_GROUP:RESCAN,${_a1_group}>" a1_de
 # so its strong definitions replace libsysbase's weak references/stubs.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/sysbase_hooks.c")
 
+# devkitARM's 3dsx.ld can set __exidx_start 2 bytes below .ARM.exidx, which
+# breaks every C++ throw; this supplies the correct table to libgcc's
+# unwinder (source/exidx_fix.c, docs/3ds/PATCHES.md).
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/exidx_fix.c")
+
+# Paths, boot log/diagnostics and the error screen (docs/3ds/STAGE4.md).
+set(_a1_platform_src "${CMAKE_CURRENT_SOURCE_DIR}/source/a1_3ds_platform.cpp")
+target_sources(alephone PRIVATE "${_a1_platform_src}")
+set_source_files_properties("${_a1_platform_src}" PROPERTIES COMPILE_DEFINITIONS
+  "A1_3DS_USER_DIR=\"${A1_3DS_USER_DIR}\";A1_3DS_DEFAULT_SCENARIO=\"${A1_3DS_DEFAULT_SCENARIO}\"")
+foreach(_a1_v A1_3DS_USER_DIR A1_3DS_DEFAULT_SCENARIO)
+  if("${${_a1_v}}" MATCHES "[\"\\]|/$")
+    message(FATAL_ERROR "${_a1_v} must not contain quotes or backslashes or end in '/': '${${_a1_v}}'")
+  endif()
+endforeach()
+
+# --- romfs: the engine resources automake installs into $(pkgdatadir) --------
+# Read from the upstream data/**/Makefile.am, like the sources: mml_DATA ->
+# MML/, theme_DATA -> Plugins/Default_Theme/. Unlike automake's DATA install,
+# directories inside the lists are kept (nobase): Plugin.xml says
+# theme_dir="resources".
+include(dkp-asset-folder)
+set(A1_ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/romfs")
+dkp_add_asset_target(alephone_romfs "${A1_ROMFS_DIR}")
+set(_a1_romfs_files "")
+foreach(_a1_spec "data:mml" "data/default_theme:theme")
+  string(REPLACE ":" ";" _a1_spec "${_a1_spec}")
+  list(GET _a1_spec 0 _a1_subdir)
+  list(GET _a1_spec 1 _a1_prim)
+  set(_a1_am "${A1_REPO_ROOT}/${_a1_subdir}/Makefile.am")
+  a1_am_parse_file("${_a1_am}" "${A1_REPO_ROOT}" A1DATA)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_a1_am}")
+  # $(pkgdatadir) is not a Makefile.am variable, so "<prim>dir" expands to
+  # the path below it ("/MML").
+  set(_a1_dest "${A1DATA_V_${_a1_prim}dir}")
+  if(NOT _a1_dest MATCHES "^/[^ ]+$" OR NOT A1DATA_V_${_a1_prim}_DATA)
+    message(FATAL_ERROR "${_a1_am}: expected ${_a1_prim}dir = $(pkgdatadir)/... and ${_a1_prim}_DATA")
+  endif()
+  string(REGEX REPLACE "[ \t]+" ";" _a1_list "${A1DATA_V_${_a1_prim}_DATA}")
+  foreach(_a1_f IN LISTS _a1_list)
+    set(_a1_src "${A1_REPO_ROOT}/${_a1_subdir}/${_a1_f}")
+    set(_a1_dst "${A1_ROMFS_DIR}${_a1_dest}/${_a1_f}")
+    if(NOT EXISTS "${_a1_src}")
+      message(FATAL_ERROR "${_a1_am}: ${_a1_prim}_DATA lists missing file ${_a1_f}")
+    endif()
+    get_filename_component(_a1_dst_dir "${_a1_dst}" DIRECTORY)
+    add_custom_command(OUTPUT "${_a1_dst}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_a1_dst_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy "${_a1_src}" "${_a1_dst}"
+      DEPENDS "${_a1_src}" VERBATIM)
+    list(APPEND _a1_romfs_files "${_a1_dst}")
+  endforeach()
+endforeach()
+set_property(TARGET alephone_romfs APPEND PROPERTY DKP_ASSET_FILES ${_a1_romfs_files})
+list(LENGTH _a1_romfs_files _a1_romfs_count)
+message(STATUS "romfs: ${_a1_romfs_count} files from data/Makefile.am, data/default_theme/Makefile.am")
+
 # --- Packaging: alephone.elf -> alephone.3dsx with embedded SMDH --------------
 ctr_generate_smdh(alephone.smdh
   NAME        "${A1_3DS_SMDH_TITLE}"
@@ -272,8 +346,35 @@ ctr_generate_smdh(alephone.smdh
   AUTHOR      "${A1_3DS_SMDH_AUTHOR}"
   ICON        "${A1_3DS_ICON}"
 )
-ctr_create_3dsx(alephone SMDH alephone.smdh)   # -> ${CMAKE_CURRENT_BINARY_DIR}/alephone.3dsx
+ctr_create_3dsx(alephone SMDH alephone.smdh ROMFS alephone_romfs)   # -> ${CMAKE_CURRENT_BINARY_DIR}/alephone.3dsx
+
+# --- Running -------------------------------------------------------------------
+# run-3dslink follows devilutionX's add_netload_target (CMake/platforms/ctr/
+# Tools3DS.cmake): NETLOAD_IP cache variable, "-a <ip>" only when set. It
+# adds -s so 3dslink stays up and prints what the game writes to
+# stdout/stderr (the game connects back when launched this way).
+find_program(A1_3DSLINK 3dslink HINTS "${DEVKITPRO}/tools/bin")
+if(A1_3DSLINK)
+  set(_a1_netload_args "")
+  if(NETLOAD_IP)
+    list(APPEND _a1_netload_args -a "${NETLOAD_IP}")
+  endif()
+  add_custom_target(run-3dslink
+    COMMAND "${A1_3DSLINK}" ${_a1_netload_args} -s "${CMAKE_CURRENT_BINARY_DIR}/alephone.3dsx"
+    DEPENDS alephone_3dsx
+    USES_TERMINAL VERBATIM
+    COMMENT "3dslink: sending alephone.3dsx (Homebrew Launcher: press Y first)")
+else()
+  message(WARNING "3dslink not found in ${DEVKITPRO}/tools/bin; no run-3dslink target (install 3dslink)")
+endif()
+
+add_custom_target(run-azahar
+  COMMAND "${A1_REPO_ROOT}/scripts/3ds/run-azahar.sh" "${CMAKE_CURRENT_BINARY_DIR}/alephone.3dsx"
+  DEPENDS alephone_3dsx
+  USES_TERMINAL VERBATIM
+  COMMENT "Azahar: staging the SD card and starting the emulator")
 
 message(STATUS "Summary: SDL2 ${A1_SDL_sdl2_VERSION}, SDL2_ttf ${A1_SDL_SDL2_ttf_VERSION}, "
                "audio: OpenAL Soft ${A1_OPENAL_VERSION}, decoding: libsndfile ${A1_SNDFILE_VERSION}, "
-               "PKGDATADIR \"${A1_3DS_PKGDATADIR}\" (provisional), build type ${CMAKE_BUILD_TYPE}")
+               "user dir \"${A1_3DS_USER_DIR}\", default scenario \"${A1_3DS_DEFAULT_SCENARIO}\", "
+               "build type ${CMAKE_BUILD_TYPE}")

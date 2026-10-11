@@ -1134,8 +1134,11 @@ static void software_rendering_options_dialog(void* arg)
 	table->dual_add(ephemera_quality_w, d);
 
 	w_select *sw_driver_w = new w_select(graphics_preferences->software_sdl_driver, sw_sdl_driver_labels);
+#ifndef A1_PLATFORM_3DS
+	// 3DS: SDL's software renderer is the only one (no Direct3D/OpenGL)
 	table->dual_add(sw_driver_w->label("Acceleration"), d);
 	table->dual_add(sw_driver_w, d);
+#endif
 
 	placer->add(table, true);
 
@@ -1271,10 +1274,13 @@ static void graphics_dialog(void *arg)
 	renderer_w->set_selection(_no_acceleration);
 	renderer_w->set_enabled(false);
 #endif
+#ifndef A1_PLATFORM_3DS
+	// 3DS: software renderer only (validate_graphics_preferences)
 	table->dual_add(renderer_w->label("Rendering System"), d);
 	table->dual_add(renderer_w, d);
 
 	table->add_row(new w_spacer(), true);
+#endif
 
 	w_select_popup *size_w = new w_select_popup();
 	size_w->set_labels(build_resolution_labels());
@@ -1282,12 +1288,17 @@ static void graphics_dialog(void *arg)
 		size_w->set_selection(0);
 	else
 		size_w->set_selection(Screen::instance()->FindMode(graphics_preferences->screen_mode.width, graphics_preferences->screen_mode.height) + 1);
+#ifndef A1_PLATFORM_3DS
+	// 3DS: one fixed screen mode (validate_graphics_preferences)
 	table->dual_add(size_w->label("Screen Size"), d);
 	table->dual_add(size_w, d);
+#endif
 		
 	w_toggle *fullscreen_w = new w_toggle(!graphics_preferences->screen_mode.fullscreen);
+#ifndef A1_PLATFORM_3DS
 	table->dual_add(fullscreen_w->label("Windowed Mode"), d);
 	table->dual_add(fullscreen_w, d);
+#endif
 
 	w_toggle *high_dpi_w = NULL;
 	high_dpi_w = new w_toggle(graphics_preferences->screen_mode.high_dpi);
@@ -1407,10 +1418,15 @@ static void graphics_dialog(void *arg)
 	placer->add(table, true);
 
 	placer->add(new w_spacer(), true);
+#ifdef A1_PLATFORM_3DS
+	// the renderer selector is not shown, so there is nothing to demux
+	placer->dual_add(new w_button("RENDERING OPTIONS", software_rendering_options_dialog, &d), d);
+#else
 	placer->dual_add(new w_button("RENDERING OPTIONS", rendering_options_dialog_demux, &d), d);
+#endif
 	placer->add(new w_spacer(), true);
 
-#ifndef HAVE_OPENGL
+#if !defined(HAVE_OPENGL) && !defined(A1_PLATFORM_3DS)
 	expand_app_variables(temporary, "This copy of $appName$ was built without OpenGL support.");
 	placer->dual_add(new w_static_text(temporary), d);
 #endif
@@ -4375,6 +4391,30 @@ static bool validate_graphics_preferences(graphics_preferences_data *preferences
 		preferences->screen_mode.fov = 130;
 		changed = true;
 	}
+
+#ifdef A1_PLATFORM_3DS
+	// The 3DS has one screen mode (the 400x240 top screen, always
+	// "fullscreen") and only SDL's software renderer. Whatever a prefs file
+	// says, use that; the graphics dialog does not offer these settings.
+	// (Game and menu screens still have a 640x480 logical size, which SDL
+	// scales to fit the 400x240 window; see docs/3ds/STAGE4.md.)
+	auto clamp = [&changed](auto& value, auto wanted) {
+		if (value != wanted)
+		{
+			value = wanted;
+			changed = true;
+		}
+	};
+	clamp(preferences->screen_mode.width, static_cast<short>(400));
+	clamp(preferences->screen_mode.height, static_cast<short>(240));
+	clamp(preferences->screen_mode.auto_resolution, false);
+	clamp(preferences->screen_mode.fullscreen, true);
+	clamp(preferences->screen_mode.high_dpi, false);
+	clamp(preferences->screen_mode.acceleration, static_cast<short>(_no_acceleration));
+	clamp(preferences->software_sdl_driver, static_cast<int16>(_sw_driver_none));
+	if (preferences->screen_mode.bit_depth != 8 && preferences->screen_mode.bit_depth != 16)
+		clamp(preferences->screen_mode.bit_depth, static_cast<short>(32));
+#endif
 
 	return changed;
 }

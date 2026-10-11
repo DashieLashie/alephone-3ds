@@ -36,6 +36,10 @@ April 22, 2003 (Woody Zenfell):
 #include "sdl_dialogs.h"
 #include "sdl_widgets.h"
 
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"
+#endif
+
 #if defined(__WIN32__)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -168,7 +172,18 @@ void alert_user(const char *message, short severity)
 				box_type = SDL_MESSAGEBOX_WARNING;
 				break;
 		}
+#ifdef A1_PLATFORM_3DS
+	// SDL's N3DS driver has no message box: a fatal error would just exit
+	// with a black screen. Show it on the bottom screen; warnings only go to
+	// the log (stderr), so startup is not held up.
+	(void) box_type;
+	if (severity == fatalError)
+		a1_3ds::error_screen(title, message);
+	else
+		fprintf(stderr, "%s: %s\n", title.c_str(), message);
+#else
 	SDL_ShowSimpleMessageBox(box_type, title.c_str(), message, NULL);
+#endif
   } else {
 
 	std::string title;

@@ -205,6 +205,10 @@ const short max_handled_recording= RECORDING_VERSION_ALEPH_ONE_1_11;
 
 #include <progress.h>
 
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"
+#endif
+
 using alephone::Screen;
 
 /* ------------- enums */
@@ -1353,6 +1357,9 @@ void display_main_menu(
 	draw_powered_by_aleph_one(false);
 
 	game_state.main_menu_display_count++;
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::main_menu_displayed(); // logs time to menu and memory, once
+#endif
 }
 
 

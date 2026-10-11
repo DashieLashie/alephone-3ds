@@ -12,7 +12,8 @@ identical, and both files pass `-fsyntax-only` with 0 diagnostics. Earlier stage
 (`A1_NO_NETWORK`, `A1_FS_STD`, `AudioBackend`) are recorded in `STAGE2.md`
 and `STAGE3-PREREQS.md`, not repeated here.
 
-Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link).
+Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link);
+entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`).
 
 ## Summary
 
@@ -22,6 +23,15 @@ Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link).
 | 2 | `Source_Files/CSeries/csalerts_sdl.cpp` | **stub** | hyperlinks do not open a browser |
 | 3 | OpenAL Soft 1.25.2 `common/altypes.hpp` (third-party, applied by `scripts/3ds/build-openal.sh`) | type fix | none |
 | 4 | `ports/3ds/source/sysbase_hooks.c` (new port file, no upstream edit) | missing platform hooks | pthread-key destructors are not run (**stub**) |
+| 5 | `Source_Files/CSeries/cspaths_sdl.cpp` | 3DS path branch | none (`$ALEPHONE_DATA` list separator is `;`) |
+| 6 | `Source_Files/main.cpp` | boot hooks | none |
+| 7 | `Source_Files/shell.cpp` (7 sites) | boot milestones (log only) | none |
+| 8 | `Source_Files/Misc/interface.cpp` | time-to-menu hook (log only) | none |
+| 9 | `Source_Files/Misc/preferences.cpp` | prefs clamp + hidden dialog items | screen size, windowed mode, renderer and SDL driver are fixed (**by design**) |
+| 10 | `Source_Files/RenderOther/screen.cpp` | one screen mode | none |
+| 11 | `Source_Files/CSeries/csalerts_sdl.cpp` | early alerts | pre-window warnings go to the log only |
+| 12 | `ports/3ds/source/exidx_fix.c` (new port file) | **toolchain bug** (devkitARM `3dsx.ld`) | none |
+| 13 | `ports/3ds/source/a1_3ds_platform.cpp`: `__stacksize__` (new port file) | main stack size | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -211,6 +221,106 @@ under ThreadSanitizer with 8 threads racing create/delete) and checked in
 the linked ELF (TLS is set up by libctru for the main thread and for every
 `threadCreate` thread, including SDL's and libsysbase's; the atomics compile
 to `ldrex`/`strex` with `dmb`); not yet run on a 3DS.
+
+## Stage 4 engine hooks (5-11)
+
+All guarded by `#ifdef A1_PLATFORM_3DS`; the 3DS side lives in
+`ports/3ds/source/a1_3ds_platform.cpp` behind `ports/3ds/include/a1_3ds_platform.h`
+(no `<3ds.h>` in engine TUs). **Non-3DS check** (2026-10-11): each of the 7
+files was preprocessed with its own automake compile line from the
+`aleph-host-build` and `aleph-host-build-nonet` volumes, `HEAD` vs working
+tree, from the same path: `shell.cpp`, `cspaths_sdl.cpp` and
+`interface.cpp` are byte-identical; `main.cpp`, `csalerts_sdl.cpp`,
+`preferences.cpp` and `screen.cpp` differ only in `__LINE__` values inside
+logging macros (4/12/20/14 lines).
+
+5. **`cspaths_sdl.cpp`**: a `#elif defined(A1_PLATFORM_3DS)` branch of
+   `get_data_path()` before the Linux one (which would derive everything
+   from the unset `$HOME`, `AUDIT.md` f). User paths under
+   `sdmc:/3ds/alephone`, `kPathDefaultData` = the scenario folder,
+   `kPathBundleData` = `SDL_GetBasePath()` (`romfs:/`). The bundle path is
+   the hook macOS uses for its app bundle, so `shell.cpp` puts the romfs
+   first in `data_search_path` without changes. `get_path_list_separator()`
+   returns `;`, since `:` would split `sdmc:/`.
+6. **`main.cpp`**: `a1_3ds::boot_begin(argc, argv)` first (it may replace
+   an empty argv, see `STAGE4.md`, and returns `false` after the error
+   screen), a milestone after `initialize_application()`, and the error
+   screen in both `catch` blocks before `shutdown_application()`.
+7. **`shell.cpp`**: `a1_3ds::boot_mark()` after `SDL_Init`, the scenario
+   chooser, the base MML, fonts + plugins, preferences, sound and screen
+   initialisation. Logging only.
+8. **`interface.cpp`**: `a1_3ds::main_menu_displayed()` at the end of
+   `display_main_menu()` (it reports once).
+9. **`preferences.cpp`**: `validate_graphics_preferences()` pins
+   `400x240`, `auto_resolution=false`, `fullscreen=true`,
+   `high_dpi=false`, software renderer, SDL driver "None" (= SDL's
+   `software` renderer) and a valid bit depth, whatever a prefs file says.
+   The graphics dialog no longer shows Rendering System, Screen Size,
+   Windowed Mode or the "built without OpenGL" note; the software options
+   dialog no longer shows Acceleration (Default/None/Direct3D/OpenGL). The
+   hidden widgets are still created (as the existing non-macOS High DPI
+   toggle is), so the accept code reads unchanged values. RENDERING OPTIONS
+   opens the software options directly: `rendering_options_dialog_demux`
+   looks the renderer up among the dialog's widgets and would find none.
+10. **`screen.cpp`**: `Screen::Initialize` replaces the mode list with the
+    single 400x240 mode. The desktop is smaller than 640x480, so the list
+    would otherwise start with the 1600x900 fallback (the auto-resolution
+    size, and a choice in the hidden Screen Size popup).
+11. **`csalerts_sdl.cpp`**: before the main window exists, `alert_user()`
+    calls `SDL_ShowSimpleMessageBox`, which SDL's N3DS driver does not
+    implement; a fatal alert then exited with a black screen. On 3DS fatal
+    alerts use the error screen and other alerts go to stderr (the log).
+
+## 12. `ports/3ds/source/exidx_fix.c`: C++ exceptions were broken (toolchain bug)
+
+**Symptom** (Azahar, first runs of the engine): the game stopped silently
+right after `SDL_Init`. With a terminate handler installed, it reported that
+`std::terminate()` was called, and then that even a rethrow inside the
+handler's own `try { … } catch (...)` was not caught.
+
+**Cause:** devkitARM r68's `arm-none-eabi/lib/3dsx.ld` sets the unwind
+table bounds outside the output section:
+
+```ld
+.ARM.extab : { *(.ARM.extab* .gnu.linkonce.armextab.*) } : rodata
+__exidx_start = .;
+.ARM.exidx : { *(.ARM.exidx* .gnu.linkonce.armexidx.*) } : rodata
+__exidx_end = .;
+```
+
+`.ARM.exidx` is 4-byte aligned, but Aleph One's `.ARM.extab` ends on a
+2-byte boundary (`0x00742aa8 + 0x1fe96 = 0x0076293e`), so `__exidx_start`
+was `0x0076293e` while the table starts at `0x00762940`. libgcc's
+`get_eit_entry()` binary-searches 8-byte entries from `__exidx_start`; every
+lookup reads misaligned garbage, so **every `throw` ends in
+`std::terminate()`**. Aleph One throws routinely while starting (MML, prefs,
+file probing). The stage 0 probe passed only because its `.ARM.extab`
+happened to end aligned. GNU ld's default ARM scripts define the symbols
+inside the section, after alignment.
+
+**Change:** a strong `__gnu_Unwind_Find_exidx()` (libgcc calls it when it
+is defined; the weak reference is meant for dynamic loaders) returning
+`__exidx_start` rounded up to 4 and the matching entry count. Correct
+whether or not the symbol happens to be aligned, and nothing in devkitPro is
+edited. `boot_begin()` throws and catches once and logs
+`C++ exceptions: OK`, so a regression shows up in the first lines of
+`log.txt`.
+
+**Upstream:** worth reporting to devkitPro (`devkitarm-crtls`); the fix is
+to move both assignments inside `.ARM.exidx { … }`.
+
+## 13. Main-thread stack: `u32 __stacksize__ = 1 MiB`
+
+libctru's `initSystem()` carves the main stack from the start of the heap
+(`sp = heap start + __stacksize__`), and its weak default is 32 KiB. Aleph
+One overflowed it inside `initialize_application()`: SP went to
+`0x07FF7740`, below the heap at `0x08000000`, into unmapped memory, and the
+next return jumped to address 0 (Azahar: "Undefined Instruction", PC 0).
+`a1_3ds_platform.cpp` defines `__stacksize__ = 1024 * 1024`. The stack is
+painted at boot and the deepest use is logged at every milestone: **68 KiB
+at the main menu**, so 1 MiB leaves room for gameplay (Lua, rendering), which
+has not been measured yet. The 1 MiB comes out of the heap and is shown
+separately in the memory log.
 
 ## Not patched, by design
 

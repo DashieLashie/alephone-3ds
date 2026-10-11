@@ -162,6 +162,60 @@ std::string get_application_identifier()
 	return std::string("org.bungie.source.AlephOne");
 }
 
+#elif defined(A1_PLATFORM_3DS)
+
+// Nintendo 3DS: user data on the SD card, the scenario in a folder chosen by
+// sdmc:/3ds/alephone/scenario.txt, engine resources (MML, default theme) in
+// the read-only romfs. See ports/3ds/source/a1_3ds_platform.cpp.
+#include "a1_3ds_platform.h"
+
+char get_path_list_separator()
+{
+	// ':' would split "sdmc:/..." (only used for $ALEPHONE_DATA, which the
+	// 3DS cannot set anyway)
+	return ';';
+}
+
+std::string get_data_path(CSPathType type)
+{
+	const std::string& user = a1_3ds::user_dir();
+	switch (type) {
+		case kPathLocalData:
+		case kPathLogs:
+		case kPathPreferences:
+			return user;
+		case kPathDefaultData:
+			return a1_3ds::scenario_dir();
+		case kPathBundleData:
+			// searched first, like the macOS app bundle
+			return a1_3ds::resource_dir();
+		case kPathLegacyData:
+		case kPathLegacyPreferences:
+			return "";
+		case kPathScreenshots:
+			return user + "/Screenshots";
+		case kPathSavedGames:
+			return user + "/Saved Games";
+		case kPathQuickSaves:
+			return user + "/Quick Saves";
+		case kPathImageCache:
+			return user + "/Image Cache";
+		case kPathRecordings:
+			return user + "/Recordings";
+	}
+	return "";
+}
+
+std::string get_application_name()
+{
+	return std::string(A1_DISPLAY_NAME);
+}
+
+std::string get_application_identifier()
+{
+	return std::string("org.bungie.source.AlephOne");
+}
+
 #else
 
 // Linux and compatible

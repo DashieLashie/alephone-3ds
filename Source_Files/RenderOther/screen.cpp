@@ -268,6 +268,13 @@ void Screen::Initialize(screen_mode_data* mode)
 			}
 		}
 
+#ifdef A1_PLATFORM_3DS
+		// One mode, the 400x240 top screen: the desktop size is below
+		// 640x480, so the list above starts with the 1600x900 fallback.
+		// validate_graphics_preferences pins the prefs to this mode.
+		m_modes.assign(1, std::pair<int, int>(400, 240));
+#endif
+
 		// these are not validated in graphics prefs because
 		// SDL is not initialized yet when prefs load, so
 		// validate them here

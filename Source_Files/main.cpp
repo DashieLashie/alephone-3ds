@@ -4,9 +4,18 @@
 #include "Logging.h"
 #include "alephversion.h"
 #include <SDL2/SDL_main.h>
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"
+#endif
 
 int main(int argc, char** argv)
 {
+#ifdef A1_PLATFORM_3DS
+	// log redirection, data folders, scenario check (error screen if missing)
+	if (!a1_3ds::boot_begin(argc, argv))
+		return 1;
+#endif
+
 	// Print banner (don't bother if this doesn't appear when started from a GUI)
 	char app_name_version[256];
 	expand_app_variables(app_name_version, "Aleph One $appLongVersion$");
@@ -34,6 +43,9 @@ int main(int argc, char** argv)
 	);
 
 	shell_options.parse(argc, argv);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::boot_mark("command line parsed");
+#endif
 
 	auto code = 0;
 
@@ -41,6 +53,9 @@ int main(int argc, char** argv)
 
 		// Initialize everything
 		initialize_application();
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::boot_mark("initialize_application() done");
+#endif
 
 		for (std::vector<std::string>::iterator it = shell_options.files.begin(); it != shell_options.files.end(); ++it)
 		{
@@ -62,6 +77,9 @@ int main(int argc, char** argv)
 		catch (...)
 		{
 		}
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::error_screen("Aleph One stopped", std::string("Unhandled exception:\n") + e.what());
+#endif
 		code = 1;
 	}
 	catch (...) {
@@ -72,6 +90,9 @@ int main(int argc, char** argv)
 		catch (...)
 		{
 		}
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::error_screen("Aleph One stopped", "Unknown exception");
+#endif
 		code = 1;
 	}
 
