@@ -36,6 +36,10 @@
 #include "sdl_resize.h"
 #include "Logging.h"
 
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"
+#endif
+
 WadImageCache* WadImageCache::instance() {
 	static WadImageCache *m_instance = nullptr;
 	if (!m_instance) {
@@ -118,7 +122,12 @@ SDL_Surface *WadImageCache::resize_image(SDL_Surface *original, int width, int h
 std::string WadImageCache::image_to_new_name(SDL_Surface *image, int32 *filesize) const
 {
 	// create name
+#ifdef A1_PLATFORM_3DS // std::random_device has no entropy: same UUID every time
+	a1_3ds::Urng urng;
+	boost::uuids::basic_random_generator<a1_3ds::Urng> gen(urng);
+#else
 	boost::uuids::random_generator gen;
+#endif
 	boost::uuids::uuid u = gen();
 	std::string ustr = boost::uuids::to_string(u);
 	

@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <stdexcept>
 #include <fstream>
@@ -52,6 +53,12 @@ extern u32 __ctru_heap;   // heap base = bottom of the main stack
 
 namespace a1_3ds {
 
+// source/selftest.cpp (engine headers; kept apart from <3ds.h>)
+void entropy_selftest();
+void audio_load_selftest();
+// source/audio_probe.cpp
+void audio_probe_log();
+
 namespace {
 
 const char kScenarioFile[] = "scenario.txt";
@@ -61,6 +68,13 @@ const char kPrevLogFile[] = "log.prev.txt";
 // error screen and after the main menu appears (screen-*.bmp): a way to see
 // what is displayed when nobody can look (emulator in CI, remote hardware).
 const char kDebugScreensFlag[] = "debug-screens";
+// If this file exists, entropy_selftest() runs once the main menu is up: it
+// puts three images through the engine's WadImageCache and logs their file
+// names and three a1fs::unique_path() names (STAGE5-PREREQS.md item 2).
+const char kDebugEntropyFlag[] = "debug-entropy";
+// If this file exists, the audio probe (audio_probe.cpp) also reports every
+// 5 s once the main menu is up, not only at boot milestones and at exit.
+const char kDebugAudioFlag[] = "debug-audio";
 
 const char kScenarioTemplate[] =
 	"# Aleph One 3DS: scenario folder.\n"
@@ -183,8 +197,17 @@ void open_3dslink()
 	s_link_fd = link3dsConnectToHost(false, false);
 }
 
+std::atomic<bool> s_exiting{false};
+double ms_since_boot();
+
 void close_outputs()
 {
+	s_exiting = true;
+	if (s_boot_begun)
+	{
+		printf("[3ds] +%.1f ms: exit\n", ms_since_boot());
+		audio_probe_log();
+	}
 	fflush(stdout);
 	fflush(stderr);
 	if (s_link_fd >= 0)
@@ -313,6 +336,7 @@ void log_memory(const char* when)
 	if (s_stack_bottom)
 		printf("[3ds]   main stack %lu KiB (part of the heap): deepest use so far %lu KiB\n",
 		       kib(__stacksize__), kib(stack_used()));
+	audio_probe_log();
 }
 
 // --- screen capture (debug-screens) --------------------------------------------
@@ -532,6 +556,69 @@ void print_wrapped(const std::string& text, size_t width)
 
 } // namespace
 
+// --- entropy -------------------------------------------------------------------
+
+namespace {
+
+// splitmix64's output function: a bijection on 64 bits that spreads every
+// input bit over the whole output.
+u64 mix64(u64 z)
+{
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+	return z ^ (z >> 31);
+}
+
+struct EntropySource
+{
+	bool ps;
+	Result rc;
+};
+
+const EntropySource& entropy_source()
+{
+	static const EntropySource src = [] {
+		const Result rc = psInit();
+		return EntropySource{R_SUCCEEDED(rc), rc};
+	}();
+	return src;
+}
+
+std::atomic<u32> s_entropy_counter{0};
+std::atomic<bool> s_ps_failure_logged{false};
+
+// Distinct within a run (the counter), and across runs through osGetTime()
+// (milliseconds) and the tick at the moment of the call.
+void fallback_bytes(void* out, size_t len)
+{
+	u8* p = static_cast<u8*>(out);
+	while (len)
+	{
+		const u64 n = s_entropy_counter.fetch_add(1, std::memory_order_relaxed);
+		const u64 v = mix64(svcGetSystemTick() ^ mix64(osGetTime() + n * 0x9E3779B97F4A7C15ull));
+		const size_t k = std::min(len, sizeof v);
+		memcpy(p, &v, k);
+		p += k;
+		len -= k;
+	}
+}
+
+} // namespace
+
+void random_bytes(void* out, size_t len)
+{
+	if (entropy_source().ps)
+	{
+		const Result rc = PS_GenerateRandomBytes(out, len);
+		if (R_SUCCEEDED(rc))
+			return;
+		if (!s_ps_failure_logged.exchange(true))
+			printf("[3ds] entropy: PS_GenerateRandomBytes failed (0x%08lX); using the tick/clock fallback\n",
+			       static_cast<unsigned long>(rc));
+	}
+	fallback_bytes(out, len);
+}
+
 // --- paths -------------------------------------------------------------------
 
 const std::string& user_dir()
@@ -632,6 +719,11 @@ bool boot_begin(int& argc, char**& argv)
 	{
 		printf("[3ds] C++ exceptions: OK\n");
 	}
+	if (entropy_source().ps)
+		printf("[3ds] entropy: ps:ps (PS_GenerateRandomBytes)\n");
+	else
+		printf("[3ds] entropy: psInit failed (0x%08lX); using the tick/clock fallback\n",
+		       static_cast<unsigned long>(entropy_source().rc));
 
 	bool is_new3ds = false;
 	APT_CheckNew3DS(&is_new3ds);
@@ -714,6 +806,23 @@ void boot_mark(const char* what)
 	log_memory(what);
 }
 
+namespace {
+void audio_report_thread(void*)
+{
+	svcSleepThread(1000000000LL);   // the first report covers the test sounds
+	for (;;)
+	{
+		if (s_exiting)
+			return;
+		printf("[3ds] +%.1f ms: audio report\n", ms_since_boot());
+		audio_probe_log();
+		svcSleepThread(5000000000LL);
+		if (s_exiting)
+			return;
+	}
+}
+} // namespace
+
 void main_menu_displayed()
 {
 	static bool reported = false;
@@ -726,6 +835,13 @@ void main_menu_displayed()
 	log_video();
 	if (debug_screens_enabled())
 		threadCreate(menu_capture_thread, nullptr, 32 * 1024, 0x3f, -2, true);
+	if (exists(user_dir() + "/" + kDebugEntropyFlag))
+		entropy_selftest();
+	if (exists(user_dir() + "/" + kDebugAudioFlag))
+	{
+		audio_load_selftest();
+		threadCreate(audio_report_thread, nullptr, 16 * 1024, 0x3f, -2, true);
+	}
 }
 
 // --- error screen ------------------------------------------------------------
@@ -737,8 +853,12 @@ void error_screen(const std::string& title, const std::string& body)
 	fflush(stderr);
 
 	// Before SDL video is up nobody owns the screens yet. After it, SDL owns
-	// the top screen (keep its last frame) and the bottom one is unused.
+	// the top screen and the bottom one is unused. Keep the game's last frame
+	// on top if a window has shown one; until then (SDL_Init to the main
+	// window, e.g. a missing Map) the top would stay black, so use it too.
+	// Every caller exits afterwards, so taking the screen over is harmless.
 	const bool own_gfx = !SDL_WasInit(SDL_INIT_VIDEO);
+	const bool own_top = own_gfx || !SDL_GetKeyboardFocus();
 	if (own_gfx)
 		gfxInitDefault();
 
@@ -748,7 +868,7 @@ void error_screen(const std::string& title, const std::string& body)
 	const devoptab_t* saved_err = devoptab_list[STD_ERR];
 
 	static PrintConsole top, bottom;
-	if (own_gfx)
+	if (own_top)
 	{
 		consoleInit(GFX_TOP, &top);
 		consoleSelect(&top);
@@ -774,7 +894,11 @@ void error_screen(const std::string& title, const std::string& body)
 		if (own_gfx)
 			gfxSwapBuffers();
 		else
+		{
 			gfxScreenSwapBuffers(GFX_BOTTOM, false);
+			if (own_top)
+				gfxScreenSwapBuffers(GFX_TOP, false);
+		}
 		gspWaitForVBlank();
 		if (++frames == 10 && debug_screens_enabled())
 		{

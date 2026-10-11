@@ -27,6 +27,27 @@
 
 #ifdef __3DS__
 #include <3ds.h>
+#include <stdarg.h>
+/* Also write the output to sdmc:/3ds/sndfile-test.log, like the OpenAL and
+ * Boost tests: the console alone cannot be read from an emulator or over
+ * 3dslink. */
+static FILE *g_log;
+static int tee_printf(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	if (g_log) {
+		va_list aq;
+		va_copy(aq, ap);
+		vfprintf(g_log, fmt, aq);
+		va_end(aq);
+		fflush(g_log);
+	}
+	int n = vprintf(fmt, ap);
+	va_end(ap);
+	return n;
+}
+#define printf tee_printf
 #endif
 
 static int failures = 0;
@@ -323,6 +344,7 @@ int main(int argc, char **argv)
 #ifdef __3DS__
 	gfxInitDefault();
 	consoleInit(GFX_TOP, NULL);
+	g_log = fopen("sdmc:/3ds/sndfile-test.log", "w");
 #endif
 
 	list_formats();
@@ -356,6 +378,7 @@ int main(int argc, char **argv)
 		if (hidKeysDown() & KEY_START) break;
 		gspWaitForVBlank();
 	}
+	if (g_log) fclose(g_log);
 	gfxExit();
 #endif
 	return failures ? 1 : 0;

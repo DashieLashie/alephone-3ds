@@ -57,6 +57,9 @@ using boost::system::generic_category;
 #include <filesystem>
 #include <random>
 #include <string>
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"
+#endif
 #include <system_error>
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -101,7 +104,11 @@ inline std::time_t last_write_time(const path& p, error_code& ec)
 // boost::filesystem::unique_path: each '%' becomes a random hex digit
 inline path unique_path(const path& model)
 {
+#ifdef A1_PLATFORM_3DS // std::random_device gives the same seed in every run
+	static thread_local std::mt19937 rng{a1_3ds::Urng{}()};
+#else
 	static thread_local std::mt19937 rng{std::random_device{}()};
+#endif
 	std::string s = model.string();
 	for (auto& c : s)
 		if (c == '%')

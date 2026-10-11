@@ -21,7 +21,7 @@
 #
 # Environment:
 #   AZAHAR         Azahar.app (or the folder containing it). Default: /Applications/Azahar.app,
-#                  then ~/Applications/Azahar.app
+#                  ~/Applications/Azahar.app, then the last (by name) portable ~/Applications/Azahar-*/Azahar.app
 #   AZAHAR_SDMC    emulated SD card folder. Default: <folder of Azahar.app>/user/sdmc for a
 #                  portable install (a "user" folder next to the app), else
 #                  ~/Library/Application Support/Azahar/sdmc
@@ -59,6 +59,12 @@ if [ -z "$app" ]; then
 	for c in /Applications/Azahar.app "$HOME/Applications/Azahar.app"; do
 		[ -d "$c" ] && { app=$c; break; }
 	done
+	if [ -z "$app" ]; then
+		# Portable installs, e.g. ~/Applications/Azahar-2126.2/{Azahar.app,user}; the last by name wins.
+		for c in "$HOME"/Applications/Azahar-*/Azahar.app; do
+			[ -d "$c" ] && app=$c
+		done
+	fi
 fi
 [ -n "$app" ] || die "Azahar not found; set AZAHAR=/path/to/Azahar.app"
 [ -d "$app/Contents" ] || app="$app/Azahar.app"
@@ -90,6 +96,17 @@ if [ "$fresh" = 1 ] && [ -d "$userdir" ]; then
 fi
 mkdir -p "$sdmc/3ds" "$userdir"
 cp "$threedsx" "$sdmc/3ds/alephone.3dsx"
+# libctru's ndspInit() loads sdmc:/3ds/dspfirm.cdc (on a console it is dumped
+# with DSP1); without it SDL_OpenAudio fails and the game runs silent.
+# Azahar's default HLE DSP does not execute the firmware, so a placeholder
+# (zeros, "DSP1" magic and size at 0x100) is enough there. Never copy this
+# placeholder to a real SD card.
+dspfirm="$sdmc/3ds/dspfirm.cdc"
+if [ ! -f "$dspfirm" ]; then
+	head -c 4096 /dev/zero > "$dspfirm"
+	printf 'DSP1\000\020\000\000' | dd of="$dspfirm" bs=1 seek=256 conv=notrunc 2>/dev/null
+	echo "run-azahar: created placeholder $dspfirm (HLE audio only)"
+fi
 rm -f "$userdir"/screen-*.bmp
 if [ "$screens" = 1 ]; then
 	: > "$userdir/debug-screens"

@@ -149,6 +149,11 @@ private:
 
 struct Params { int a; float b; };
 
+// libctru's default main stack is 32 KiB; the property_tree parsers overflow
+// it (seen in Azahar: SP below 0x08000000, then PC 0). The game uses 1 MiB
+// (ports/3ds/source/a1_3ds_platform.cpp); do the same here.
+extern "C" { u32 __stacksize__ = 1024 * 1024; }
+
 int main() {
   gfxInitDefault();
   consoleInit(GFX_TOP, nullptr);

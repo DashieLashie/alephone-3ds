@@ -290,6 +290,12 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/exidx_fix.c"
 # Paths, boot log/diagnostics and the error screen (docs/3ds/STAGE4.md).
 set(_a1_platform_src "${CMAKE_CURRENT_SOURCE_DIR}/source/a1_3ds_platform.cpp")
 target_sources(alephone PRIVATE "${_a1_platform_src}")
+# Debug self-tests that need engine headers (debug-entropy flag).
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/selftest.cpp")
+# Audio thread probe: stack use and callback timing (docs/3ds/STAGE5-PREREQS.md
+# items 3 and 5). The engine's SDL_OpenAudio() call goes through it.
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/audio_probe.cpp")
+target_link_options(alephone PRIVATE "LINKER:--wrap=SDL_OpenAudio")
 set_source_files_properties("${_a1_platform_src}" PROPERTIES COMPILE_DEFINITIONS
   "A1_3DS_USER_DIR=\"${A1_3DS_USER_DIR}\";A1_3DS_DEFAULT_SCENARIO=\"${A1_3DS_DEFAULT_SCENARIO}\"")
 foreach(_a1_v A1_3DS_USER_DIR A1_3DS_DEFAULT_SCENARIO)

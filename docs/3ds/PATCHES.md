@@ -32,6 +32,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`).
 | 11 | `Source_Files/CSeries/csalerts_sdl.cpp` | early alerts | pre-window warnings go to the log only |
 | 12 | `ports/3ds/source/exidx_fix.c` (new port file) | **toolchain bug** (devkitARM `3dsx.ld`) | none |
 | 13 | `ports/3ds/source/a1_3ds_platform.cpp`: `__stacksize__` (new port file) | main stack size | none |
+| 14 | `Source_Files/Files/WadImageCache.cpp`, `Source_Files/CSeries/a1_filesystem.h` | entropy source | none |
+| 15 | `Source_Files/Misc/alephversion.h` | platform name | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -321,6 +323,93 @@ painted at boot and the deepest use is logged at every milestone: **68 KiB
 at the main menu**, so 1 MiB leaves room for gameplay (Lua, rendering), which
 has not been measured yet. The 1 MiB comes out of the heap and is shown
 separately in the memory log.
+
+## 14. Random names: `WadImageCache.cpp`, `a1_filesystem.h`
+
+Added 2026-10-11 (`STAGE5-PREREQS.md` item 2; the problem was found in
+`STAGE3.md`, risk 3).
+
+**Problem:** devkitARM's `std::random_device` has no entropy source: it is
+mt19937 with the default seed 5489, so it returns the same numbers in every
+run and every thread. Two engine sites depend on it:
+
+- `WadImageCache::image_to_new_name` constructs a
+  `boost::uuids::random_generator` (ChaCha20 seeded from `random_device` in
+  Boost 1.92) per call, so **every cached image got the same name**,
+  `fb135fdb-2482-4d31-aa8c-351caf595b56`. Each new save-game preview
+  overwrote the previous one's file, while `Cache.ini` mapped every
+  descriptor to it.
+- `a1fs::unique_path` (used by `FileSpecifier::SetTempName`) seeds one
+  `thread_local` mt19937 per thread from `random_device`, so temporary names
+  repeat from run to run (`4a69d98a de42ae2d bcbe0dce` every time).
+
+**Change:** the port provides `a1_3ds::random_bytes()` and a
+UniformRandomBitGenerator `a1_3ds::Urng` (`a1_3ds_platform.h`). Bytes come
+from the ps:ps service (`PS_GenerateRandomBytes`, after `psInit()`), or, if
+that fails, from a splitmix64 mix of `svcGetSystemTick()`, `osGetTime()` and
+an atomic counter. The boot log says which (`[3ds] entropy: ...`).
+
+```diff
++#ifdef A1_PLATFORM_3DS // std::random_device has no entropy: same UUID every time
++	a1_3ds::Urng urng;
++	boost::uuids::basic_random_generator<a1_3ds::Urng> gen(urng);
++#else
+ 	boost::uuids::random_generator gen;
++#endif
+```
+
+```diff
++#ifdef A1_PLATFORM_3DS // std::random_device gives the same seed in every run
++	static thread_local std::mt19937 rng{a1_3ds::Urng{}()};
++#else
+ 	static thread_local std::mt19937 rng{std::random_device{}()};
++#endif
+```
+
+plus `#include "a1_3ds_platform.h"` under the same guard in both files.
+`basic_random_generator` still sets the UUID version (4) and variant bits.
+
+**Verification:** a `debug-entropy` flag file (`ports/3ds/source/selftest.cpp`)
+puts three images through the real `WadImageCache` at the main menu, logs
+their names and three `unique_path` names, and removes them again. Results
+are in `STAGE5-PREREQS.md` item 2: Azahar with ps:ps, with the fallback
+forced, and a control build without this patch (collision reproduced).
+Hardware: see item 1 there.
+
+**Non-3DS check** (2026-10-11, `aleph-host-build` and
+`aleph-host-build-nonet`, automake compile line, `g++ -E -P`, `HEAD` vs
+working tree from the same path): `FileHandler.cpp` (includes
+`a1_filesystem.h`, calls `unique_path`) is byte-identical;
+`WadImageCache.cpp` differs only in two `__LINE__` values inside `logError`
+(323→332, 384→393). Both pass `-fsyntax-only` with 0 diagnostics.
+
+## 15. `Misc/alephversion.h`: platform name
+
+Added 2026-10-11 (`STAGE5-PREREQS.md` item 7; `STAGE3.md` row 6). The
+platform chain ended in `"Unknown"` for the 3DS, so the version string read
+`Aleph One Unknown 2026-09-30 1.11.1`. A 3DS branch before the fallback:
+
+```diff
++#elif defined (A1_PLATFORM_3DS)
++#define A1_DISPLAY_PLATFORM "Nintendo 3DS"
++#define A1_UPDATE_PLATFORM "source"
+ #else
+```
+
+`A1_UPDATE_PLATFORM` stays `"source"` like Linux and the BSDs (the update
+check is network code, compiled out with `A1_NO_NETWORK`). Displayed in the
+version string (log, About) and `$appPlatform$` in MML strings. Azahar log:
+`Aleph One Nintendo 3DS 2026-09-30 1.11.1`.
+
+**Non-3DS check** (`scripts/3ds/host-baseline/ppcheck.sh`, both volumes):
+`shell.cpp`, `Misc/interface.cpp` and `CSeries/csstrings.cpp` are
+byte-identical; 0 diagnostics.
+
+**Checking future patches:** `scripts/3ds/host-baseline/ppcheck.sh
+"<changed files>" "<TUs>"` automates the method above: automake compile
+line, `g++ -E -P` with `HEAD`'s and the working tree's files from the same
+path, `cmp`, `-fsyntax-only`, in `aleph-host-build` and
+`aleph-host-build-nonet`.
 
 ## Not patched, by design
 

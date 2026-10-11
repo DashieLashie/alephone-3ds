@@ -13,6 +13,8 @@
 #ifndef A1_3DS_PLATFORM_H
 #define A1_3DS_PLATFORM_H
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace a1_3ds {
@@ -56,6 +58,31 @@ void main_menu_displayed();
 // screen if SDL video is not up yet) until START or A is pressed, or the
 // system asks the application to close. Also writes it to the log.
 void error_screen(const std::string& title, const std::string& body);
+
+// --- Entropy (docs/3ds/STAGE5-PREREQS.md item 2) -----------------------------
+
+// devkitARM's std::random_device has no entropy source: it is mt19937 with
+// the default seed, so it returns the same numbers in every run. Use these
+// instead. Bytes come from the ps:ps service (PS_GenerateRandomBytes); if it
+// is not available, from a mix of the system tick, the clock and a counter
+// (distinct within a run and, through the clock, across runs; not for
+// cryptography). Thread-safe.
+void random_bytes(void* out, size_t len);
+
+// A UniformRandomBitGenerator over random_bytes(), e.g. for
+// boost::uuids::basic_random_generator<a1_3ds::Urng>.
+struct Urng
+{
+	using result_type = uint32_t;
+	static constexpr result_type min() { return 0; }
+	static constexpr result_type max() { return UINT32_MAX; }
+	result_type operator()()
+	{
+		result_type v;
+		random_bytes(&v, sizeof v);
+		return v;
+	}
+};
 
 } // namespace a1_3ds
 

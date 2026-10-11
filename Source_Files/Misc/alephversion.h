@@ -49,6 +49,9 @@ ALEPHVERSION.H
 #elif defined (__OpenBSD__)
 #define A1_DISPLAY_PLATFORM "OpenBSD"
 #define A1_UPDATE_PLATFORM "source"
+#elif defined (A1_PLATFORM_3DS)
+#define A1_DISPLAY_PLATFORM "Nintendo 3DS"
+#define A1_UPDATE_PLATFORM "source"
 #else
 #define A1_DISPLAY_PLATFORM "Unknown"
 #define A1_UPDATE_PLATFORM "source"
