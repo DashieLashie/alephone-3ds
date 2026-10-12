@@ -1,0 +1,12 @@
+# Load times (docs/3ds/NEXT-SPRINT.md B1). Needs run-azahar.sh --load-test:
+# the Load Test plugin saves 5 s into level 0, teleports to level 1 at 10 s,
+# and saves again 5 s into level 1. Read the "(+N ms)" marks in the log.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 60000             # level 0 loads, save, teleport, level 1 loads, save
+screens load-level1
+wait 5000
+quit
+wait 5000

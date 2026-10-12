@@ -16,7 +16,12 @@ for tu in "${TUS[@]}"; do
   [ -n "$cmd" ] || { echo "$tu: no compile line"; continue; }
   pp=$(echo "$cmd" | sed -E 's/-MT [^ ]+//; s/-MD//; s/-MP//; s/-MF [^ ]+//; s/-o [^ ]+//; s/ -c / -E -P /; s/[ ]*&&[ ]*\\?$//')
   for v in head work; do swap /$v; (cd $dir && eval "$pp") > /tmp/$base.$v.i 2>/tmp/$base.$v.err; done
-  if cmp -s /tmp/$base.head.i /tmp/$base.work.i; then r=IDENTICAL; else r="DIFFER: $(diff /tmp/$base.head.i /tmp/$base.work.i | grep -c '^[<>]') lines"; fi
+  if cmp -s /tmp/$base.head.i /tmp/$base.work.i; then r=IDENTICAL; else
+    # Moved code shifts __LINE__ values: compare again with every number
+    # replaced by N; 0 lines there means only numbers differ (PATCHES.md).
+    for v in head work; do sed -E 's/[0-9]+/N/g' /tmp/$base.$v.i > /tmp/$base.$v.n; done
+    r="DIFFER: $(diff /tmp/$base.head.i /tmp/$base.work.i | grep -c '^[<>]') lines, $(diff /tmp/$base.head.n /tmp/$base.work.n | grep -c '^[<>]') with numbers normalised"
+  fi
   swap /work; sx=$(echo "$pp" | sed 's/ -E -P / -fsyntax-only /'); (cd $dir && eval "$sx") > /tmp/sx 2>&1; s=$?
   echo "$tu: $r ($(wc -l < /tmp/$base.work.i) lines, stderr $(cat /tmp/$base.*.err | wc -l)); -fsyntax-only exit $s, $(wc -l < /tmp/sx) diagnostics"
 done

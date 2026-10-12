@@ -2469,6 +2469,9 @@ static void transfer_to_new_level(
 		set_keyboard_controller_status(false);
 		FindLevelMovie(entry.level_number);
 		show_movie(entry.level_number);
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("level change: movie");
+#endif
 
 		// if this is the EPILOGUE_LEVEL_NUMBER, then it is time to get
 		// out of here already (as we've just played the epilogue movie,
@@ -2486,13 +2489,22 @@ static void transfer_to_new_level(
 		}
 
 		if (!game_is_networked) try_and_display_chapter_screen(level_number, true, false);
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("level change: chapter screen");
+#endif
 		success= goto_level(&entry, dynamic_world->player_count, nullptr);
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("level change: goto_level");
+#endif
 		set_keyboard_controller_status(true);
 	}
 	
 	if(success)
 	{
 		start_game(game_state.user, true);
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("level change: start_game");
+#endif
 	} else {
 		display_loading_map_error();
 		finish_game(true);
@@ -2800,6 +2812,9 @@ static bool begin_game(
 			show_movie(entry.level_number);
 			try_and_display_chapter_screen(entry.level_number, false, false);
 		}
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("new game: chapter screen");
+#endif
 
 		Plugins::instance()->set_mode(number_of_players > 1 ? Plugins::kMode_Net : Plugins::kMode_Solo);
 		Crosshairs_SetActive(player_preferences->crosshairs_active);
@@ -2808,10 +2823,16 @@ static bool begin_game(
 		
 		success = is_saved_game_replay() ? make_restored_game_relevant(false, starts, number_of_players) :
 			new_game(number_of_players, is_networked, &game_information, starts, &entry);
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("new game: new_game");
+#endif
 
 		if(success)
 		{
 			start_game(user, false);
+#ifdef A1_PLATFORM_3DS
+			a1_3ds::time_mark("new game: start_game");
+#endif
 		} else {
 			clean_up_after_failed_game(user == _network_player, record_game, clean_up_on_failure);
 		}
@@ -2905,6 +2926,9 @@ static void finish_game(
 	bool return_to_main_menu)
 {
 	set_keyboard_controller_status(false);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: begin");
+#endif
 
 #ifdef PERFORMANCE	
 	PerfControl(perf_globals, false);
@@ -2918,6 +2942,9 @@ static void finish_game(
 	set_fade_effect(NONE);
 	L_Call_HUDCleanup();
 	exit_screen();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: screen exited");
+#endif
 
 	/* Stop the replay */
 	switch(game_state.user)
@@ -2937,6 +2964,9 @@ static void finish_game(
 			break;
 	}
 	Movie::instance()->StopRecording();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: replay stopped");
+#endif
 
 	if (shell_options.editor && shell_options.output.size())
 	{
@@ -2971,10 +3001,16 @@ static void finish_game(
 
 	leaving_map();
 	CloseLuaHUDScript();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: fades, leaving_map");
+#endif
 	
 	/* Get as much memory back as we can. */
 	unload_all_collections();
 	SoundManager::instance()->UnloadAllSounds();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: collections, sounds unloaded");
+#endif
 	
 #if !defined(DISABLE_NETWORKING)
 	if (game_state.user==_network_player)
@@ -3008,6 +3044,9 @@ static void finish_game(
 		}
 	}
 	
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: net or replay stats");
+#endif
 	set_local_player_index(NONE);
 	set_current_player_index(NONE);
 	
@@ -3021,7 +3060,13 @@ static void finish_game(
 	{
 		Plugins::instance()->set_mode(Plugins::kMode_Menu);
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: environment reloaded");
+#endif
 	if (return_to_main_menu) display_main_menu();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("finish_game: main menu");
+#endif
 }
 
 static void clean_up_after_failed_game(bool inNetgame, bool inRecording, bool inFullCleanup)

@@ -230,6 +230,10 @@ static struct bitmap_definition *get_bitmap_definition(short collection_index, s
 #include <SDL2/SDL_endian.h>
 #include "byte_swapping.h"
 
+#ifdef A1_PLATFORM_3DS
+namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+#endif
+
 /*
  *  Initialize shapes handling
  */
@@ -784,6 +788,30 @@ static bool load_collection(short collection_index, bool strip)
 		ShapesFile.SetPosition(0);
 		src_offset += SDL_RWtell(p);
 	}
+
+#ifdef A1_PLATFORM_3DS
+	// Read the whole collection with one read and parse it from memory. The
+	// parsing below reads a few bytes at a time and seeks for every bitmap
+	// row; on the SD card each of those was a file system call, and a level's
+	// collections took ~28 s in Azahar (docs/3ds/NEXT-SPRINT.md B1).
+	std::vector<uint8> collection_bytes;
+	std::shared_ptr<SDL_RWops> collection_rw;
+	if (shapes_file_version != M1_SHAPES_VERSION)
+	{
+		const int32 length = (bit_depth == 8 || header->offset16 == -1) ? header->length : header->length16;
+		if (length > 0)
+		{
+			collection_bytes.resize(length);
+			SDL_RWseek(p, src_offset, RW_SEEK_SET);
+			if (SDL_RWread(p, collection_bytes.data(), 1, length) == static_cast<size_t>(length))
+			{
+				collection_rw.reset(SDL_RWFromConstMem(collection_bytes.data(), length), SDL_FreeRW);
+				p = collection_rw.get();
+				src_offset = 0;
+			}
+		}
+	}
+#endif
 
 	// Read collection definition
 	std::unique_ptr<collection_definition> cd(new collection_definition);
@@ -1408,6 +1436,9 @@ void load_collections(
 			SW_Texture_Extras::instance()->Unload(collection_index);
 		}
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("load_collections: unloaded");
+#endif
 	
 	/* ... then go back through the list of collections and load any that we were asked to */
 	for (collection_index= 0, header= collection_headers; collection_index<MAXIMUM_COLLECTIONS; ++collection_index, ++header)
@@ -1442,6 +1473,9 @@ void load_collections(
 		header->flags= 0;
 	}
 
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("load_collections: read and decoded");
+#endif
 	Plugins::instance()->load_shapes_patches(is_opengl);
 
 	if (shapes_patch.size())
@@ -1450,10 +1484,16 @@ void load_collections(
 		load_shapes_patch(f, true);
 		SDL_RWclose(f);
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("load_collections: shapes patches");
+#endif
 
 	/* remap the shapes, recalculate row base addresses, build our new world color table and
 		(finally) update the screen to reflect our changes */
 	update_color_environment(is_opengl);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("load_collections: shading tables (update_color_environment)");
+#endif
 
 	// load software enhancements
 	if (!is_opengl) {
@@ -1465,6 +1505,9 @@ void load_collections(
 			}
 		}
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("load_collections: software texture extras");
+#endif
 //	if (with_progress_bar)
 //		close_progress_dialog();
 }

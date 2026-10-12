@@ -53,6 +53,10 @@
 #include "WadImageCache.h"
 #include "InfoTree.h"
 
+#ifdef A1_PLATFORM_3DS
+namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+#endif
+
 namespace algo = boost::algorithm;
 
 const int RENDER_WIDTH = 1280;
@@ -654,6 +658,9 @@ void create_updated_save(QuickSave& save)
 bool create_quick_save(void)
 {
     QuickSave save;
+#ifdef A1_PLATFORM_3DS
+    a1_3ds::time_mark("save: begin");
+#endif
 
     time(&(save.save_time));
     char fmt_time[256];
@@ -686,12 +693,24 @@ bool create_quick_save(void)
     save.save_file.AddPart(base + ".sgaA");
 	
     std::string metadata = build_save_metadata(save);
+#ifdef A1_PLATFORM_3DS
+    a1_3ds::time_mark("save: metadata");
+#endif
     std::ostringstream image_stream;
     bool success = build_map_preview(image_stream);
+#ifdef A1_PLATFORM_3DS
+    a1_3ds::time_mark("save: map preview");
+#endif
     success = save_game_file(save.save_file, metadata, image_stream.str());
+#ifdef A1_PLATFORM_3DS
+    a1_3ds::time_mark("save: file written");
+#endif
     
     if (success)
         QuickSaves::instance()->delete_surplus_saves(environment_preferences->maximum_quick_saves);
+#ifdef A1_PLATFORM_3DS
+    a1_3ds::time_mark("save: surplus saves checked");
+#endif
     return success;
 }
 

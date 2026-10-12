@@ -876,12 +876,26 @@ bool boot_begin(int& argc, char**& argv)
 	return true;
 }
 
+namespace {
+double s_last_mark_ms = 0;
+}
+
 void boot_mark(const char* what)
 {
 	if (!s_boot_begun)
 		return;
-	printf("[3ds] +%.1f ms: %s\n", ms_since_boot(), what);
+	s_last_mark_ms = ms_since_boot();
+	printf("[3ds] +%.1f ms: %s\n", s_last_mark_ms, what);
 	log_memory(what);
+}
+
+void time_mark(const char* what)
+{
+	if (!s_boot_begun)
+		return;
+	const double now = ms_since_boot();
+	printf("[3ds] +%.1f ms: %s (+%.1f ms)\n", now, what, now - s_last_mark_ms);
+	s_last_mark_ms = now;
 }
 
 namespace {

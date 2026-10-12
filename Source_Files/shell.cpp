@@ -557,8 +557,14 @@ void initialize_application(void)
 	image_cache_dir.MakeDirectory();
 	recordings_dir.MakeDirectory();
 	screenshots_dir.MakeDirectory();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("directories");
+#endif
 	
 	WadImageCache::instance()->initialize_cache();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("image cache");
+#endif
 
 #ifndef HAVE_OPENGL
 	graphics_preferences->screen_mode.acceleration = _no_acceleration;
@@ -572,6 +578,9 @@ void initialize_application(void)
 	write_preferences();
 
 	Plugins::instance()->load_mml(true);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("preferences written, plugin MML");
+#endif
 
 //	SDL_WM_SetCaption(application_name, application_name);
 
@@ -591,6 +600,9 @@ void initialize_application(void)
 
 	// Initialize everything
 	mytm_initialize();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("SDL_ttf, HTTP, timers");
+#endif
 //	initialize_fonts();
 	SoundManager::instance()->Initialize(*sound_preferences);
 #ifdef A1_PLATFORM_3DS
@@ -599,19 +611,40 @@ void initialize_application(void)
 	initialize_marathon_music_handler();
 	initialize_keyboard_controller();
 	initialize_gamma();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("intro music, keyboard, gamma");
+#endif
 	alephone::Screen::instance()->Initialize(&graphics_preferences->screen_mode);
 #ifdef A1_PLATFORM_3DS
 	a1_3ds::boot_mark("screen initialized");
 #endif
 	initialize_marathon();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("initialize_marathon");
+#endif
 	initialize_screen_drawing();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("screen drawing");
+#endif
 	initialize_dialogs();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("dialogs (theme)");
+#endif
 	initialize_terminal_manager();
 	initialize_shape_handler();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("terminals, shape handler");
+#endif
 	initialize_fades();
 	initialize_images_manager();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("fades, images");
+#endif
 	load_environment_from_preferences();
 	initialize_game_state();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("environment (scenario files), game state");
+#endif
 }
 
 void shutdown_application(void)

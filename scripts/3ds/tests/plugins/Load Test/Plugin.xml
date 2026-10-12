@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Load-time test (docs/3ds/NEXT-SPRINT.md B1): saves the game and changes
+     level on cue, so the "[3ds] ... (+N ms)" time marks of the save and of a
+     level change can be read without walking to a pattern buffer or an
+     exit. Installed by scripts/3ds/run-azahar.sh --load-test. -->
+<plugin name="Load Test" version="1.0" description="3DS test: save, then teleport to the next level" solo_lua="load.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

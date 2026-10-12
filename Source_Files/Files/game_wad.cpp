@@ -130,6 +130,10 @@ Feb 15, 2002 (Br'fin (Jeremy Parsons)):
 
 #include "Music.h"
 
+#ifdef A1_PLATFORM_3DS
+namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+#endif
+
 // unify the save game code into one structure.
 
 /* -------- local globals */
@@ -789,6 +793,9 @@ bool goto_level(
 		// ghs: hack to get new MML-specified sounds loaded
 		SoundManager::instance()->UnloadAllSounds();
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("goto_level: old map left");
+#endif
 
 	// LP: doing this here because level-specific MML may specify which level-specific
 	// textures to load.
@@ -797,6 +804,9 @@ bool goto_level(
 	{
 		RunLevelScript(entry->level_number);
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("goto_level: level script (MML)");
+#endif
 
 #if !defined(DISABLE_NETWORKING)
 	/* If the game is networked, then I must call the network code to do the right */
@@ -815,6 +825,9 @@ bool goto_level(
 		load_level_from_map(entry->level_number);
 		if(error_pending()) success= false;
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("goto_level: map read");
+#endif
 	
 	if (success)
 	{
@@ -849,6 +862,9 @@ bool goto_level(
 		// we want to be before place_initial_objects, and
 		// before MarkLuaCollections
 		RunLuaScript();
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("goto_level: Lua loaded");
+#endif
 
 		if (film_profile.early_object_initialization)
 		{

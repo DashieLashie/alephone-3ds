@@ -131,6 +131,10 @@ Feb 8, 2003 (Woody Zenfell):
 #include "a1_3ds_profile.h"	// frame profiler (docs/3ds/PERF.md)
 #endif
 
+#ifdef A1_PLATFORM_3DS
+namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+#endif
+
 /* ---------- constants */
 
 /* ---------- globals */
@@ -683,9 +687,15 @@ bool entering_map(bool restoring_saved)
 	MarkLuaHUDCollections(true);
 
 	load_collections(true, get_screen_mode()->acceleration != _no_acceleration);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("entering_map: collections (shapes)");
+#endif
 
 	load_all_monster_sounds();
 	load_all_game_sounds(static_world->environment_code);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("entering_map: sounds");
+#endif
 
 #if !defined(DISABLE_NETWORKING)
 	/* tell the keyboard controller to start recording keyboard flags */
@@ -705,6 +715,9 @@ bool entering_map(bool restoring_saved)
 //	set_keyboard_controller_status(true);
 
 	L_Call_Init(restoring_saved);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("entering_map: Lua init");
+#endif
 
 	init_interpolated_world();
 

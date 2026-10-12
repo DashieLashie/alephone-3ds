@@ -17,7 +17,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
-36-40 in stage 7 (the bottom screen, `STAGE7.md`).
+36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 in the sprint after
+it (`NEXT-SPRINT.md`).
 
 ## Summary
 
@@ -63,6 +64,8 @@ stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
 | 38 | (removed) | touch button action flags; removed with the buttons, `vbl.cpp` is back to its stage 3 state | none |
 | 39 | `Source_Files/Misc/sdl_dialogs.cpp` | in-game dialogs at 640x480 | none |
 | 40 | `Source_Files/Misc/preferences.cpp`, `preferences.h` | Bottom Screen preference | none |
+| 41 | `shell.cpp`, `Misc/interface.cpp`, `Files/game_wad.cpp`, `GameWorld/marathon2.cpp`, `XML/QuickSave.cpp`, `RenderMain/shapes.cpp` | timed log marks in boot, level loads, saves and `finish_game()` (log only) | none |
+| 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -736,3 +739,44 @@ normalised). 0 diagnostics.
 against `4981724`): `screen.cpp` (14 / 12 lines), `preferences.cpp` (20)
 and `vbl.cpp` (8) differ only in `__LINE__` values: 0 lines differ once
 numbers are normalised. 0 diagnostics.
+
+## The sprint after stage 7 (41-42)
+
+Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6). All guarded by
+`#ifdef A1_PLATFORM_3DS`.
+
+41. **Timed log marks** (log only): `a1_3ds::time_mark("what")` writes
+    `[3ds] +T ms: what (+D ms)`, D being the time since the previous mark
+    (or `boot_mark()`), into the log (`ports/3ds/source/a1_3ds_platform.cpp`).
+    Call sites: `shell.cpp` `initialize_application()` between the steps
+    after "preferences loaded" (directories, image cache, preferences and
+    plugin MML, SDL_ttf, intro music, `initialize_marathon()`, screen
+    drawing, dialogs, terminals and shape handler, fades and images, the
+    scenario files); `Misc/interface.cpp` the level change (movie, chapter
+    screen, `goto_level()`, `start_game()`), a new game (chapter screen,
+    `new_game()`, `start_game()`) and `finish_game()` (each step);
+    `Files/game_wad.cpp` `goto_level()` (old map left, level script, map
+    read, Lua loaded); `GameWorld/marathon2.cpp` `entering_map()`
+    (collections, sounds, Lua init); `XML/QuickSave.cpp`
+    `create_quick_save()` (metadata, map preview, file written, surplus
+    saves); `RenderMain/shapes.cpp` `load_collections()` (unloaded, read and
+    decoded, shapes patches, shading tables, software texture extras). The
+    files without the port header declare `a1_3ds::time_mark()` themselves.
+42. **`RenderMain/shapes.cpp`** `load_collection()`: for a Marathon 2/∞
+    shapes file, the collection's byte range (`length` or `length16` from
+    its header) is read with one `SDL_RWread()` into a buffer and parsed
+    from an `SDL_RWFromConstMem()` over it; the parsing code is unchanged
+    (its seeks are relative to `src_offset`, which becomes 0, or to the
+    current position). Upstream parses straight from the file: a few bytes
+    per read and a seek for every bitmap row, twice for RLE bitmaps. In
+    Azahar a level's collections took 28.0-28.4 s that way and 0.72-0.73 s
+    with this (`NEXT-SPRINT.md` B1). If the read comes back short, the file
+    is parsed as before. Marathon 1 shapes (resources, already in memory)
+    are untouched.
+
+**Non-3DS check** (2026-10-12, `ppcheck.sh`, both volumes; the script now
+also counts the differing lines with every number normalised):
+`shell.cpp`, `interface.cpp` and `joystick_sdl.cpp` byte-identical;
+`game_wad.cpp` (10 lines), `marathon2.cpp` (4), `QuickSave.cpp` (2) and
+`shapes.cpp` (2) differ only in numbers: 0 lines with numbers normalised.
+0 diagnostics.

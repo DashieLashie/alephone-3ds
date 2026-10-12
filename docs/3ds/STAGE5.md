@@ -46,11 +46,11 @@ in the second console session: level 1 played to the exit on a New 3DS.
 | 1 | Level 1 played to the exit with the built-in controls (the definition of done) | **Done** (second console session): to the exit and into level 2, 30 min, no crash | |
 | 2 | C-Stick and touch-look sensitivity tuning | **Open.** The player finds the C-Stick's vertical look too fast relative to the horizontal: it is easy to end up looking at the sky. Wanted: a lower vertical than horizontal sensitivity. No stick drift seen. Touch look: left for the touch-mapping redesign | no |
 | 3 | Log lock and 8 MiB linear heap seen on hardware | **Log lock done** (0 non-printable bytes in `log.txt`). **The 8 MiB split did not boot** on the console (heap past the 96 MiB heap area); **fixed** (`PATCHES.md` 25): heap 98 304 KiB, linear 19 960 KiB | |
-| 4 | HOME > Close during the menu demo takes 14.4 s (hardware only) | bug, open; from a game 0.34 s; not re-tested | no: the HOME menu stays responsive |
+| 4 | HOME > Close during the menu demo takes 14.4 s (hardware only) | bug, open; from a game 0.34 s; not re-tested. *2026-10-12:* every step of `finish_game()` now logs its time (`PATCHES.md` 41, `PERF.md` "Load times") for the next console session | no: the HOME menu stays responsive |
 | 5 | 2.8-3.9 s audio gaps at game/menu transitions | **Not reproduced**: in 30 min with game starts, a level change, a return to the menu, HOME and sleep, the longest gap between audio callbacks was 35.8 ms and none was heard (`STAGE6.md`) | |
 | 6 | Player name from the console profile (CFGU) | cosmetic, deferred by the user | no |
-| 7 | Short hitches when entering areas not seen before | **Open**, seen in the play-through; not measured | no |
-| 8 | Level change and save terminals look frozen | **Open.** A level load takes 76-97 s (`PERF.md`); after level 1's exit the screen looks frozen and broken until level 2 has loaded, and saving at a pattern buffer takes long enough to look like a hang (not timed) | no |
+| 7 | Short hitches when entering areas not seen before | **Open**, seen in the play-through; not measured (needs the console: `debug-perf` with `log 1`) | no |
+| 8 | Level change and save terminals look frozen | **Open.** A level load takes 76-97 s (`PERF.md`); after level 1's exit the screen looks frozen and broken until level 2 has loaded, and saving at a pattern buffer takes long enough to look like a hang (not timed). *2026-10-12:* 90% of a load was reading the shapes a few bytes at a time; each collection is now read in one go (`PATCHES.md` 42): a level load is 3-4 s instead of ~31 s in Azahar (`PERF.md` "Load times"). Saves are marked step by step; each writes a 2.98 MB file, mostly a BMP preview. Console figures pending | no |
 
 **Moving on:** the next stage can start with stage 5 in this state. What is
 left is tuning (the vertical C-Stick look) and open issues found in play

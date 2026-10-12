@@ -51,6 +51,12 @@ bool boot_begin(int& argc, char**& argv);
 // Logs a timestamped boot milestone with a memory snapshot.
 void boot_mark(const char* what);
 
+// Logs a timestamped step and the time since the previous one, without a
+// memory snapshot: "[3ds] +T ms: what (+D ms)". Marks the phases of the
+// slow paths (boot, level loads, saves, leaving a game) for the console
+// measurements in docs/3ds/NEXT-SPRINT.md (B1, B3, B6).
+void time_mark(const char* what);
+
 // Called each time the main menu is displayed; the first call logs time to
 // menu, memory and the video setup.
 void main_menu_displayed();
