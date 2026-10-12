@@ -138,8 +138,10 @@ directory, `perf-bench.sh exp-b-<variant>`.
   misses; with the ARM11 MPCore's 16 KB L1 instruction cache the larger
   code can cost more than it gains. **Not kept.**
 - **`-ffast-math`**: no change (the rasteriser and world are fixed-point;
-  float is in sound and a few setup paths). Only risk, no gain. **Not
-  kept.**
+  float is in sound and a few setup paths). The demo replay
+  (`12-sprite-check.txt`) is pixel-identical to `-O2` wherever a capture
+  lands on the same frame (3 of 10; the rest differ by capture timing
+  only), monsters included. Only risk, no gain. **Not kept.**
 - **LTO**: the largest number (−12% on level 0), but **it renders wrong**.
   With the fixed seed the `-O2` build matches the baseline to ±1 per
   channel at every spot, while the LTO build drops a whole wall of the
