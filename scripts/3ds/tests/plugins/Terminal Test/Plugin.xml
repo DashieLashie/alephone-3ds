@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 7 test (docs/3ds/STAGE7.md): opens the level's first terminal 3 s
+     into the level, to check terminal text on each Bottom Screen setting
+     without walking to one. Installed by scripts/3ds/run-azahar.sh
+     --terminal-test. -->
+<plugin name="Terminal Test" version="1.0" description="3DS test: open terminal 0 at level start" solo_lua="terminal.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

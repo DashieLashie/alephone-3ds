@@ -1,0 +1,63 @@
+# Stage 7 (docs/3ds/STAGE7.md): the bottom screen in game. Run once per
+# Bottom Screen setting (<graphics bottom_screen="0|1|2">: HUD, Map,
+# Classic). Touch buttons sit in the bottom strip (y 190-235): MAP at x 54,
+# ACTION at x 159, NEXT WEAPON at x 264.
+wait 1000
+screens s7-menu
+tap A                  # BEGIN NEW GAME
+wait 3000
+screens s7-chapter
+tap A                  # past the chapter screen
+wait 10000
+screens s7-start
+log --- Circle Pad up 1.5 s (walk forward) ---
+circle 0 150
+wait 1500
+circle 0 0
+wait 300
+screens s7-forward
+log --- MAP button held ---
+touch 54 212
+wait 300
+screens s7-map-held
+untouch
+wait 500
+screens s7-map
+log --- MAP button again (close) ---
+touch 54 212
+wait 200
+untouch
+wait 500
+screens s7-map-closed
+log --- NEXT WEAPON button ---
+touch 264 212
+wait 200
+untouch
+wait 2000
+screens s7-weapon
+log --- ACTION button ---
+touch 159 212
+wait 200
+untouch
+wait 500
+log --- drag above the buttons (touch look) ---
+drag 260 130 60 130 600
+untouch
+wait 300
+screens s7-look
+log --- START (quit dialog over the game), then B ---
+tap START
+wait 1500
+screens s7-dialog
+tap B
+wait 1500
+screens s7-after-dialog
+log --- HOME for 2 s ---
+home 2000
+wait 1000
+tap B
+wait 1000
+screens s7-after-home
+log --- HOME > Close ---
+quit
+wait 5000

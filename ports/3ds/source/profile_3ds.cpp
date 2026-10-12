@@ -53,7 +53,7 @@ namespace {
 
 const char kDebugPerfFile[] = "debug-perf";
 const char* const kZoneNames[kZoneCount] = {
-	"world", "render", "hud", "blit", "present", "idle", "overlay"
+	"world", "render", "hud", "blit", "present", "bottom", "idle", "overlay"
 };
 
 constexpr uint64_t kTicksPerSecond = SYSCLOCK_ARM11;
@@ -202,7 +202,7 @@ void draw_overlay(const Totals& t)
 	         per_frame(t, t.zone[Blit]));
 	snprintf(rows[4], sizeof rows[4], "present %5.1f    idle    %5.1f", per_frame(t, t.zone[Present]),
 	         per_frame(t, t.zone[Idle]));
-	snprintf(rows[5], sizeof rows[5], "other   %5.1f    audio   %5.1f", other_ms(t), per_frame(t, t.audio));
+	snprintf(rows[5], sizeof rows[5], "other   %5.1f    bottom  %5.1f", other_ms(t), per_frame(t, t.zone[Bottom]));
 	switch (s_bench)
 	{
 		case Bench::Off:
@@ -223,7 +223,7 @@ void draw_overlay(const Totals& t)
 			                                   s_bench_totals.wall : 0.0);
 			break;
 	}
-	snprintf(rows[7], sizeof rows[7], "(audio: audio thread; core 1 on hw)");
+	snprintf(rows[7], sizeof rows[7], "audio %5.1f (audio thread; core 1 on hw)", per_frame(t, t.audio));
 	const char* ptrs[8];
 	for (int i = 0; i < 8; ++i)
 		ptrs[i] = rows[i];

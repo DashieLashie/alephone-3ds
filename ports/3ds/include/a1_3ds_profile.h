@@ -32,6 +32,7 @@ enum Zone
 	Hud,        // HUD buffer update (update_interface) + its blit to the screen surface
 	Blit,       // world view -> screen surface (update_screen)
 	Present,    // screen surface -> display (MainScreenUpdateRects)
+	Bottom,     // the bottom screen in game: HUD/map, buttons, present (bottom_3ds.cpp)
 	Idle,       // in-game frame pacing sleep (shell.cpp)
 	Overlay,    // this profiler's overlay, once a second; not in the frame times
 	kZoneCount

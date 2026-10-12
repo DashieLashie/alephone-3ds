@@ -1021,6 +1021,13 @@ static const char *sw_sdl_driver_labels[5] = {
 };
 
 
+#ifdef A1_PLATFORM_3DS
+// In a1_3ds::BottomMode order.
+static const char* bottom_screen_labels[] = {
+	"HUD", "Map", "Classic (HUD on Top)", NULL
+};
+#endif
+
 static const char* ephemera_quality_labels[] = {
 	"Off", "Low", "Medium", "High", "Ultra", NULL
 };
@@ -1369,6 +1376,14 @@ static void graphics_dialog(void *arg)
 	w_enabling_toggle *hud_w = new w_enabling_toggle(graphics_preferences->screen_mode.hud);
 	table->dual_add(hud_w->label("Show HUD"), d);
 	table->dual_add(hud_w, d);
+
+#ifdef A1_PLATFORM_3DS
+	// HUD or Map: the game gets the whole top screen (400x240, 1:1) or the
+	// map gets the bottom one, with touch buttons; docs/3ds/STAGE7.md.
+	w_select *bottom_screen_w = new w_select(graphics_preferences->bottom_screen, bottom_screen_labels);
+	table->dual_add(bottom_screen_w->label("Bottom Screen"), d);
+	table->dual_add(bottom_screen_w, d);
+#endif
 	
 	std::vector<Plugin*> hud_plugins;
 	auto hud_plugin_index = -1;
@@ -1508,6 +1523,14 @@ static void graphics_dialog(void *arg)
 		    graphics_preferences->screen_mode.hud = hud;
 		    changed = true;
 	    }
+
+#ifdef A1_PLATFORM_3DS
+	    if (bottom_screen_w->get_selection() != graphics_preferences->bottom_screen)
+	    {
+		    graphics_preferences->bottom_screen = bottom_screen_w->get_selection();
+		    changed = true;
+	    }
+#endif
 
 		auto hud_plugin = static_cast<int>(hud_plugin_w->get_selection());
 		if (hud_plugin != hud_plugin_index) {
@@ -3733,6 +3756,9 @@ InfoTree graphics_preferences_tree()
 	root.put_attr("movie_export_video_bitrate", graphics_preferences->movie_export_video_bitrate);
 	root.put_attr("movie_export_audio_quality", graphics_preferences->movie_export_audio_quality);
 	root.put_attr("scripted_effects_quality", graphics_preferences->ephemera_quality);
+#ifdef A1_PLATFORM_3DS
+	root.put_attr("bottom_screen", graphics_preferences->bottom_screen);
+#endif
 	
 	root.add_color("void.color", graphics_preferences->OGL_Configure.VoidColor);
 
@@ -4246,6 +4272,9 @@ static void default_graphics_preferences(graphics_preferences_data *preferences)
 	preferences->movie_export_video_bitrate = 0; // auto
 
 	preferences->ephemera_quality = _ephemera_medium;
+#ifdef A1_PLATFORM_3DS
+	preferences->bottom_screen = 0;   // a1_3ds::BottomHud
+#endif
 }
 
 static void default_network_preferences(network_preferences_data *preferences)
@@ -4475,6 +4504,8 @@ static bool validate_graphics_preferences(graphics_preferences_data *preferences
 	clamp(preferences->software_sdl_driver, static_cast<int16>(_sw_driver_none));
 	if (preferences->screen_mode.bit_depth != 8 && preferences->screen_mode.bit_depth != 16)
 		clamp(preferences->screen_mode.bit_depth, static_cast<short>(32));
+	if (preferences->bottom_screen < 0 || preferences->bottom_screen > 2)
+		clamp(preferences->bottom_screen, static_cast<int16>(0));
 #endif
 
 	return changed;
@@ -4755,6 +4786,9 @@ void parse_graphics_preferences(InfoTree root, std::string version)
 	root.read_attr("movie_export_video_bitrate", graphics_preferences->movie_export_video_bitrate);
 
 	root.read_attr("scripted_effects_quality", graphics_preferences->ephemera_quality);
+#ifdef A1_PLATFORM_3DS
+	root.read_attr("bottom_screen", graphics_preferences->bottom_screen);
+#endif
 	
 	for (const InfoTree &vtree : root.children_named("void"))
 	{

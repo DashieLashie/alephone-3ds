@@ -15,6 +15,9 @@
 	  empty initial text, and its result is appended to the field.
 	- Bottom screen: a legend of the controls, or, with the debug-input flag
 	  file, a log of the raw SDL input events (also written to log.txt).
+	  In game with the HUD or the map on the bottom screen (docs/3ds/STAGE7.md)
+	  bottom_3ds.cpp draws it instead (bottom_game()), and a touch on its
+	  buttons strip presses a button instead of moving the pointer or the view.
 	  With the debug-audio flag file, the last four rows show the audio
 	  statistics (audio_3ds.cpp, decoders_3ds.cpp). If the DSP could not be
 	  started (no dspfirm.cdc), a notice explaining how to dump the firmware
@@ -52,6 +55,10 @@ namespace a1_3ds {
 // source/a1_3ds_platform.cpp
 double elapsed_ms();
 void save_screens(const std::string& tag);
+// source/bottom_3ds.cpp
+int bottom_button_at(float x, float y);
+void bottom_button_set(int button, bool down);
+void bottom_force_redraw();
 
 namespace {
 
@@ -77,6 +84,9 @@ bool s_debug_audio = false;
 
 PrintConsole s_bottom;
 const devoptab_t* s_console_out = nullptr;   // the console's stdout device
+// The game draws the bottom screen (bottom_game(true)): the console must not,
+// as it keeps a pointer to the framebuffer it was set up with.
+bool s_bottom_game = false;
 std::deque<std::string> s_overlay_lines;     // debug-input: last lines shown
 
 const char kLegend[] =
@@ -104,7 +114,8 @@ const char kLegend[] =
 	"\x1b[33mMenus\x1b[0m\n"
 	" D-Pad move, A select, B back\n"
 	"\n"
-	"Change them in Preferences > Controls.";
+	"Change them in Preferences > Controls.\n"
+	"HUD/map here: Graphics > Bottom Screen";
 
 // The missing-DSP notice: not shown yet, showing, dismissed (once per run).
 enum class DspNotice { Pending, Showing, Dismissed };
@@ -130,7 +141,7 @@ const char kDspFirmwareNotice[] =
 
 void console_write(const char* text)
 {
-	if (!s_console_out)
+	if (!s_console_out || s_bottom_game)
 		return;
 	PrintConsole* previous = consoleSelect(&s_bottom);
 	s_console_out->write_r(_REENT, nullptr, text, strlen(text));
@@ -143,7 +154,7 @@ void console_write(const char* text)
 // screen's configuration.
 void bottom_present()
 {
-	if (!s_console_out)
+	if (!s_console_out || s_bottom_game)
 		return;
 	gfxFlushBuffers();
 	gfxScreenSwapBuffers(GFX_BOTTOM, false);
@@ -170,7 +181,7 @@ void perf_rows_draw()
 
 void bottom_redraw()
 {
-	if (!s_console_out)
+	if (!s_console_out || s_bottom_game)
 		return;
 	console_write("\x1b[2J");
 	if (s_dsp_notice == DspNotice::Showing)
@@ -210,18 +221,27 @@ void bottom_redraw()
 	bottom_present();
 }
 
-void bottom_init()
+// (Re)attaches the console to the bottom screen: RGB565, single-buffered,
+// its framebuffer pointer taken from libctru.
+void console_attach()
 {
 	// consoleInit() points stdout/stderr at the console; keep the log tee.
 	const devoptab_t* saved_out = devoptab_list[STD_OUT];
 	const devoptab_t* saved_err = devoptab_list[STD_ERR];
 	PrintConsole* previous = consoleSelect(&s_bottom);   // consoleInit selects s_bottom
 	consoleInit(GFX_BOTTOM, &s_bottom);
-	s_console_out = devoptab_list[STD_OUT];
+	// libctru installs its console device only on the first consoleInit().
+	if (!s_console_out)
+		s_console_out = devoptab_list[STD_OUT];
 	devoptab_list[STD_OUT] = saved_out;
 	devoptab_list[STD_ERR] = saved_err;
 	if (previous && previous != &s_bottom)
 		consoleSelect(previous);
+}
+
+void bottom_init()
+{
+	console_attach();
 	bottom_redraw();
 }
 
@@ -432,6 +452,7 @@ bool s_touch_block_pending = false; // decide at the next scan (after a keyboard
 float s_last_tx = 0, s_last_ty = 0;   // bottom-screen pixels
 float s_look_rem_x = 0, s_look_rem_y = 0;
 int s_pointer_x = 0, s_pointer_y = 0; // window pixels
+int s_touch_button = -1;           // the finger is on this bottom-screen button
 
 SDL_Window* main_window()
 {
@@ -511,6 +532,28 @@ void handle_finger(const SDL_TouchFingerEvent& f, Uint32 type)
 	const float tx = f.x * GSP_SCREEN_HEIGHT_BOTTOM;   // 0..320
 	const float ty = f.y * GSP_SCREEN_WIDTH;           // 0..240
 
+	// A finger that went down on a bottom-screen button stays a button
+	// press until it is lifted.
+	if (s_touch_button >= 0)
+	{
+		if (type == SDL_FINGERUP)
+		{
+			bottom_button_set(s_touch_button, false);
+			s_touch_button = -1;
+		}
+		return;
+	}
+	if (type == SDL_FINGERDOWN && s_bottom_game && !s_touch_blocked)
+	{
+		const int button = bottom_button_at(tx, ty);
+		if (button >= 0)
+		{
+			s_touch_button = button;
+			bottom_button_set(button, true);
+			return;
+		}
+	}
+
 	if (type == SDL_FINGERUP)
 	{
 		s_finger_down = false;
@@ -533,11 +576,22 @@ void handle_finger(const SDL_TouchFingerEvent& f, Uint32 type)
 	if (s_touch_look)
 	{
 		// Relative motion in bottom-screen pixels, sent as window pixels;
-		// SDL's renderer then scales it to logical pixels (x2). With the
+		// SDL's renderer then scales it to logical pixels. The engine gets
+		// 2 logical pixels per bottom-screen pixel: with the 640x480 logical
+		// screen that is SDL's scaling (renderer scale 0.5), with the 400x240
+		// one (STAGE7.md, scale 1) the motion is doubled here. With the
 		// default mouse sensitivity (0.25) a drag across the whole screen
 		// turns about 220 degrees.
-		s_look_rem_x += tx - s_last_tx;
-		s_look_rem_y += ty - s_last_ty;
+		float k = 1.0f;
+		if (SDL_Renderer* r = SDL_GetRenderer(w))
+		{
+			float sx = 0, sy = 0;
+			SDL_RenderGetScale(r, &sx, &sy);
+			if (sx > 0)
+				k = 2.0f * sx;
+		}
+		s_look_rem_x += (tx - s_last_tx) * k;
+		s_look_rem_y += (ty - s_last_ty) * k;
 		s_last_tx = tx;
 		s_last_ty = ty;
 		const int dx = static_cast<int>(s_look_rem_x);
@@ -626,6 +680,11 @@ void on_suspend(const char* why)
 	push_window_event(SDL_WINDOWEVENT_FOCUS_LOST);
 	release_pointer(main_window());
 	s_finger_down = false;
+	if (s_touch_button >= 0)
+	{
+		bottom_button_set(s_touch_button, false);
+		s_touch_button = -1;
+	}
 }
 
 void on_resume(const char* why)
@@ -643,6 +702,8 @@ void on_resume(const char* why)
 	push_window_event(SDL_WINDOWEVENT_EXPOSED);   // dialogs redraw on this
 	s_touch_block_pending = true;   // a touch that closed the HOME menu is not a tap
 	bottom_redraw();
+	if (s_bottom_game)
+		bottom_force_redraw();   // the HOME menu may have replaced the bottom screen
 }
 
 // Called by libctru inside aptMainLoop() (SDL_PumpEvents() on the main
@@ -1088,6 +1149,38 @@ void set_touch_look(bool look)
 bool exit_requested()
 {
 	return s_exit_requested;
+}
+
+void bottom_game(bool game)
+{
+	if (game == s_bottom_game || !s_console_out)
+		return;
+	if (s_touch_button >= 0)
+	{
+		bottom_button_set(s_touch_button, false);
+		s_touch_button = -1;
+	}
+	if (game)
+	{
+		// Double-buffered, so a HUD update never shows half drawn. The
+		// screen stays RGB565 (consoleInit's format): half the bytes of RGBA8.
+		s_bottom_game = true;
+		gfxSetDoubleBuffering(GFX_BOTTOM, true);
+		bottom_force_redraw();
+	}
+	else
+	{
+		s_bottom_game = false;
+		console_attach();   // single-buffered again, with the console's framebuffer
+		bottom_redraw();
+	}
+	if (s_debug_input)
+		log_input("bottom screen: %s", game ? "game" : "legend");
+}
+
+bool bottom_is_game()
+{
+	return s_bottom_game;
 }
 
 #ifdef A1_PROFILE

@@ -1,0 +1,17 @@
+# Stage 7 (docs/3ds/STAGE7.md): terminal text on the current Bottom Screen
+# setting. Needs run-azahar.sh --terminal-test (the plugin opens terminal 0
+# 3 s into the level).
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 16000
+screens s7-term-1
+tap R                  # action: next page
+wait 1500
+screens s7-term-2
+tap R
+wait 1500
+screens s7-term-3
+quit
+wait 5000

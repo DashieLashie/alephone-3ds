@@ -105,6 +105,38 @@ SDL_Surface *Map_Buffer = NULL;
 // A bitmap_definition view of world_pixels for software rendering
 static bitmap_definition_buffer software_render_dest;
 
+#ifdef A1_PLATFORM_3DS
+// The bottom screen (docs/3ds/STAGE7.md). With Bottom Screen set to HUD or
+// Map the in-game screen surface is 400x240 and goes to the top screen 1:1
+// ("native"); menus, chapters and dialogs keep 640x480 (halved). The
+// preference is read when the game screen is set up; render_screen()
+// switches the surface when it no longer matches (after a dialog, or when a
+// Lua HUD starts: Lua HUDs need 640x480 and get Classic).
+static a1_3ds::BottomMode bottom_mode()
+{
+	const int m = graphics_preferences->bottom_screen;
+	if (m < a1_3ds::BottomHud || m > a1_3ds::BottomClassic || LuaHUDRunning())
+		return a1_3ds::BottomClassic;
+	return static_cast<a1_3ds::BottomMode>(m);
+}
+
+static bool native_wanted()
+{
+	return bottom_mode() != a1_3ds::BottomClassic;
+}
+
+// The 400x240 in-game surface is up.
+static bool native_screen()
+{
+	return main_surface && main_surface->w == 400;
+}
+
+// The next render_screen() redraws everything (the surface was replaced).
+static bool force_full_redraw = false;
+
+static void scale_terminal_layout();
+#endif
+
 #ifdef HAVE_OPENGL
 static OGL_Blitter Term_Blitter;
 static OGL_Blitter Intro_Blitter;
@@ -325,16 +357,29 @@ float Screen::pixel_scale()
 
 int Screen::window_height()
 {
+#ifdef A1_PLATFORM_3DS
+	if (native_screen())
+		return 240;
+#endif
 	return std::max(static_cast<short>(480), screen_mode.height);
 }
 
 int Screen::window_width()
 {
+#ifdef A1_PLATFORM_3DS
+	if (native_screen())
+		return 400;
+#endif
 	return std::max(static_cast<short>(640), screen_mode.width);
 }
 
 bool Screen::hud()
 {
+#ifdef A1_PLATFORM_3DS
+	// The HUD is on the bottom screen: the top screen is all view.
+	if (native_screen() && bottom_mode() == a1_3ds::BottomHud)
+		return false;
+#endif
 	return screen_mode.hud;
 }
 
@@ -355,6 +400,12 @@ bool Screen::fifty_percent()
 
 bool Screen::seventyfive_percent()
 {
+#ifdef A1_PLATFORM_3DS
+	// The 3DS pins the screen mode to 400x240, which also reads as the
+	// legacy 75% view size; the native surface has the whole screen for the view.
+	if (native_screen())
+		return false;
+#endif
 	return screen_mode.height == 240;
 }
 
@@ -507,6 +558,14 @@ SDL_Rect Screen::hud_rect()
 			break;
 	}
 	r.h = r.w / 4;
+#ifdef A1_PLATFORM_3DS
+	// Map on the bottom screen: the HUD halved (2x2), under the view.
+	if (native_screen())
+	{
+		r.w = 320;
+		r.h = 80;
+	}
+#endif
 	r.x = (width() - r.w) / 2;
 	r.y = window_height() - r.h + (height() - window_height()) / 2;
 
@@ -1108,6 +1167,9 @@ static void change_screen_mode(int width, int height, int depth, bool nogl, bool
 		Term_Buffer = NULL;
 	}
 
+#ifdef A1_PLATFORM_3DS
+	scale_terminal_layout();
+#endif
     screen_rectangle *term_rect = get_interface_rectangle(_terminal_screen_rect);
 	Term_Buffer = SDL_CreateRGBSurface(SDL_SWSURFACE, RECTANGLE_WIDTH(term_rect), RECTANGLE_HEIGHT(term_rect), 32, pixel_format_32.Rmask, pixel_format_32.Gmask, pixel_format_32.Bmask, pixel_format_32.Amask);
 
@@ -1143,6 +1205,151 @@ static void change_screen_mode(int width, int height, int depth, bool nogl, bool
 		L_Call_HUDResize();
 	}
 }
+
+#ifdef A1_PLATFORM_3DS
+/*
+ *  Readable terminals (docs/3ds/STAGE7.md)
+ *
+ *  Terminal text is laid out at 640x320 with a 12-point font: 6 pixels tall
+ *  once the 640x480 screen is halved for the top screen. Before Term_Buffer
+ *  is (re)allocated, the terminal rectangles are fitted to the space the
+ *  terminal gets on this screen (x and y separately) and the terminal fonts
+ *  are sized for about kTerminalTextPx screen pixels, or smaller if the
+ *  header and footer lines (two labels each, up to kTerminalLabelChars
+ *  characters together) would not fit across. computer_interface.cpp wraps the text and
+ *  counts lines per page from these when a terminal is entered, so the text
+ *  reflows. The header and footer bars grow with the font; the rectangles
+ *  between them are stretched to fit. The scenario's values (MML) are the
+ *  reference, so its overrides are kept. Networked games precompute their
+ *  pages and keep the scenario's layout.
+ */
+static const short kTerminalRects[] = {
+	_terminal_screen_rect, _terminal_header_rect, _terminal_footer_rect, _terminal_full_text_rect,
+	_terminal_left_rect, _terminal_right_rect, _terminal_logon_graphic_rect, _terminal_logon_title_rect,
+	_terminal_logon_location_rect
+};
+static const short kTerminalFonts[] = {_computer_interface_font, _computer_interface_title_font};
+static const float kTerminalTextPx = 11.0f;
+static const int kTerminalLabelChars = 57;
+
+static void scale_terminal_layout()
+{
+	const int nr = sizeof(kTerminalRects) / sizeof(kTerminalRects[0]);
+	const int nf = sizeof(kTerminalFonts) / sizeof(kTerminalFonts[0]);
+	static screen_rectangle orig[nr], set[nr];
+	static short orig_size[nf], set_size[nf];
+	static bool saved = false;
+
+	// The scenario's values: the first time, and whenever something other
+	// than this function changed them since.
+	for (int i = 0; i < nr; ++i)
+	{
+		const screen_rectangle& r = *get_interface_rectangle(kTerminalRects[i]);
+		if (!saved || memcmp(&r, &set[i], sizeof r))
+			orig[i] = r;
+	}
+	for (int i = 0; i < nf; ++i)
+	{
+		const short size = get_interface_font(kTerminalFonts[i]).Size;
+		if (!saved || size != set_size[i])
+			orig_size[i] = size;
+	}
+	saved = true;
+
+	const screen_rectangle& o = orig[0];
+	const int W0 = o.right - o.left, H0 = o.bottom - o.top;
+	float Rx = 1.0f, Ry = 1.0f, F = 1.0f;
+	const bool scale = !game_is_networked && W0 > 0 && H0 > 0 && orig_size[0] > 0;
+	if (scale)
+	{
+		const int avail_w = Screen::instance()->window_width();
+		int avail_h = Screen::instance()->window_height();
+		if (Screen::instance()->hud() && !Screen::instance()->lua_hud())
+			avail_h -= Screen::instance()->hud_rect().h;
+		Rx = std::min(1.0f, avail_w / static_cast<float>(W0));
+		Ry = std::min(1.0f, avail_h / static_cast<float>(H0));
+		const float screen_px_per_pixel = native_screen() ? 1.0f : 0.5f;
+		F = kTerminalTextPx / screen_px_per_pixel / orig_size[0];
+	}
+
+	// The body font: as large as asked, as long as a header line fits.
+	const std::string label_line(kTerminalLabelChars, 'M');
+	FontSpecifier& body = get_interface_font(kTerminalFonts[0]);
+	short body_size = std::max<short>(6, static_cast<short>(orig_size[0] * F + 0.5f));
+	for (;;)
+	{
+		if (body.Size != body_size)
+		{
+			body.Size = body_size;
+			body.Update();
+		}
+		if (!scale || body_size <= 6 || body.TextWidth(label_line.c_str()) <= W0 * Rx - 8)
+			break;
+		--body_size;
+	}
+	set_size[0] = body.Size;
+	F = body.Size / static_cast<float>(orig_size[0]);
+	for (int i = 1; i < nf; ++i)
+	{
+		FontSpecifier& font = get_interface_font(kTerminalFonts[i]);
+		const short size = std::max<short>(6, static_cast<short>(orig_size[i] * F + 0.5f));
+		if (font.Size != size)
+		{
+			font.Size = size;
+			font.Update();
+		}
+		set_size[i] = font.Size;
+	}
+
+	// y: header [0, hh0] -> [0, A], footer [H0 - fh0, H0] -> [H - B, H], the
+	// rest linearly in between. x: scaled by R.
+	const int line = _get_font_line_height(_computer_interface_font);
+	const int hh0 = std::max(1, orig[1].bottom - orig[1].top);
+	const int fh0 = std::max(1, orig[2].bottom - orig[2].top);
+	const int H = static_cast<int>(H0 * Ry + 0.5f);
+	const int A = std::max(static_cast<int>(hh0 * Ry + 0.5f), line + 2);
+	const int B = std::max(static_cast<int>(fh0 * Ry + 0.5f), line + 2);
+	auto map_x = [&](int x) { return static_cast<short>(o.left + static_cast<int>((x - o.left) * Rx + 0.5f)); };
+	auto map_y = [&](int y) {
+		const int rel = y - o.top;
+		int out;
+		if (rel <= hh0)
+			out = rel * A / hh0;
+		else if (rel >= H0 - fh0)
+			out = H - (H0 - rel) * B / fh0;
+		else
+			out = A + (rel - hh0) * (H - B - A) / std::max(1, H0 - fh0 - hh0);
+		return static_cast<short>(o.top + out);
+	};
+	for (int i = 0; i < nr; ++i)
+	{
+		const screen_rectangle& r = orig[i];
+		screen_rectangle& dst = *get_interface_rectangle(kTerminalRects[i]);
+		if (r.top == 0 && r.left == 0 && r.bottom == 0 && r.right == 0)
+			dst = r;   // unused
+		else if (Rx == 1.0f && Ry == 1.0f && F == 1.0f)
+			dst = r;
+		else
+		{
+			dst.left = map_x(r.left);
+			dst.right = map_x(r.right);
+			dst.top = map_y(r.top);
+			dst.bottom = map_y(r.bottom);
+		}
+		set[i] = dst;
+	}
+
+	static float logged_Rx = 0, logged_Ry = 0, logged_F = 0;
+	if (Rx != logged_Rx || Ry != logged_Ry || F != logged_F)
+	{
+		logged_Rx = Rx;
+		logged_Ry = Ry;
+		logged_F = F;
+		printf("[3ds] terminals: %dx%d, font %d/%d (line %d)\n", map_x(o.right) - o.left, H,
+		       set_size[0], set_size[1], line);
+	}
+}
+#endif
 
 bool get_auto_resolution_size(short *w, short *h, struct screen_mode_data *mode)
 {
@@ -1188,6 +1395,13 @@ void change_screen_mode(struct screen_mode_data *mode, bool redraw, bool resize_
 		}
 		else
 			get_auto_resolution_size(&w, &h, mode);
+#ifdef A1_PLATFORM_3DS
+		if (in_game && native_wanted())
+		{
+			w = 400;
+			h = 240;
+		}
+#endif
 		change_screen_mode(w, h, mode->bit_depth, false, !in_game, resize_hud);
 		clear_screen();
 		recenter_mouse();
@@ -1211,6 +1425,13 @@ void change_screen_mode(short screentype)
 		get_auto_resolution_size(&w, &h, mode);
 	
 	bool force_menu_size = (screentype == _screentype_menu || screentype == _screentype_chapter);
+#ifdef A1_PLATFORM_3DS
+	if (!force_menu_size && native_wanted())
+	{
+		w = 400;
+		h = 240;
+	}
+#endif
 	change_screen_mode(w, h, mode->bit_depth, false, force_menu_size);
 	clear_screen();
 	recenter_mouse();
@@ -1283,6 +1504,15 @@ extern bool is_network_pregame;
 
 void render_screen(short ticks_elapsed)
 {
+#ifdef A1_PLATFORM_3DS
+	// Back from a dialog (which needs 640x480), or a Lua HUD started.
+	if (native_screen() != native_wanted())
+	{
+		change_screen_mode(_screentype_level);
+		force_full_redraw = true;
+	}
+	bool hud_to_bottom = false;   // the HUD buffer changed and goes to the bottom screen
+#endif
 	// Make whatever changes are necessary to the world_view structure based on whichever player is frontmost
 	world_view->ticks_elapsed = ticks_elapsed;
 	world_view->tick_count = dynamic_world->tick_count;
@@ -1400,12 +1630,24 @@ void render_screen(short ticks_elapsed)
 	initialize_view_data(world_view);
 
 	bool update_full_screen = false;
+#ifdef A1_PLATFORM_3DS
+	if (force_full_redraw)
+	{
+		force_full_redraw = false;
+		SwitchedModes = true;
+	}
+#endif
 	if (ViewChangedSize || MapChangedSize || SwitchedModes) {
 		clear_screen_margin();
 		if (!OGL_IsActive() && DrawEveryOtherLine)
 			clear_screen();
 		update_full_screen = true;
+#ifdef A1_PLATFORM_3DS
+		// The HUD buffer is drawn wherever the HUD is shown (top or bottom screen).
+		if (!game_window_is_full_screen() && !Screen::instance()->lua_hud() && !is_network_pregame)
+#else
 		if (Screen::instance()->hud() && !Screen::instance()->lua_hud() && !is_network_pregame)
+#endif
 			draw_interface();
 
 		// Reallocate the drawing buffer
@@ -1579,6 +1821,22 @@ void render_screen(short ticks_elapsed)
 			A1_PROF_SCOPE(Hud);
 #endif
 			SDL_Rect src_rect = { 0, 320, 640, 160 };
+#ifdef A1_PLATFORM_3DS
+			if (native_screen() && !Screen::instance()->hud())
+				hud_to_bottom = true;   // HUD on the bottom screen
+			else if (native_screen() && HUD_Buffer->format->BytesPerPixel == 4 &&
+			         main_surface->format->BytesPerPixel == 4)
+			{
+				// Map on the bottom screen: the HUD halved under the view,
+				// averaged 2x2 like the 640x480 present.
+				const Uint8* src = static_cast<const Uint8*>(HUD_Buffer->pixels) + 320 * HUD_Buffer->pitch;
+				Uint8* dst = static_cast<Uint8*>(main_surface->pixels) + HUD_DestRect.y * main_surface->pitch +
+				             HUD_DestRect.x * 4;
+				a1_3ds::half_blit(src, HUD_Buffer->pitch, HUD_DestRect.w, HUD_DestRect.h, dst,
+				                  main_surface->pitch);
+			}
+			else
+#endif
 			DrawSurface(HUD_Buffer, HUD_DestRect, src_rect);
 			HUD_RenderRequest = false;
 		}
@@ -1606,6 +1864,15 @@ void render_screen(short ticks_elapsed)
 		{
 			MainScreenUpdateRects(1, &ViewRect);
 		}
+#ifdef A1_PLATFORM_3DS
+		{
+#ifdef A1_PROFILE
+			A1_PROF_SCOPE(Bottom);
+#endif
+			a1_3ds::bottom_frame(native_screen() ? bottom_mode() : a1_3ds::BottomClassic,
+			                     hud_to_bottom || update_full_screen);
+		}
+#endif
 	}
 
 #ifdef HAVE_OPENGL
@@ -2326,6 +2593,9 @@ void MainScreenUpdateRects(size_t count, const SDL_Rect *rects)
 	A1_PROF_SCOPE(Present);
 #endif
 #ifdef A1_PLATFORM_3DS
+	// Menus, chapters and dialogs (640x480): the legend on the bottom screen.
+	if (!native_screen())
+		a1_3ds::bottom_game(false);
 	// Straight into the framebuffer, without SDL's texture, renderer and
 	// window copies (docs/3ds/PERF.md); SDL presents what it cannot handle.
 	if (a1_3ds::present_screen(main_surface->pixels, main_surface->pitch,

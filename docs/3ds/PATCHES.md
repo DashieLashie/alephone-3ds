@@ -16,7 +16,8 @@ Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link);
 entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
-stage 6 (audio, `STAGE6.md`), 34 onwards in the performance stage (`PERF.md`).
+stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
+36-40 in stage 7 (the bottom screen, `STAGE7.md`).
 
 ## Summary
 
@@ -57,6 +58,11 @@ stage 6 (audio, `STAGE6.md`), 34 onwards in the performance stage (`PERF.md`).
 | 33 | `Source_Files/shell.cpp` | in-game frame pacing sleeps instead of spinning | none |
 | 34 | `RenderOther/screen.cpp`, `Misc/interface.cpp`, `GameWorld/marathon2.cpp`, `shell.cpp` | frame profiler call sites (`A1_PROFILE` builds only) | none |
 | 35 | `Source_Files/RenderOther/screen.cpp` | direct present into the framebuffer | none |
+| 36 | `Source_Files/RenderOther/screen.cpp` | terminal rectangles and fonts fitted to the screen | none (networked games keep the scenario's layout) |
+| 37 | `Source_Files/RenderOther/screen.cpp`, `screen_shared.h` | 400x240 in-game screen, HUD on the bottom screen or halved | none |
+| 38 | `Source_Files/Misc/vbl.cpp` | touch button action flags | none |
+| 39 | `Source_Files/Misc/sdl_dialogs.cpp` | in-game dialogs at 640x480 | none |
+| 40 | `Source_Files/Misc/preferences.cpp`, `preferences.h` | Bottom Screen preference | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -673,3 +679,52 @@ Added 2026-10-11 (`PERF.md`).
     they remain the fallback for any other surface size or format. Measured
     in `PERF.md` (experiment a). **Non-3DS check** (2026-10-11): differs
     only in `__LINE__` values inside logging macros (as 34).
+
+## Stage 7 bottom screen (36-40)
+
+Added 2026-10-12 (`STAGE7.md`). All guarded by `#ifdef A1_PLATFORM_3DS`;
+the 3DS side is `ports/3ds/source/bottom_3ds.cpp`, `video_3ds.cpp` and
+`input_3ds.cpp`.
+
+36. **`RenderOther/screen.cpp`** `scale_terminal_layout()`, called in
+    `change_screen_mode()` before `Term_Buffer` is allocated: the
+    `_terminal_*` interface rectangles are fitted to the space the terminal
+    has (x and y scaled separately, the header and footer bars at least one
+    line tall, the rectangles between them stretched) and the
+    `_computer_interface_font` / `_computer_interface_title_font` sizes set
+    for about 11 screen pixels (`FontSpecifier::Size` + `Update()`), smaller
+    if 57 characters would not fit across. The scenario's (MML) values are
+    the reference and are kept when they change. `computer_interface.cpp`
+    is unchanged: it wraps and paginates from these when a terminal opens.
+    Skipped in networked games (their pages are counted in advance).
+37. **`RenderOther/screen.cpp`, `screen_shared.h`**: with Bottom Screen set
+    to HUD or Map, the in-game logical screen is 400x240
+    (`change_screen_mode()` both overloads); `Screen::window_width/height()`
+    follow a 400-wide surface; `seventyfive_percent()` is false for it;
+    `Screen::hud()` is false in HUD mode; `hud_rect()` is 320x80 on it.
+    `game_window_is_full_screen()` is `!screen_mode.hud`, so the HUD buffer
+    is drawn when the HUD is on either screen (also at the `draw_interface()`
+    call in `render_screen()`). The HUD blit in `render_screen()` hands the
+    change to the bottom screen (HUD mode) or halves it with
+    `a1_3ds::half_blit()` (Map mode), and `render_screen()` calls
+    `a1_3ds::bottom_frame()`; it also switches the surface size when it no
+    longer matches the setting (after a dialog; a Lua HUD gets Classic).
+    `MainScreenUpdateRects()` returns the bottom screen to the legend for any
+    640x480 present.
+38. **`Misc/vbl.cpp`** `parse_keymap()`: ORs in
+    `a1_3ds::take_touch_action_flags()` (the bottom screen's MAP, ACTION and
+    NEXT WEAPON buttons) right after the key bindings, before the latching.
+39. **`Misc/sdl_dialogs.cpp`** `dialog::start()`: a top-level dialog over a
+    logical screen narrower than 640 switches to the menu size
+    (`change_screen_mode(_screentype_menu)`).
+40. **`Misc/preferences.cpp`, `preferences.h`**: `graphics_preferences_data::bottom_screen`
+    (`<graphics bottom_screen="0|1|2">`, default 0 = HUD, clamped in the 3DS
+    block of `validate_graphics_preferences()`), and its "Bottom Screen"
+    selector in the Graphics dialog's Heads-Up Display section.
+
+**Non-3DS check** (2026-10-12, `ppcheck.sh`, `aleph-host-build` and
+`aleph-host-build-nonet`): `sdl_dialogs.cpp`, `Misc/interface.cpp` and
+`shell.cpp` byte-identical; `preferences.cpp` (20 lines), `screen.cpp`
+(14 / 12) and `vbl.cpp` (8) differ only in `__LINE__` values inside logging
+and assert macros (each removed line has an added twin once numbers are
+normalised). 0 diagnostics.

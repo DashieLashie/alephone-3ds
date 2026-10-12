@@ -120,7 +120,36 @@ bool text_input(const std::string& hint, std::string& text, size_t max_chars, Te
 // then swapped at the next VBlank. Waits for a VBlank first if the previous
 // swap has not happened yet. Returns false, having done nothing, for any
 // other size or format; the caller then presents through SDL.
+// A 400x240 surface (the in-game screen with the HUD or the map on the
+// bottom screen, docs/3ds/STAGE7.md) goes to the top screen 1:1.
 bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format);
+
+// A 320x240 XRGB8888 picture onto the bottom screen (RGB565), swapped at the
+// next VBlank. The bottom screen must be in game mode (bottom_game(true)).
+bool present_bottom(const void* pixels, int pitch);
+
+// 2x2 box average of a 32-bit picture: `w` x `h` output pixels from 2w x 2h
+// source pixels, as present_screen() halves the 640x480 screen.
+void half_blit(const void* src, int src_pitch, int w, int h, void* dst, int dst_pitch);
+
+// --- Bottom screen (docs/3ds/STAGE7.md; implementation: ports/3ds/source/bottom_3ds.cpp,
+// input_3ds.cpp) ---
+
+// Who draws the bottom screen: the legend console (menus, dialogs, Classic)
+// or the game (HUD or map, and the touch buttons). Cheap to call every frame.
+void bottom_game(bool game);
+bool bottom_is_game();
+
+// The Bottom Screen preference (graphics preferences, "bottom_screen").
+enum BottomMode { BottomHud = 0, BottomMap = 1, BottomClassic = 2 };
+
+// End of each rendered game frame (RenderOther/screen.cpp). `hud_changed`:
+// the HUD buffer was redrawn since the last call.
+void bottom_frame(BottomMode mode, bool hud_changed);
+
+// The touch buttons pressed since the last call, as action flags
+// (Misc/vbl.cpp parse_keymap). Main thread.
+uint32_t take_touch_action_flags();
 
 // --- Audio (docs/3ds/STAGE6.md; implementation: ports/3ds/source/audio_3ds.cpp) ---
 // The AudioBackend itself is declared in Sound/AudioBackend.h

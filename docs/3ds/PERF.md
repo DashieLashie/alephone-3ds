@@ -132,7 +132,13 @@ the 30 minutes, and:
 - Audio: 0 underruns in 28.6 min played (`STAGE6.md`).
 
 **For the UI stage's view resolution** (the view gets the whole 400x240
-top screen). The two Resolution settings give two points of the
+top screen). **Correction (stage 7, `STAGE7.md`):** the view measured here
+is 480x240 (115 200 pixels), not 640x320: the port's 400x240 screen mode
+is also the engine's legacy "75%" view size (`Screen::seventyfive_percent()`),
+and Low renders 240x120 (28 800). Through those points the rasteriser costs
+about **2.0 ms + 4.05 ms per 100 000 pixels**, twice the slope below, so
+800x480 would be ~17.6 ms of `render` (and ~34 ms busy, below 30 fps).
+Stage 7 renders the view at 400x240 1:1 instead. The original estimate: The two Resolution settings give two points of the
 rasteriser's cost on this console, level 0: 6.67 ms for 640x320 (204 800
 pixels) and 3.17 ms for 320x160 (51 200). A straight line through them is
 about **2.0 ms + 2.28 ms per 100 000 pixels**. Extrapolated (estimates,

@@ -2282,6 +2282,14 @@ void dialog::start(bool play_sound)
 	parent_dialog = top_dialog;
 	top_dialog = this;
 
+#ifdef A1_PLATFORM_3DS
+	// Dialogs are laid out for 640x480. Over the 400x240 game screen (HUD or
+	// map on the bottom screen, docs/3ds/STAGE7.md) switch to that size;
+	// render_screen() switches back at the next game frame.
+	if (!parent_dialog && MainScreenLogicalWidth() < 640)
+		change_screen_mode(_screentype_menu);
+#endif
+
 	// Clear dialog surface
 	SDL_FillRect(dialog_surface, NULL, get_theme_color(DIALOG_FRAME, DEFAULT_STATE, BACKGROUND_COLOR));
 

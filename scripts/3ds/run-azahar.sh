@@ -33,6 +33,8 @@
 #   --level-music  install scripts/3ds/tests/plugins/Level Music Test in the scenario's
 #                  Plugins (Music.ogg on every level; Marathon 2 has no level music);
 #                  without this option it is removed
+#   --terminal-test  install scripts/3ds/tests/plugins/Terminal Test (solo Lua: opens the
+#                  level's first terminal 3 s in; docs/3ds/STAGE7.md); without it it is removed
 #   --no-dspfirm   hide sdmc:/3ds/dspfirm.cdc for this run (restored afterwards), to see
 #                  the game run without a DSP: no sound and the one-time notice
 #   --perf LEVEL   frame benchmark (an A1_PROFILE build; docs/3ds/PERF.md): writes
@@ -65,6 +67,7 @@ audio_debug=0
 no_dspfirm=0
 decoders=0
 level_music=0
+terminal_test=0
 perf_level=
 
 while [ $# -gt 0 ]; do
@@ -80,6 +83,7 @@ while [ $# -gt 0 ]; do
 		--no-dspfirm) no_dspfirm=1 ;;
 		--decoders) decoders=1 ;;
 		--level-music) level_music=1 ;;
+		--terminal-test) terminal_test=1 ;;
 		--perf) shift; perf_level=${1:?--perf needs a level number} ;;
 		-h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
 		-*) echo "run-azahar: unknown option $1" >&2; exit 2 ;;
@@ -216,6 +220,12 @@ if [ "$copy_data" = 1 ]; then
 	if [ "$level_music" = 1 ]; then
 		cp -R "$repo/scripts/3ds/tests/plugins/Level Music Test" "$plugin"
 		echo "run-azahar: installed the Level Music Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Terminal Test"
+	rm -rf "$plugin"
+	if [ "$terminal_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Terminal Test" "$plugin"
+		echo "run-azahar: installed the Terminal Test plugin"
 	fi
 fi
 

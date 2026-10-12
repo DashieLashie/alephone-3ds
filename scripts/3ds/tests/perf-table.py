@@ -13,7 +13,7 @@ import re
 import sys
 from collections import defaultdict
 
-COLS = ["fps", "frame", "busy", "max", "world", "render", "hud", "blit", "present", "idle", "other"]
+COLS = ["fps", "frame", "busy", "max", "world", "render", "hud", "blit", "present", "bottom", "idle", "other"]
 
 
 def load(path):
@@ -24,6 +24,7 @@ def load(path):
         kv = dict(re.findall(r"(\w+)=([-\d.]+)", line))
         r = {k: float(v) for k, v in kv.items() if k != "level"}
         r["busy"] = r["frame"] - r["idle"]
+        r.setdefault("bottom", 0.0)   # results from before the bottom zone (STAGE7.md)
         runs[int(kv["level"])].append(r)
     return runs
 

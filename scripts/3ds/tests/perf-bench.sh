@@ -15,8 +15,10 @@
 # build-3ds-prof/alephone.3dsx (configure with -DA1_PROFILE=ON).
 #
 # PREFS="attr=value ..." sets attributes of the <graphics> preferences for
-# the series (e.g. PREFS="scmode_highres=false fps_target=60"); the file is
-# restored afterwards. The game must have written its preferences once.
+# the series (e.g. PREFS="scmode_highres=false fps_target=60", or
+# "bottom_screen=2" for Classic, docs/3ds/STAGE7.md); missing attributes are
+# added. The file is restored afterwards. The game must have written its
+# preferences once.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 label=${1:?usage: perf-bench.sh LABEL [3dsx]}
@@ -38,8 +40,12 @@ if [ -n "${PREFS:-}" ]; then
 	trap 'cp "$out/prefs.bak" "$prefs"; echo "perf-bench: preferences restored"' EXIT
 	for kv in $PREFS; do
 		k=${kv%%=*}; v=${kv#*=}
-		grep -q " $k=\"" "$prefs" || { echo "perf-bench: no $k in $prefs" >&2; exit 1; }
-		sed -i '' "s/ $k=\"[^\"]*\"/ $k=\"$v\"/" "$prefs"
+		if grep -q " $k=\"" "$prefs"; then
+			sed -i '' "s/ $k=\"[^\"]*\"/ $k=\"$v\"/" "$prefs"
+		else
+			# Not written yet (e.g. bottom_screen before a build that knows it).
+			sed -i '' "s/<graphics /<graphics $k=\"$v\" /" "$prefs"
+		fi
 	done
 	echo "perf-bench: preferences: $PREFS" | tee -a "$results"
 fi

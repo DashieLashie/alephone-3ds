@@ -457,7 +457,12 @@ screen_mode_data *get_screen_mode(
 bool game_window_is_full_screen(
 	void)
 {
+#ifdef A1_PLATFORM_3DS
+	// "No HUD to draw": the HUD may be on the bottom screen (screen.cpp).
+	return !screen_mode.hud;
+#else
 	return !alephone::Screen::instance()->hud();
+#endif
 }
 
 
