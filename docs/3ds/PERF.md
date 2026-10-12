@@ -18,7 +18,56 @@ cap the frame time stays 33 ms and the gain shows as idle time instead.
 
 | c | half-resolution rendering, 2x upscale (the engine's Resolution: Low) | 16.7 / 16.1 / 15.8 (−24 to −28% vs a) | 30.3 | **visibly coarser**: loses the 2x2 supersampling | no (stays an option) |
 
+| d | force the 30 fps cap, no interpolation | (30 is already the default, without interpolation) | 60 / Unlimited: **42.8 / 48.0 / 48.2** | forcing 30 shows fewer frames to anyone who chose 60 | no (decide on hardware) |
+
 <!-- EXPERIMENTS -->
+
+## Experiment d: 30 fps cap, no interpolation
+
+**What the engine already does.** The default Framerate Target is 30, the
+world's tick rate, and at exactly 30 the engine does no interpolation
+(`init_interpolated_world()`, `get_heartbeat_fraction()` return early).
+The experiment was to *force* that on the 3DS: clamp `fps_target` to 30 in
+`validate_graphics_preferences()` and hide the option. So it can only
+change things for players who pick 60, 120 or Unlimited. Measured with
+`PREFS="fps_target=60"` and `"fps_target=0"` on the experiment a build:
+
+| Level | target | fps | busy / frame | world | present | idle |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 30 | 30.32 | 23.10 | 0.36 | 7.65 | 9.88 |
+| 0 | 60 | **42.77** | 23.38 | **1.57** | 6.67 | 0.01 |
+| 0 | Unlimited | 42.78 | 23.37 | 1.57 | 6.67 | 0.00 |
+| 6 | 30 | 30.36 | 20.95 | 0.36 | 7.74 | 11.98 |
+| 6 | 60 | **48.02** | 20.82 | **1.41** | 6.61 | 0.01 |
+| 20 | 30 | 30.36 | 20.70 | 0.48 | 7.73 | 12.25 |
+| 20 | 60 | **48.17** | 20.76 | **1.48** | 6.86 | 0.01 |
+
+- Interpolation costs ~1.1 ms per frame (`world` 0.4 → 1.5: the
+  interpolated object and camera positions), so forcing 30 saves that much
+  per frame, plus all the idle time: at 60/Unlimited the main thread never
+  sleeps (idle 0), as with upstream's Unlimited (`STAGE6.md`, loop audit).
+- But in Azahar the game is now fast enough to show **43-48 interpolated
+  frames per second** instead of 30. Forcing 30 would take that away from
+  anyone who chose it: fewer frames on screen, i.e. a visible regression
+  for them, and no change at all for the default.
+- 60 and Unlimited behave the same here (neither reaches 60).
+
+**Decision: not kept for now** (no commit of the clamp). Whether 60 is
+worth offering depends on the console's real frame time, which Azahar
+does not give (no cache model): if a New 3DS cannot get clearly above ~40
+fps with a 60 target (hardware checklist), the 43-48 fps advantage is
+gone, uneven pacing on the 60 Hz LCD and a CPU that never sleeps remain,
+and the clamp should go in. It is six lines:
+
+```diff
+ 	// Misc/preferences.cpp, graphics dialog
++#ifndef A1_PLATFORM_3DS
+ 	table->dual_add(fps_target_w->label("Framerate Target"), d);
+ 	table->dual_add(fps_target_w, d);
++#endif
+ 	// validate_graphics_preferences(), in the A1_PLATFORM_3DS block
++	clamp(preferences->fps_target, static_cast<int16>(30));
+```
 
 ## Experiment c: half-resolution rendering
 
