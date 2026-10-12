@@ -46,7 +46,7 @@ stage 6 (audio, `STAGE6.md`), 34 onwards in the performance stage (`PERF.md`).
 | 22 | `Source_Files/Misc/interface.cpp` | HOME > Close skips quit screens, fades, scenario reload | none |
 | 23 | `Source_Files/Misc/interface.cpp` | main menu starts with BEGIN NEW GAME highlighted | none |
 | 24 | `Source_Files/Misc/sdl_dialogs.cpp` | dialogs focus their first widget when they set no default | none |
-| 25 | `ports/3ds/source/a1_3ds_platform.cpp`: `__ctru_linear_heap_size` (port file) | 8 MiB linear heap, +24 MiB for malloc | none |
+| 25 | `ports/3ds/source/a1_3ds_platform.cpp`: `__ctru_linear_heap_size`, `__system_allocateHeaps()` (port file) | linear heap at least 8 MiB, malloc the rest up to the 96 MiB heap area | none |
 | 26 | `Source_Files/Sound/AudioBackend.h` | the 3DS AudioBackend | none |
 | 27 | `Source_Files/Sound/Decoder.cpp` | Ogg Vorbis / MP3 decoders | Ogg Opus, FLAC (not decoded on 3DS) |
 | 28 | `Source_Files/Sound/SoundManager.h`, `SoundManager.cpp` | 3DS audio parameters | HRTF, 3D sounds, surround channel layouts (**by design**) |
@@ -539,7 +539,35 @@ rest to malloc:
 `nm`: `__ctru_linear_heap_size` is `D` (was libctru's weak `V`). Too small
 a value would fail at boot (SDL video or audio init), not mid-game. A GPU
 renderer (citro3d: textures, command buffers) needs linear memory: revisit
-the size then. Hardware check of the new split: next console session.
+the size then.
+
+**Hardware fix (2026-10-11, PERF.md hardware session).** The split above
+**did not boot on a New 3DS**: the console stopped before `main()` with a
+Luma3DS exception screen, no `log.txt` and no 3dslink output. The Luma dump
+(`/luma/dumps/arm11/crash_dump_00000000.dmp`) has PC = `svcBreak`, LR =
+`__system_allocateHeaps` (libctru 2.7.0 `allocateHeaps.c:66`, the failed
+heap `svcControlMemory`), SP = `0x0fffffc0` (the kernel's initial stack)
+and `r3` = `0x06B7E000`: libctru asked for a 110 072 KiB heap, which would
+end at `0x0EB7E000`. The heap must fit the heap area
+`OS_HEAP_AREA_BEGIN..OS_HEAP_AREA_END` (`0x08000000..0x0E000000`, 96 MiB,
+`3ds/os.h`); the console's kernel refuses more, Azahar does not check it.
+With only `__ctru_linear_heap_size` set, libctru gives the heap everything
+else and has no such cap.
+
+The port now also defines `__system_allocateHeaps()` (libctru's is weak):
+the same steps as libctru 2.7.0 (resource-limit commit, heap, linear heap,
+`mappableInit`, `fake_heap_start/end`), but the heap is
+`min(remaining − 8 MiB, 96 MiB)` and the linear heap gets the rest. On
+this console (New 3DS, 124 MiB mode through the Homebrew Launcher):
+
+| | 8 MiB linear (did not boot) | now (boot log) |
+| --- | ---: | ---: |
+| heap | 110 072 KiB (requested) | **98 304 KiB** (1 024 stack + 97 280 malloc) |
+| linear heap | 8 192 KiB | **19 960 KiB** (17 860 free at the menu) |
+
+Below 104 MiB of free memory (Old 3DS, or the 64/96 MiB modes) the cap does
+not apply and the split is exactly the 8 MiB one above. Seven boots on the
+console in the same session, a 30-minute play-through among them.
 
 ## Not patched, by design
 

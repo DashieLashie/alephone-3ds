@@ -43,12 +43,55 @@
 // Linear heap (STAGE5-PREREQS.md item 4). libctru's default gives it 32 MiB
 // whenever more than 56 MiB is available; only the framebuffers (2100 KiB)
 // and SDL's audio ring (12 KiB) use it, also during gameplay on hardware.
-// 8 MiB keeps ~4x that and gives the other 24 MiB to malloc. A GPU renderer
-// (citro3d) would need more: revisit then.
+// 8 MiB keeps ~4x that and gives the rest to malloc, up to the kernel's heap
+// area (below). A GPU renderer (citro3d) would need more: revisit then.
 extern "C" {
 u32 __stacksize__ = 1024 * 1024;
 u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
 extern u32 __ctru_heap;   // heap base = bottom of the main stack
+extern u32 __ctru_heap_size;
+extern u32 __ctru_linear_heap;
+extern char* fake_heap_start;
+extern char* fake_heap_end;
+}
+
+// Replaces libctru's weak __system_allocateHeaps() (libctru 2.7.0
+// allocateHeaps.c, same steps). With only __ctru_linear_heap_size set,
+// libctru gives the heap everything else: ~108 MiB with New 3DS extended
+// memory, past the end of the heap area (OS_HEAP_AREA_BEGIN..END, 96 MiB).
+// The console's kernel refuses that and libctru stops in svcBreak before
+// main() (Luma dump: PC svcBreak, LR __system_allocateHeaps); Azahar does
+// not enforce the area. So the heap is capped at the area and whatever
+// does not fit goes to the linear heap (PATCHES.md 25).
+extern "C" void __system_allocateHeaps(void)
+{
+	Handle reslimit = 0;
+	if (R_FAILED(svcGetResourceLimit(&reslimit, CUR_PROCESS_HANDLE)))
+		svcBreak(USERBREAK_PANIC);
+	ResourceLimitType type = RESLIMIT_COMMIT;
+	s64 max_commit = 0, current_commit = 0;
+	svcGetResourceLimitLimitValues(&max_commit, reslimit, &type, 1);
+	svcGetResourceLimitCurrentValues(&current_commit, reslimit, &type, 1);
+	svcCloseHandle(reslimit);
+	const u32 remaining = static_cast<u32>(max_commit - current_commit) & ~0xFFFu;
+	if (remaining <= __ctru_linear_heap_size)
+		svcBreak(USERBREAK_PANIC);
+
+	const u32 heap_area = OS_HEAP_AREA_END - OS_HEAP_AREA_BEGIN;
+	__ctru_heap_size = std::min(remaining - __ctru_linear_heap_size, heap_area);
+	__ctru_linear_heap_size = remaining - __ctru_heap_size;
+
+	const MemPerm rw = static_cast<MemPerm>(MEMPERM_READ | MEMPERM_WRITE);
+	if (R_FAILED(svcControlMemory(&__ctru_heap, OS_HEAP_AREA_BEGIN, 0, __ctru_heap_size,
+	                              MEMOP_ALLOC, rw)))
+		svcBreak(USERBREAK_PANIC);
+	if (R_FAILED(svcControlMemory(&__ctru_linear_heap, 0, 0, __ctru_linear_heap_size,
+	                              MEMOP_ALLOC_LINEAR, rw)))
+		svcBreak(USERBREAK_PANIC);
+
+	mappableInit(OS_MAP_AREA_BEGIN, OS_MAP_AREA_END);
+	fake_heap_start = reinterpret_cast<char*>(__ctru_heap);
+	fake_heap_end = fake_heap_start + __ctru_heap_size;
 }
 
 #ifndef A1_3DS_USER_DIR
