@@ -21,7 +21,7 @@ the rest is port code (`ports/3ds/source/bottom_3ds.cpp`, `video_3ds.cpp`,
 | 2 | HUD draw refactored minimally (`A1_PLATFORM_3DS`) to target another surface; prefs [HUD on bottom \| Map on bottom \| Classic] | **Done.** Graphics > Heads-Up Display > **Bottom Screen**: HUD (default), Map, Classic (HUD on Top). The HUD is still drawn into its 640x480 buffer by the engine; only where that buffer goes changed (`PATCHES.md` 37) |
 | 3 | Touch buttons (map, action, next weapon) injecting the same actions as the key bindings | **Done.** MAP, ACTION, NEXT WEAPON in a strip at the bottom of the bottom screen (HUD and Map modes); a tap is one input tick of the action flag, OR-ed in where the bindings are read (`PATCHES.md` 38) |
 | 4 | Terminals readable at 400x240 (font scaling via SDL2_ttf) or terminals on the bottom screen | **Done, by font scaling** in all three modes: the terminal fonts are resized (SDL2_ttf) and the terminal rectangles fitted to the screen, and the engine reflows the text (`PATCHES.md` 36) |
-| | **DoD: all three modes work on hardware; perf regression < 1 ms/frame (A1_PROFILE)** | **Azahar: met.** All three modes work (captures here and in "Testing"). Busy time (A1_PROFILE): Classic 0.0 to −0.1 ms vs before; HUD −5.5 ms; Map −7.4 to −8.5 ms ("Performance"). The budget was restated with the user as Classic within 1 ms of before and HUD/Map at or below Classic + 1 ms, since the chosen top screen changes what is rendered. **Hardware: not run yet**: checklist at the end |
+| | **DoD: all three modes work on hardware; perf regression < 1 ms/frame (A1_PROFILE)** | **Met on a New 3DS** ("Hardware results"): all three modes pass the functional checks; busy time (A1_PROFILE) Classic −0.02 to +0.14 ms vs before, HUD −5.4 to −5.9 ms and Map −6.1 to −6.5 ms vs Classic, 30 fps in every run. **Azahar: met** as well (Classic 0.0 to −0.1 ms; HUD −5.5 ms; Map −7.4 to −8.5 ms, "Performance"). The budget was restated with the user as Classic within 1 ms of before and HUD/Map at or below Classic + 1 ms, since the chosen top screen changes what is rendered |
 
 ## SDL2's N3DS driver and a second window
 
@@ -172,9 +172,118 @@ is `exp-a3` (`PERF.md` experiment a', the code at `9a5c4a5`).
   ~40% faster than in Azahar, so expect less.
 - `render` in HUD mode (400x240, 96 000 pixels) is 9-11% below Classic's
   480x240 (115 200); Map mode's 320x160 view is 40% below.
-- **Not measured on hardware yet.** Azahar's ranking held on the console in
-  `PERF.md`, where the present was underestimated, which favours the 1:1
-  modes.
+- **On a New 3DS** the ranking holds and the gap is about the same
+  (HUD −5.4 to −5.9 ms, Map −6.1 to −6.5 ms against Classic): "Hardware
+  results" below.
+
+## Hardware results (New 3DS, 2026-10-12)
+
+**Setup.** New 3DS, Luma3DS, Homebrew Launcher, 3dslink, as in `PERF.md`
+"Hardware results". The builds at `f8328ab`: `build-3ds` for the functional
+checks, `build-3ds-prof` (`-DA1_PROFILE=ON`) for the benchmarks. Each
+benchmark is one `debug-perf` run (`settle 8`, `measure 20`, `quit 1`)
+started by pressing A twice; the mode was set by editing `bottom_screen`
+in the prefs file over ftpd. Default preferences otherwise, except the sound
+rate: the prefs file on the card had **44100 Hz** (the DSP resamples),
+where the `PERF.md` session ran at the DSP's native 32728 Hz. Audio runs on
+core 1, so busy time is comparable (Classic matches to 0.14 ms), but the
+`audio` zone is higher (10.2-10.8 ms against 8.0-8.1). No `debug-audio`.
+Logs, 3dslink transcripts and captures: `build-3ds/hw/stage7/` (not in git).
+
+| ![HUD mode, top, New 3DS](img/stage7-hw-hud-top.png) | ![HUD mode, bottom, New 3DS](img/stage7-hw-hud-bottom.png) |
+| --- | --- |
+| ![Map mode, top, New 3DS](img/stage7-hw-map-top.png) | ![Map mode, bottom, New 3DS](img/stage7-hw-map-bottom.png) |
+
+Level 0 at the end of the benchmark, HUD (above) and Map (below), captured
+on the console (`screen-perf-L0-*.bmp`). The layout is the Azahar
+captures' (the HUD bottom screen differs from Azahar's only in 79 radar
+pixels); the 3D view and the map differ because the Azahar captures come
+from the input script, which walks elsewhere.
+
+**BENCH lines** (ms per frame; busy = frame − idle; "before" is `PERF.md`'s
+hardware run at `2603d0d`):
+
+| Mode | Level | fps | frame | max | **busy** | vs before | vs Classic | world | render | hud | blit | present | **bottom** | idle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 0 / 6 / 20 | 30.52 / 30.53 / 30.52 | 32.77 / 32.76 / 32.76 | 57.7 / 58.0 / 58.8 | 18.25 / 17.70 / 17.57 | | | 0.34 / 0.32 / 0.43 | 6.67 / 6.32 / 5.98 | 0.55-0.57 | 1.36-1.39 | 8.68-8.82 | — | 14.52 / 15.06 / 15.19 |
+| **Classic** | 0 / 6 / 20 | 30.42 / 30.52 / 30.52 | 32.87 / 32.76 / 32.77 | 119.8 / 58.0 / 57.6 | **18.24 / 17.84 / 17.55** | **−0.01 / +0.14 / −0.02** | | 0.46 / 0.32 / 0.43 | 6.65 / 6.34 / 6.00 | 0.54-0.57 | 1.41-1.45 | 8.67-8.78 | 0.00 | 14.63 / 14.92 / 15.22 |
+| **HUD** | 0 / 6 / 20 | 30.27 / 30.32 / 30.32 | 33.03 / 32.98 / 32.99 | 107.3 / 39.1 / 39.2 | **12.79 / 11.90 / 11.76** | −5.46 / −5.80 / −5.81 | **−5.45 / −5.94 / −5.79** | 0.43 / 0.30 / 0.40 | 5.71 / 5.02 / 4.78 | 0.11 | 0.93-0.95 | 4.15-4.23 | **0.84-0.86** | 20.24 / 21.08 / 21.23 |
+| **Map** | 0 / 6 / 20 | 30.27 / 30.32 / 30.31 | 33.03 / 32.99 / 32.99 | 115.9 / 42.3 / 41.4 | **11.90 / 11.39 / 11.44** | −6.35 / −6.31 / −6.13 | **−6.34 / −6.45 / −6.11** | 0.44 / 0.30 / 0.40 | 4.08 / 3.84 / 3.49 | 0.36-0.37 | 0.58-0.60 | 4.18-4.21 | **1.61-1.84** | 21.13 / 21.60 / 21.55 |
+
+`gaps=0` in every run; 622-624 frames per 20 s window in Classic (as
+before), 619-620 in HUD and Map.
+
+**Pass criteria: all met.**
+
+- **Classic** is within **0.14 ms** of before on all three levels (budget:
+  1 ms); every zone is within 0.15 ms of before.
+- **HUD and Map** are **5.4-6.5 ms below Classic** (budget: at or below
+  Classic + 1 ms).
+- **30 fps holds** in every run (30.27-30.52 fps, `gaps=0`).
+
+**Console against Azahar** ("Performance" above):
+
+| Mode | busy, Azahar L0 / L6 / L20 | busy, New 3DS | change |
+| --- | --- | --- | --- |
+| Classic | 21.52 / 19.47 / 19.19 | 18.24 / 17.84 / 17.55 | −15% / −8% / −9% |
+| HUD | 16.03 / 13.84 / 13.67 | 12.79 / 11.90 / 11.76 | −20% / −14% / −14% |
+| Map | 13.02 / 11.80 / 11.83 | 11.90 / 11.39 / 11.44 | −9% / −3% / −3% |
+
+- **`render`** is 39-49% below Azahar, as in `PERF.md`. The rasteriser line
+  `PERF.md` corrected in this stage (2.0 ms + 4.05 ms per 100 000 pixels,
+  level 0) predicts **5.9 ms** for HUD's 400x240 and **4.1 ms** for Map's
+  320x160; the console measured **5.71** and **4.08**.
+- **`present`** (the 1:1 400x240 copy) is **4.15-4.23 ms**: 52% below
+  Classic's averaging present (8.7-8.8), but three times Azahar's 1.41 ms.
+  Copies cost more on the console (memory traffic, `PERF.md`), so the
+  1:1 modes gain less there than in Azahar, Map the least.
+- **`bottom`**: HUD **0.84-0.86 ms** (Azahar 1.08-1.09), Map
+  **1.61-1.84 ms** (Azahar 1.98-2.29) with the map redrawn every 3rd frame.
+  Below Azahar in both modes: `kMapEvery` stays 3.
+- **fps**: HUD and Map count 619-620 frames per window against Classic's
+  622-624 (30.27-30.32 fps against 30.42-30.52), with more idle time. Both
+  are above the 30 fps cap's floor; not investigated (the bottom present
+  can wait for a VBlank of its own, `present_bottom()`).
+- **`max`** on **level 0** is **107-120 ms in all three modes**, Classic
+  included, against 57.7 ms in `PERF.md`'s session; levels 6 and 20 stay
+  at 39-58 ms. Classic shows it too, so it is not the HUD or Map path. The
+  sound rate (44100 Hz here, 32728 Hz then) is the one setting known to
+  differ; not checked. Open.
+
+**Memory** (`main loop ended`):
+
+| Run | malloc in use | malloc free | linear heap free |
+| --- | --- | --- | --- |
+| benchmarks, all modes and levels (profile build) | 22 609-27 409 KiB | 69 870-74 670 KiB | 17 840 KiB of 19 952 |
+| HUD functional run: 5 dialog round trips, HOME, sleep (normal build) | 27 623 KiB | 69 656 KiB | **17 848 KiB** of 19 960 |
+| Map functional run | 25 462 KiB | 71 817 KiB | 17 848 KiB |
+| Classic functional run | 25 068 KiB | 72 211 KiB | 17 848 KiB |
+| `PERF.md` session, level 0 (profile build at `2603d0d`) | | | 17 848 KiB of 19 960 |
+
+The linear heap ends at the same free size in every run, with or without
+dialogs, and as before stage 7. The HUD-mode surface reallocated on each
+dialog round trip leaves nothing behind there. malloc use varies with how
+much of the level was played.
+
+**Functional checks** (normal build, the player on the console;
+✓ = as expected):
+
+| Check | HUD | Map | Classic |
+| --- | --- | --- | --- |
+| Start a game: top and bottom screens as in the captures | ✓ | ✓ | ✓ (as before, legend on the bottom) |
+| MAP opens the top-screen map, MAP again closes it | ✓ | ✓ | ✓ (key binding; no buttons in Classic) |
+| NEXT WEAPON changes the weapon; ACTION at a door or switch | ✓ | ✓ | n/a |
+| Drag above the buttons to look (Touch Screen Aiming on); speed as in Classic | ✓ | ✓ | ✓ (reference) |
+| START: dialog, legend on the bottom screen; B: game and HUD/map back | ✓ (5 round trips) | ✓ | ✓ |
+| HOME and back | ✓ (5.2 s) | ✓ (3.4 s) | ✓ (3.8 s) |
+| Sleep (lid closed) and wake: the bottom screen comes back | ✓ (0.9 s) | ✓ (0.9 s, a second run) | ✓ (1.0 s) |
+| Terminal in level 1: legible, header and footer apart, paging | ✓ (400x240, font 10/12) | ✓ (400x160) | ✓ (640x320, font 19/22) |
+| No tearing or flicker on the bottom screen while the radar or map moves | ✓ | ✓ | ✓ |
+| Quit to the main menu: the legend is back | ✓ | ✓ | ✓ |
+
+The player found no problem in any mode. The terminal sizes are from the
+log (`[3ds] terminals:`); in HUD and Map the layout switches to 640x320
+for each dialog and back, which is how the round trips were counted.
 
 ## Testing (Azahar 2126.2)
 
@@ -188,6 +297,8 @@ The mode is the `bottom_screen` attribute of `<graphics>` in the prefs file
 (0 HUD, 1 Map, 2 Classic).
 
 ## Hardware checklist (New 3DS)
+
+**Carried out 2026-10-12**: results in "Hardware results".
 
 1. Build `build-3ds` and `build-3ds-prof`; copy `alephone.3dsx` as usual.
 2. For each Bottom Screen setting (Preferences > Graphics):
@@ -210,7 +321,14 @@ The mode is the `bottom_screen` attribute of `<graphics>` in the prefs file
 - With HUD or Map, the profiler's rows and the `debug-audio` rows are not
   shown in game (the bottom screen is the game's); the log still has them.
 - Map mode redraws the map at 10 Hz (every 3rd frame); the level name is
-  drawn at the top of the map as on the top screen's map.
+  drawn at the top of the map as on the top screen's map. On the console
+  `bottom` averages 1.6-1.8 ms.
+- On the console HUD and Map run at 30.27-30.32 fps against Classic's
+  30.42-30.52 (619-620 frames per 20 s against 622-624), with more idle
+  time. Not investigated.
+- Level 0's longest frame (`max`) was 107-120 ms on the console in all
+  three modes, Classic included, against 58 ms before this stage; the sound
+  rate differed (44100 Hz against 32728). Not investigated.
 - Networked games keep the scenario's terminal layout (their pages are
   counted before the game).
 - The look area says "drag here to look" even when Touch Screen Aiming is

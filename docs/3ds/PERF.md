@@ -25,6 +25,10 @@ as it is (no clamp). Resolution: Low is not needed. The session also found
 and fixed a boot failure on hardware (`PATCHES.md` 25: the heap must fit
 the 96 MiB heap area).
 
+**Stage 7 on the New 3DS (2026-10-12):** Classic within 0.14 ms of these
+figures, the HUD and Map bottom-screen modes 5.4-6.5 ms busy below it, 30 fps
+everywhere: [`STAGE7.md`](STAGE7.md), "Hardware results".
+
 ## Results
 
 Every figure is ms per frame in Azahar (see "How to read these numbers").
