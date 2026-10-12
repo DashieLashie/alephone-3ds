@@ -21,6 +21,9 @@
 #                            otherwise (default Marathon2)
 #   NETLOAD_IP               3DS address for the run-3dslink target (empty:
 #                            3dslink finds the console by broadcast)
+#   A1_PROFILE               frame profiler: per-frame timings on the bottom
+#                            screen and the debug-perf benchmark (docs/3ds/PERF.md);
+#                            OFF by default
 #
 # Extra targets:
 #   run-3dslink   send alephone.3dsx to the Homebrew Launcher's NetLoader (Y)
@@ -72,6 +75,7 @@ set(A1_3DS_SMDH_TITLE "Aleph One" CACHE STRING "SMDH title")
 set(A1_3DS_SMDH_DESCRIPTION "Marathon engine" CACHE STRING "SMDH short description")
 set(A1_3DS_SMDH_AUTHOR "Aleph One developers / 3DS port by DashieLashie" CACHE STRING "SMDH author")
 set(A1_3DS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.png" CACHE FILEPATH "48x48 SMDH icon")
+option(A1_PROFILE "Frame profiler and benchmark mode (docs/3ds/PERF.md)" OFF)
 
 # --- Compiler flags ----------------------------------------------------------
 # The toolchain supplies -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -99,6 +103,9 @@ add_compile_options(
   "$<$<COMPILE_LANGUAGE:CXX>:-frtti>"
 )
 add_compile_definitions(HAVE_CONFIG_H A1_PLATFORM_3DS)
+if(A1_PROFILE)
+  add_compile_definitions(A1_PROFILE)
+endif()
 if(NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "-D__3DS__")
   add_compile_definitions(__3DS__)   # normally already in the toolchain flags
 endif()
@@ -308,6 +315,10 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/selftest.cpp
 # buffers to the DSP, so ndspChnWaveBufAdd is wrapped.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/audio_3ds.cpp")
 target_link_options(alephone PRIVATE "LINKER:--wrap=ndspChnWaveBufAdd")
+# Frame profiler (A1_PROFILE builds; docs/3ds/PERF.md).
+if(A1_PROFILE)
+  target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/profile_3ds.cpp")
+endif()
 # Ogg Vorbis (Tremor) and MP3 (mpg123) decoders for Sound/Decoder.cpp.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/decoders_3ds.cpp")
 # Input: touch screen, HOME menu/sleep, system keyboard, debug-input log and
@@ -407,4 +418,4 @@ message(STATUS "Summary: SDL2 ${A1_SDL_sdl2_VERSION}, SDL2_ttf ${A1_SDL_SDL2_ttf
                "audio: OpenAL Soft ${A1_OPENAL_VERSION}, decoding: libsndfile ${A1_SNDFILE_VERSION} "
                "+ Tremor ${A1_CODECS_vorbisidec_VERSION} + mpg123 ${A1_CODECS_libmpg123_VERSION}, "
                "user dir \"${A1_3DS_USER_DIR}\", default scenario \"${A1_3DS_DEFAULT_SCENARIO}\", "
-               "build type ${CMAKE_BUILD_TYPE}")
+               "build type ${CMAKE_BUILD_TYPE}, profiler ${A1_PROFILE}")

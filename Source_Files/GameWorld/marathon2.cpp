@@ -127,6 +127,10 @@ Feb 8, 2003 (Woody Zenfell):
 #include "ephemera.h"
 #include "interpolated_world.h"
 
+#ifdef A1_PROFILE
+#include "a1_3ds_profile.h"	// frame profiler (docs/3ds/PERF.md)
+#endif
+
 /* ---------- constants */
 
 /* ---------- globals */
@@ -547,6 +551,9 @@ update_world()
 	} 
 	else if (theElapsedTime)
 	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(Hud);
+#endif
 		update_interface(theElapsedTime);
 		update_fades(true);
 	}

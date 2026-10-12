@@ -151,6 +151,23 @@ void bottom_present()
 
 void audio_overlay_draw();
 
+#ifdef A1_PROFILE
+// The profiler's rows (profile_3ds.cpp), shown instead of the legend.
+std::vector<std::string> s_perf_rows;
+
+void perf_rows_draw()
+{
+	for (size_t i = 0; i < s_perf_rows.size(); ++i)
+	{
+		char pos[16];
+		snprintf(pos, sizeof pos, "\x1b[%d;1H", static_cast<int>(i) + 1);
+		console_write(pos);
+		console_write(s_perf_rows[i].c_str());
+		console_write("\x1b[K");   // clear to the end of the row
+	}
+}
+#endif
+
 void bottom_redraw()
 {
 	if (!s_console_out)
@@ -183,7 +200,11 @@ void bottom_redraw()
 		}
 	}
 	else
+#ifdef A1_PROFILE
+		perf_rows_draw();
+#else
 		console_write(kLegend);
+#endif
 	if (s_debug_audio)
 		audio_overlay_draw();
 	bottom_present();
@@ -1068,6 +1089,26 @@ bool exit_requested()
 {
 	return s_exit_requested;
 }
+
+#ifdef A1_PROFILE
+// profile_3ds.cpp: the benchmark is over (debug-perf "quit 1").
+void request_quit()
+{
+	s_script.quit = true;   // SDL_QUIT on every hidScanInput, as the script's "quit"
+	s_exit_requested = true;
+}
+
+// profile_3ds.cpp, once a second during play: the rows replace the legend.
+// The debug-input log and the no-sound notice take precedence.
+void perf_overlay_show(const char* const rows[], int count)
+{
+	s_perf_rows.assign(rows, rows + count);
+	if (!s_console_out || s_debug_input || s_dsp_notice == DspNotice::Showing)
+		return;
+	perf_rows_draw();
+	bottom_present();
+}
+#endif
 
 bool text_input(const std::string& hint, std::string& text, size_t max_chars, TextKind kind)
 {

@@ -208,6 +208,9 @@ const short max_handled_recording= RECORDING_VERSION_ALEPH_ONE_1_11;
 #ifdef A1_PLATFORM_3DS
 #include "a1_3ds_platform.h"
 #endif
+#ifdef A1_PROFILE
+#include "a1_3ds_profile.h"	// frame profiler (docs/3ds/PERF.md)
+#endif
 
 using alephone::Screen;
 
@@ -1231,7 +1234,13 @@ bool idle_game_state(uint64_t time)
 	{
 		// ZZZ change: update_world() whether or not get_keyboard_controller_status() is true
 		// This way we won't fill up queues and stall netgames if one player switches out for a bit.
+#ifdef A1_PROFILE
+		a1_3ds::prof::push(a1_3ds::prof::World);
+#endif
 		std::pair<bool, int16> theUpdateResult= update_world();
+#ifdef A1_PROFILE
+		a1_3ds::prof::pop();
+#endif
 		short ticks_elapsed= theUpdateResult.second;
 		bool redraw = false;
 
@@ -2701,6 +2710,11 @@ static bool begin_game(
 			} else {
 				entry.level_number= 0;
 			}
+#ifdef A1_PROFILE
+			// debug-perf benchmark: start the level it names
+			if (int bench_level = a1_3ds::prof::bench_level(); bench_level >= 0)
+				entry.level_number= bench_level;
+#endif
 	
 			// ZZZ: let the user use his behavior modifiers in single-player.
 			restore_custom_player_behavior_modifiers();

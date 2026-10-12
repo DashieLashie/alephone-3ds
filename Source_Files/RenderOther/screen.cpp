@@ -73,6 +73,10 @@
 
 #include <algorithm>
 
+#ifdef A1_PROFILE
+#include "a1_3ds_profile.h"	// frame profiler (docs/3ds/PERF.md)
+#endif
+
 #if defined(__WIN32__) || (defined(__MACH__) && defined(__APPLE__))
 #define MUST_RELOAD_VIEW_CONTEXT
 #endif
@@ -1448,7 +1452,13 @@ void render_screen(short ticks_elapsed)
 		software_render_dest = bitmap_definition_of_sdl_surface(world_pixels);
 	
 	// Render world view
+#ifdef A1_PROFILE
+	a1_3ds::prof::push(a1_3ds::prof::Render);
+#endif
 	render_view(world_view, software_render_dest.get());
+#ifdef A1_PROFILE
+	a1_3ds::prof::pop();
+#endif
 
     // clear Lua drawing from previous frame
     // (SDL is slower if we do this before render_view)
@@ -1540,7 +1550,15 @@ void render_screen(short ticks_elapsed)
 		// Update world window
 		if (!world_view->terminal_mode_active &&
 			(!world_view->overhead_map_active || MapIsTranslucent))
+#ifdef A1_PROFILE
+		{
+			a1_3ds::prof::push(a1_3ds::prof::Blit);
 			update_screen(BufferRect, ViewRect, HighResolution, DrawEveryOtherLine);
+			a1_3ds::prof::pop();
+		}
+#else
+			update_screen(BufferRect, ViewRect, HighResolution, DrawEveryOtherLine);
+#endif
 		
 		// Update map
 		if (world_view->overhead_map_active) {
@@ -1554,6 +1572,9 @@ void render_screen(short ticks_elapsed)
 			Lua_DrawHUD(ticks_elapsed);
 		}
 		else if (HUD_RenderRequest) {
+#ifdef A1_PROFILE
+			A1_PROF_SCOPE(Hud);
+#endif
 			SDL_Rect src_rect = { 0, 320, 640, 160 };
 			DrawSurface(HUD_Buffer, HUD_DestRect, src_rect);
 			HUD_RenderRequest = false;
@@ -1598,6 +1619,9 @@ void render_screen(short ticks_elapsed)
 #endif
 	
 	Movie::instance()->AddFrame(Movie::FRAME_NORMAL);
+#ifdef A1_PROFILE
+	a1_3ds::prof::frame_done();
+#endif
 }
 
 /*
@@ -2295,6 +2319,9 @@ void MainScreenUpdateRect(int x, int y, int w, int h)
 }
 void MainScreenUpdateRects(size_t count, const SDL_Rect *rects)
 {
+#ifdef A1_PROFILE
+	A1_PROF_SCOPE(Present);
+#endif
 	SDL_UpdateTexture(main_texture, NULL, main_surface->pixels, main_surface->pitch);
 	SDL_RenderClear(main_render);
 	SDL_RenderCopy(main_render, main_texture, NULL, NULL);

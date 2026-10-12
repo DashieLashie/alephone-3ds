@@ -117,6 +117,9 @@
 #ifdef A1_PLATFORM_3DS
 #include "a1_3ds_platform.h"	// boot_mark(): timed boot log; input_init()
 #endif
+#ifdef A1_PROFILE
+#include "a1_3ds_profile.h"	// frame profiler (docs/3ds/PERF.md)
+#endif
 
 #ifdef HAVE_STEAM
 #include "steamshim_child.h"
@@ -828,6 +831,9 @@ void main_event_loop(void)
 	
 		if (game_state == _game_in_progress && fps_target != 0)
 		{
+#ifdef A1_PROFILE
+			A1_PROF_SCOPE(Idle);
+#endif
 			int elapsed_machine_ticks = machine_tick_count() - cur_time;
 			int desired_elapsed_machine_ticks = MACHINE_TICKS_PER_SECOND / fps_target;
 

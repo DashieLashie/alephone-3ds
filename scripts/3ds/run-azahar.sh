@@ -35,6 +35,11 @@
 #                  without this option it is removed
 #   --no-dspfirm   hide sdmc:/3ds/dspfirm.cdc for this run (restored afterwards), to see
 #                  the game run without a DSP: no sound and the one-time notice
+#   --perf LEVEL   frame benchmark (an A1_PROFILE build; docs/3ds/PERF.md): writes
+#                  sdmc:/3ds/alephone/debug-perf so BEGIN NEW GAME starts level LEVEL, the
+#                  profiler measures PERF_MEASURE s (default 20) after PERF_SETTLE s (default 8)
+#                  and quits; runs scripts/3ds/tests/input/11-perf-bench.txt unless --script is
+#                  given; default --timeout 240. Prints the "[prof] BENCH" line at the end
 #   -h, --help     this text
 #
 # Environment:
@@ -60,6 +65,7 @@ audio_debug=0
 no_dspfirm=0
 decoders=0
 level_music=0
+perf_level=
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -74,6 +80,7 @@ while [ $# -gt 0 ]; do
 		--no-dspfirm) no_dspfirm=1 ;;
 		--decoders) decoders=1 ;;
 		--level-music) level_music=1 ;;
+		--perf) shift; perf_level=${1:?--perf needs a level number} ;;
 		-h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
 		-*) echo "run-azahar: unknown option $1" >&2; exit 2 ;;
 		*) threedsx=$1 ;;
@@ -82,6 +89,11 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "run-azahar: $*" >&2; exit 1; }
+
+if [ -n "$perf_level" ]; then
+	[ -n "$script" ] || script="$repo/scripts/3ds/tests/input/11-perf-bench.txt"
+	[ "$timeout" -gt 0 ] || timeout=240
+fi
 
 [ -f "$threedsx" ] || die "$threedsx not found (cmake --build build-3ds)"
 [ "$(head -c 4 "$threedsx")" = 3DSX ] || die "$threedsx is not a .3dsx file"
@@ -157,6 +169,16 @@ else
 	rm -f "$userdir/debug-audio"
 fi
 rm -f "$userdir"/screen-*.bmp
+if [ -n "$perf_level" ]; then
+	printf 'level %s\nsettle %s\nmeasure %s\nquit 1\nlog 1\n' "$perf_level" \
+		"${PERF_SETTLE:-8}" "${PERF_MEASURE:-20}" > "$userdir/debug-perf"
+	# The game quits after the benchmark but Azahar stays open; the loop below
+	# stops it once this run's log says "exit". (The game would rotate the
+	# old log to log.prev.txt itself.)
+	[ -f "$userdir/log.txt" ] && mv "$userdir/log.txt" "$userdir/log.prev.txt"
+else
+	rm -f "$userdir/debug-perf"
+fi
 if [ "$screens" = 1 ]; then
 	: > "$userdir/debug-screens"
 else
@@ -219,6 +241,14 @@ while kill -0 "$pid" 2>/dev/null; do
 		echo "run-azahar: stopped Azahar after ${timeout} s"
 		break
 	fi
+	if [ -n "$perf_level" ] && grep -q ' ms: exit$' "$userdir/log.txt" 2>/dev/null; then
+		sleep 2
+		kill "$pid" 2>/dev/null || true
+		sleep 3
+		kill -9 "$pid" 2>/dev/null || true
+		echo "run-azahar: the game quit after the benchmark; stopped Azahar after ${elapsed} s"
+		break
+	fi
 	sleep 1
 	elapsed=$((elapsed + 1))
 done
@@ -242,6 +272,10 @@ fi
 if [ -f "$userdir/log.txt" ]; then
 	echo "===== sdmc:/3ds/alephone/log.txt ====="
 	cat "$userdir/log.txt"
+	if [ -n "$perf_level" ]; then
+		echo "=====" 
+		grep '\[prof\] BENCH' "$userdir/log.txt" || echo "run-azahar: no BENCH line (not an A1_PROFILE build, or the run was cut short)"
+	fi
 else
 	echo "run-azahar: no log.txt in $userdir (the game did not get as far as opening it)"
 fi

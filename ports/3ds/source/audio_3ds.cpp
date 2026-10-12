@@ -333,6 +333,14 @@ AudioStats audio_stats()
 	return st;
 }
 
+#ifdef A1_PROFILE
+// profile_3ds.cpp: total time spent in the audio callback, in system ticks.
+uint64_t audio_busy_ticks()
+{
+	return s_busy_ticks.load(std::memory_order_relaxed);
+}
+#endif
+
 // Logs the audio thread's stack use and the callback timing since the
 // previous call (one interval per report), plus the running underrun total.
 void audio_probe_log()

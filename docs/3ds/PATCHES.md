@@ -16,7 +16,7 @@ Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link);
 entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
-stage 6 (audio, `STAGE6.md`).
+stage 6 (audio, `STAGE6.md`), 34 onwards in the performance stage (`PERF.md`).
 
 ## Summary
 
@@ -55,6 +55,7 @@ stage 6 (audio, `STAGE6.md`).
 | 31 | `Source_Files/Sound/MusicPlayer.cpp`, `MusicPlayer.h` | endless recursion on an empty segment | none |
 | 32 | `Source_Files/Misc/interface.cpp`, `Source_Files/XML/XML_LevelScript.cpp` | three music busy-waits sleep; the fade waits are bounded | none |
 | 33 | `Source_Files/shell.cpp` | in-game frame pacing sleeps instead of spinning | none |
+| 34 | `RenderOther/screen.cpp`, `Misc/interface.cpp`, `GameWorld/marathon2.cpp`, `shell.cpp` | frame profiler call sites (`A1_PROFILE` builds only) | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -614,3 +615,23 @@ values inside logging macros (20 lines, inspected). 0 diagnostics.
     overshoot; the 3DS kernel's do not). A spinning main thread starves
     every lower-priority thread on its core.
 
+
+## Performance stage (34-)
+
+Added 2026-10-11 (`PERF.md`).
+
+34. **Frame profiler** (`A1_PROFILE`, a CMake option of the 3DS build, off by
+    default; the code is `ports/3ds/source/profile_3ds.cpp`). Guarded by
+    `#ifdef A1_PROFILE` (only ever defined with `A1_PLATFORM_3DS`), so a
+    normal 3DS build contains none of it either. Timed zones:
+    `Misc/interface.cpp` `update_world()` (World) in `idle_game_state()`;
+    `GameWorld/marathon2.cpp` `update_interface()` (Hud, nested in World and
+    subtracted from it); `RenderOther/screen.cpp` `render_view()` (Render),
+    `update_screen()` (Blit), the HUD blit (Hud) and `MainScreenUpdateRects()`
+    (Present), plus `frame_done()` at the end of `render_screen()`;
+    `shell.cpp` the in-game frame pacing (Idle). `Misc/interface.cpp`
+    `begin_game()`: a single-player game starts the level named in
+    `debug-perf` (the benchmark). **Non-3DS check** (2026-10-11):
+    `shell.cpp` and `interface.cpp` byte-identical; `screen.cpp` and
+    `marathon2.cpp` differ only in `__LINE__` values inside logging macros
+    (14 and 4 lines, inspected). 0 diagnostics.

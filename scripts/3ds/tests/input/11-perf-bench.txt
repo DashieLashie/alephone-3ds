@@ -1,0 +1,10 @@
+# Frame benchmark (docs/3ds/PERF.md): start a game; debug-perf (written by
+# run-azahar.sh --perf LEVEL) makes it start the chosen level, and the
+# profiler measures and quits by itself. No input after the chapter screen:
+# the player stands at the level's start, facing its start direction.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen, if the level has one (A is unbound in a game)
+wait 3000
+tap A                  # one more: with --no-dspfirm the first A only dismisses the no-sound notice
