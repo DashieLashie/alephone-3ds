@@ -16,7 +16,49 @@ cap the frame time stays 33 ms and the gain shows as idle time instead.
 | baseline | stage 6 build (re-run with a fixed seed, `bc7fc46`) | 66.9 / 63.8 / 63.7 | 15.0-15.7 | | |
 | a | direct framebuffer present | **23.1 / 21.0 / 20.7** (−66%) | **30.3** (capped) | identical to SDL's within ±1 per channel | **yes** |
 
+| c | half-resolution rendering, 2x upscale (the engine's Resolution: Low) | 16.7 / 16.1 / 15.8 (−24 to −28% vs a) | 30.3 | **visibly coarser**: loses the 2x2 supersampling | no (stays an option) |
+
 <!-- EXPERIMENTS -->
+
+## Experiment c: half-resolution rendering
+
+**Change: none needed.** The engine already has it: Preferences >
+Graphics > Rendering Options > Resolution: **Low** (`scmode_highres="false"`)
+renders the world view at half width and height (320x160 instead of
+640x320) and `quadruple_surface()` doubles it into the screen surface.
+Measured with `PREFS="scmode_highres=false" perf-bench.sh exp-c` on the
+experiment a build:
+
+| Level | | busy | render | blit | present | idle |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | high (a) | 23.10 | 12.37 | 1.44 | 7.65 | 9.88 |
+| 0 | **low** | **16.73** | **5.41** | 1.30 | 8.16 | 16.23 |
+| 6 | high (a) | 20.95 | 10.08 | 1.44 | 7.74 | 11.98 |
+| 6 | **low** | **16.14** | **4.79** | 1.30 | 8.22 | 16.80 |
+| 20 | high (a) | 20.70 | 9.65 | 1.44 | 7.73 | 12.25 |
+| 20 | **low** | **15.77** | **4.31** | 1.30 | 8.12 | 17.15 |
+
+The rasteriser takes 44-56% of its high-resolution time (a quarter of the
+pixels, plus per-column and per-polygon costs that do not shrink); busy
+time falls 24-28%.
+
+**Picture.** The top screen shows the 640x320 view at 320x160. At high
+resolution each screen pixel is the average of 4 rendered pixels (the
+2x2 average of experiment a): 4x supersampling. At low resolution each
+screen pixel is one rendered pixel. Half the view's pixels differ, by up to
+148-228 of 255: textures are grainier, the fence mesh and distant detail
+alias, and edges step more (left high, right low; zoomed 2x):
+
+![High vs low resolution](img/perf-c-full-vs-half.png)
+
+**Decision: not the default.** It is a visible loss on the console's
+screen, and with experiment a the default already reaches 30 fps in
+Azahar. It stays available as the existing Resolution: Low option (no code
+change), the first thing to try if the hardware turns out slower than
+30 fps. In low resolution the doubling to 640x480 followed by the 2x2
+average in the present is wasted work (blit + present ~9.5 ms); a present
+straight from the half-size buffer would save most of it, if Low becomes
+important.
 
 ## Experiment a: direct framebuffer present
 
