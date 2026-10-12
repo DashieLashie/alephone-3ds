@@ -121,10 +121,6 @@ inline short memory_error() {return 0;}
 /* ---------- structures */
 #include "vbl_definitions.h"
 
-#ifdef A1_PLATFORM_3DS
-#include "a1_3ds_platform.h"	// take_touch_action_flags()
-#endif
-
 /* ---------- globals */
 
 static int32 heartbeat_count;
@@ -1270,12 +1266,6 @@ uint32 parse_keymap(void)
 					flags |= standard_key_definitions[i].action_flag;
 			}
 		}
-#ifdef A1_PLATFORM_3DS
-		// The bottom screen's touch buttons (map, action, next weapon;
-		// docs/3ds/STAGE7.md): a tap is one tick of the action, before the
-		// latching below, as if its key had been pressed.
-		flags |= a1_3ds::take_touch_action_flags();
-#endif
 		
       // Post-process the keymap
 		struct special_flag_data *special = special_flags;

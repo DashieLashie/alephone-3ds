@@ -102,8 +102,8 @@ struct graphics_preferences_data
 	int16 ephemera_quality;
 
 #ifdef A1_PLATFORM_3DS
-	// What the bottom screen shows in game: a1_3ds::BottomMode (HUD, Map,
-	// Classic = HUD on the top screen). docs/3ds/STAGE7.md.
+	// What the bottom screen shows in game: a1_3ds::BottomMode (0 HUD + Map,
+	// 2 Classic = HUD on the top screen). docs/3ds/STAGE7.md.
 	int16 bottom_screen;
 #endif
 };

@@ -1022,9 +1022,9 @@ static const char *sw_sdl_driver_labels[5] = {
 
 
 #ifdef A1_PLATFORM_3DS
-// In a1_3ds::BottomMode order.
+// Selection 0 is a1_3ds::BottomHudMap (stored 0), 1 is BottomClassic (stored 2).
 static const char* bottom_screen_labels[] = {
-	"HUD", "Map", "Classic (HUD on Top)", NULL
+	"HUD + Map", "Classic (HUD on Top)", NULL
 };
 #endif
 
@@ -1378,9 +1378,9 @@ static void graphics_dialog(void *arg)
 	table->dual_add(hud_w, d);
 
 #ifdef A1_PLATFORM_3DS
-	// HUD or Map: the game gets the whole top screen (400x240, 1:1) or the
-	// map gets the bottom one, with touch buttons; docs/3ds/STAGE7.md.
-	w_select *bottom_screen_w = new w_select(graphics_preferences->bottom_screen, bottom_screen_labels);
+	// HUD + Map: the game gets the whole top screen (400x240, 1:1), the HUD
+	// and the map the bottom one; docs/3ds/STAGE7.md.
+	w_select *bottom_screen_w = new w_select(graphics_preferences->bottom_screen == 2 ? 1 : 0, bottom_screen_labels);
 	table->dual_add(bottom_screen_w->label("Bottom Screen"), d);
 	table->dual_add(bottom_screen_w, d);
 #endif
@@ -1525,9 +1525,10 @@ static void graphics_dialog(void *arg)
 	    }
 
 #ifdef A1_PLATFORM_3DS
-	    if (bottom_screen_w->get_selection() != graphics_preferences->bottom_screen)
+	    const int16 bottom_screen = bottom_screen_w->get_selection() == 1 ? 2 : 0;
+	    if (bottom_screen != graphics_preferences->bottom_screen)
 	    {
-		    graphics_preferences->bottom_screen = bottom_screen_w->get_selection();
+		    graphics_preferences->bottom_screen = bottom_screen;
 		    changed = true;
 	    }
 #endif
@@ -4273,7 +4274,7 @@ static void default_graphics_preferences(graphics_preferences_data *preferences)
 
 	preferences->ephemera_quality = _ephemera_medium;
 #ifdef A1_PLATFORM_3DS
-	preferences->bottom_screen = 0;   // a1_3ds::BottomHud
+	preferences->bottom_screen = 0;   // a1_3ds::BottomHudMap
 #endif
 }
 
@@ -4504,7 +4505,8 @@ static bool validate_graphics_preferences(graphics_preferences_data *preferences
 	clamp(preferences->software_sdl_driver, static_cast<int16>(_sw_driver_none));
 	if (preferences->screen_mode.bit_depth != 8 && preferences->screen_mode.bit_depth != 16)
 		clamp(preferences->screen_mode.bit_depth, static_cast<short>(32));
-	if (preferences->bottom_screen < 0 || preferences->bottom_screen > 2)
+	// 0 HUD + Map, 2 Classic; 1 was a Map-only mode (stage 7's first version).
+	if (preferences->bottom_screen != 0 && preferences->bottom_screen != 2)
 		clamp(preferences->bottom_screen, static_cast<int16>(0));
 #endif
 

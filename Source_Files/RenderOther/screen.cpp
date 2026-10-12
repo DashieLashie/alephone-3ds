@@ -106,18 +106,17 @@ SDL_Surface *Map_Buffer = NULL;
 static bitmap_definition_buffer software_render_dest;
 
 #ifdef A1_PLATFORM_3DS
-// The bottom screen (docs/3ds/STAGE7.md). With Bottom Screen set to HUD or
-// Map the in-game screen surface is 400x240 and goes to the top screen 1:1
-// ("native"); menus, chapters and dialogs keep 640x480 (halved). The
+// The bottom screen (docs/3ds/STAGE7.md). With Bottom Screen set to HUD +
+// Map the in-game screen surface is 400x240, all view, and goes to the top
+// screen 1:1 ("native"); menus, chapters and dialogs keep 640x480 (halved). The
 // preference is read when the game screen is set up; render_screen()
 // switches the surface when it no longer matches (after a dialog, or when a
 // Lua HUD starts: Lua HUDs need 640x480 and get Classic).
 static a1_3ds::BottomMode bottom_mode()
 {
-	const int m = graphics_preferences->bottom_screen;
-	if (m < a1_3ds::BottomHud || m > a1_3ds::BottomClassic || LuaHUDRunning())
+	if (graphics_preferences->bottom_screen == a1_3ds::BottomClassic || LuaHUDRunning())
 		return a1_3ds::BottomClassic;
-	return static_cast<a1_3ds::BottomMode>(m);
+	return a1_3ds::BottomHudMap;
 }
 
 static bool native_wanted()
@@ -377,7 +376,7 @@ bool Screen::hud()
 {
 #ifdef A1_PLATFORM_3DS
 	// The HUD is on the bottom screen: the top screen is all view.
-	if (native_screen() && bottom_mode() == a1_3ds::BottomHud)
+	if (native_screen())
 		return false;
 #endif
 	return screen_mode.hud;
@@ -558,14 +557,6 @@ SDL_Rect Screen::hud_rect()
 			break;
 	}
 	r.h = r.w / 4;
-#ifdef A1_PLATFORM_3DS
-	// Map on the bottom screen: the HUD halved (2x2), under the view.
-	if (native_screen())
-	{
-		r.w = 320;
-		r.h = 80;
-	}
-#endif
 	r.x = (width() - r.w) / 2;
 	r.y = window_height() - r.h + (height() - window_height()) / 2;
 
@@ -1822,19 +1813,8 @@ void render_screen(short ticks_elapsed)
 #endif
 			SDL_Rect src_rect = { 0, 320, 640, 160 };
 #ifdef A1_PLATFORM_3DS
-			if (native_screen() && !Screen::instance()->hud())
+			if (native_screen())
 				hud_to_bottom = true;   // HUD on the bottom screen
-			else if (native_screen() && HUD_Buffer->format->BytesPerPixel == 4 &&
-			         main_surface->format->BytesPerPixel == 4)
-			{
-				// Map on the bottom screen: the HUD halved under the view,
-				// averaged 2x2 like the 640x480 present.
-				const Uint8* src = static_cast<const Uint8*>(HUD_Buffer->pixels) + 320 * HUD_Buffer->pitch;
-				Uint8* dst = static_cast<Uint8*>(main_surface->pixels) + HUD_DestRect.y * main_surface->pitch +
-				             HUD_DestRect.x * 4;
-				a1_3ds::half_blit(src, HUD_Buffer->pitch, HUD_DestRect.w, HUD_DestRect.h, dst,
-				                  main_surface->pitch);
-			}
 			else
 #endif
 			DrawSurface(HUD_Buffer, HUD_DestRect, src_rect);

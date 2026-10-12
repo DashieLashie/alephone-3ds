@@ -23,6 +23,42 @@ the rest is port code (`ports/3ds/source/bottom_3ds.cpp`, `video_3ds.cpp`,
 | 4 | Terminals readable at 400x240 (font scaling via SDL2_ttf) or terminals on the bottom screen | **Done, by font scaling** in all three modes: the terminal fonts are resized (SDL2_ttf) and the terminal rectangles fitted to the screen, and the engine reflows the text (`PATCHES.md` 36) |
 | | **DoD: all three modes work on hardware; perf regression < 1 ms/frame (A1_PROFILE)** | **Met on a New 3DS** ("Hardware results"): all three modes pass the functional checks; busy time (A1_PROFILE) Classic −0.02 to +0.14 ms vs before, HUD −5.4 to −5.9 ms and Map −6.1 to −6.5 ms vs Classic, 30 fps in every run. **Azahar: met** as well (Classic 0.0 to −0.1 ms; HUD −5.5 ms; Map −7.4 to −8.5 ms, "Performance"). The budget was restated with the user as Classic within 1 ms of before and HUD/Map at or below Classic + 1 ms, since the chosen top screen changes what is rendered |
 
+## Revision: one HUD + Map mode (2026-10-12, work in progress)
+
+After the hardware session the user asked for the HUD **and** a more
+zoomed-out map on the bottom screen, without touch buttons (the console's
+buttons already do MAP, ACTION and NEXT WEAPON). The HUD and Map settings
+became one **HUD + Map** setting; the rest of this document describes the
+first version (HUD, Map, Classic) and its results, kept as history until
+the revision is recorded here in full.
+
+- **Bottom screen:** the HUD halved to 320x80 at the top, the overhead map
+  at 320x160 under it, nothing else. The map has its **own zoom**: it starts
+  at scale 2 (the main map's default is 3; each step doubles), and a tap on
+  the map zooms out one step, from the widest back to the closest
+  (2 → 1 → 3 → 2). A tap on the HUD does nothing; a drag anywhere is still
+  the look (Touch Screen Aiming). A tap is a touch that stays within 6
+  pixels and lasts at most 300 ms (`input_3ds.cpp`). The level name, which
+  the map renderer writes at the top of the game map, is placed above the
+  visible area (`kMapNameSkip`), so all 160 rows are map.
+- **Top screen:** as HUD mode before: the view, 400x240 1:1.
+- **Preference:** Bottom Screen offers HUD + Map (default) and Classic (HUD
+  on Top), stored as 0 and 2; any other value, such as the first version's
+  1 = Map, reads as 0. Prefs files and scripts that say `bottom_screen="2"`
+  keep Classic.
+- **Engine:** `PATCHES.md` 37 lost the halved-HUD-on-top path (Map mode's
+  top screen) and the 320x80 `hud_rect()`; 38 (touch button flags) is
+  removed, and `vbl.cpp` is back to its stage 3 content; 40 updated. Non-3DS
+  check: only `__LINE__` values differ.
+- **Azahar** (`perf-bench.sh`, `RUNS=1`): busy L0 / L6 / L20 **17.85 /
+  15.55 / 15.23** ms, `bottom` 2.68-2.96 ms, 30.3 fps (first version's HUD
+  mode: 16.03 / 13.84 / 13.67; Classic 21.52 / 19.47 / 19.19, so 3.4-4.0 ms
+  below Classic). Script 13 (rewritten for this mode) passes: the zoom steps, HUD
+  tap ignored, drag looks without zooming, dialog and HOME restore the screen.
+- **Not done yet:** Classic and terminal runs in Azahar, the
+  console session, and this document's full update. The plan is in
+  [`NEXT-SPRINT.md`](NEXT-SPRINT.md), part A.
+
 ## SDL2's N3DS driver and a second window
 
 Read in SDL 2.32.10 (`build/3ds-deps/SDL2-release-2.32.10/src/video/n3ds/`):

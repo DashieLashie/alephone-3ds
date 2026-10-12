@@ -318,7 +318,7 @@ target_link_options(alephone PRIVATE "LINKER:--wrap=ndspChnWaveBufAdd")
 # Direct present: the screen surface into the top framebuffer without SDL's
 # renderer (docs/3ds/PERF.md, experiment a).
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/video_3ds.cpp")
-# The bottom screen in game: HUD or map, and the touch buttons
+# The bottom screen in game: the HUD and the map
 # (docs/3ds/STAGE7.md).
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/bottom_3ds.cpp")
 # Frame profiler (A1_PROFILE builds; docs/3ds/PERF.md).

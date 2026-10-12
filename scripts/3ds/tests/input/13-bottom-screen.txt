@@ -1,7 +1,7 @@
 # Stage 7 (docs/3ds/STAGE7.md): the bottom screen in game. Run once per
-# Bottom Screen setting (<graphics bottom_screen="0|1|2">: HUD, Map,
-# Classic). Touch buttons sit in the bottom strip (y 190-235): MAP at x 54,
-# ACTION at x 159, NEXT WEAPON at x 264.
+# Bottom Screen setting (<graphics bottom_screen="0|2">: HUD + Map, Classic).
+# HUD + Map: the HUD in rows 0-79, the map in rows 80-239; a tap on the map
+# zooms it out one step (2 -> 1 -> 3 -> 2), a tap on the HUD does nothing.
 wait 1000
 screens s7-menu
 tap A                  # BEGIN NEW GAME
@@ -16,34 +16,34 @@ wait 1500
 circle 0 0
 wait 300
 screens s7-forward
-log --- MAP button held ---
-touch 54 212
-wait 300
-screens s7-map-held
+log --- tap on the map: zoom 1 ---
+touch 160 160
+wait 100
 untouch
 wait 500
-screens s7-map
-log --- MAP button again (close) ---
-touch 54 212
-wait 200
+screens s7-zoom1
+log --- tap on the map: zoom 3 ---
+touch 160 160
+wait 100
 untouch
 wait 500
-screens s7-map-closed
-log --- NEXT WEAPON button ---
-touch 264 212
-wait 200
-untouch
-wait 2000
-screens s7-weapon
-log --- ACTION button ---
-touch 159 212
-wait 200
+screens s7-zoom3
+log --- tap on the HUD: no change ---
+touch 160 40
+wait 100
 untouch
 wait 500
-log --- drag above the buttons (touch look) ---
-drag 260 130 60 130 600
+screens s7-hud-tap
+log --- tap on the map: zoom 2 (the default) ---
+touch 160 160
+wait 100
 untouch
-wait 300
+wait 500
+screens s7-zoom2
+log --- drag on the map (touch look; no zoom) ---
+drag 260 160 60 160 600
+untouch
+wait 500
 screens s7-look
 log --- START (quit dialog over the game), then B ---
 tap START

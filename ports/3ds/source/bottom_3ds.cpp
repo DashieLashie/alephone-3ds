@@ -1,19 +1,20 @@
 /*
 	Aleph One for the Nintendo 3DS: the bottom screen in game (docs/3ds/STAGE7.md).
 
-	With Graphics > Bottom Screen set to HUD or Map, render_screen() hands each
+	With Graphics > Bottom Screen set to HUD + Map, render_screen() hands each
 	game frame's bottom screen to bottom_frame():
 
-	- HUD: the HUD buffer (640x160, drawn by the engine as always) averaged
-	  2x2 to 320x80 at the top; below it the area the finger drags to look.
-	- Map: the overhead map, rendered at the bottom screen's own resolution
-	  by the engine's map renderer into a separate surface (the main map,
-	  opened with the map key, is untouched).
-	- Both: a strip of touch buttons (map, action, next weapon) at the
-	  bottom. input_3ds.cpp hit-tests touches with bottom_button_at(); a
-	  press becomes the button's action flag for the next input tick
-	  (take_touch_action_flags(), OR-ed in by Misc/vbl.cpp parse_keymap()),
-	  so it acts as if the bound key had been pressed.
+	- the HUD buffer (640x160, drawn by the engine as always) averaged 2x2
+	  to 320x80 at the top;
+	- under it, 320x160, the overhead map, rendered at the bottom screen's
+	  own resolution by the engine's map renderer into a separate surface
+	  (the main map, opened with the map key, is untouched). It has its own
+	  zoom, more zoomed out than the main map's default: a tap on it
+	  (bottom_tap(), from input_3ds.cpp) zooms out one step, and from the
+	  widest back to the closest.
+
+	The whole screen is also where the finger drags to look (Touch Screen
+	Aiming); a tap is a touch that barely moves (input_3ds.cpp).
 
 	The picture is composed in a 320x240 XRGB8888 surface and presented only
 	when something on it changed (present_bottom(), video_3ds.cpp). With
@@ -49,37 +50,26 @@ namespace a1_3ds {
 namespace {
 
 constexpr int kW = 320, kH = 240;
-// The button strip: three buttons in the bottom 52 rows.
-constexpr int kStripY = 188;
-constexpr int kButtonY = kStripY + 2, kButtonH = kH - kButtonY - 4;
-constexpr int kMargin = 4, kGap = 4;
-constexpr int kButtonCount = 3;
-constexpr int kButtonW = (kW - 2 * kMargin - (kButtonCount - 1) * kGap) / kButtonCount;
-// HUD mode: the HUD halved, at the top.
+// The HUD halved, at the top.
 constexpr int kHudH = 80;
-// Map mode: the map above the strip, redrawn every kMapEvery-th frame
-// (10 Hz at 30 fps): rendering it costs about 6 ms in Azahar (STAGE7.md).
-constexpr int kMapH = kStripY;
+// The map under it, redrawn every kMapEvery-th frame (10 Hz at 30 fps):
+// rendering it costs about 6 ms in Azahar at 320x188 (STAGE7.md).
+constexpr int kMapY = kHudH, kMapH = kH - kHudH;
 constexpr int kMapEvery = 3;
-
-struct Button
-{
-	const char* label;
-	uint32_t flag;
-};
-const Button kButtons[kButtonCount] = {
-	{"MAP", _toggle_map},
-	{"ACTION", _action_trigger_state},
-	{"NEXT WEAPON", _cycle_weapons_forward},
-};
+// The map's own zoom (overhead_map_data::scale: each step doubles; the main
+// map's default is 3). A tap zooms out one step, from 1 back to kMapScaleMax.
+constexpr short kMapScaleDefault = 2, kMapScaleMax = 3;
+// The renderer writes the level name at the top of the game map (baseline
+// 25 pixels down in Monaco 18 by default, RenderOther/overhead_map.cpp). The
+// map's frame starts this many rows above the surface, so the name falls
+// outside it and the 160 rows are all map.
+constexpr int kMapNameSkip = 32;
 
 SDL_Surface* s_surface = nullptr;      // the bottom screen, composed
-SDL_Surface* s_map = nullptr;          // map mode: the map renderer's target
+SDL_Surface* s_map = nullptr;          // the map renderer's target
 bool s_full = true;                    // redraw everything
-bool s_buttons_dirty = true;
-bool s_down[kButtonCount] = {};
-uint32_t s_pending = 0;                // action flags for the next input tick
-int s_last_mode = -1;
+bool s_map_dirty = false;              // redraw the map at the next frame (zoom changed)
+short s_map_scale = kMapScaleDefault;
 int s_map_frame = 0;
 bool s_last_map_allowed = true;
 
@@ -109,20 +99,6 @@ void centred_text(const char* text, int x, int y, int w, int h, uint32_t pixel)
 	draw_text(s_surface, text, x + (w - tw) / 2, base, pixel, font, styleNormal);
 }
 
-void draw_buttons()
-{
-	fill(0, kStripY, kW, kH - kStripY, rgb(0, 0, 0));
-	for (int i = 0; i < kButtonCount; ++i)
-	{
-		const int x = kMargin + i * (kButtonW + kGap);
-		const uint32_t edge = s_down[i] ? rgb(120, 255, 120) : rgb(40, 140, 40);
-		fill(x, kButtonY, kButtonW, kButtonH, edge);
-		fill(x + 2, kButtonY + 2, kButtonW - 4, kButtonH - 4, s_down[i] ? rgb(30, 110, 30) : rgb(10, 36, 10));
-		centred_text(kButtons[i].label, x, kButtonY, kButtonW, kButtonH,
-		             s_down[i] ? rgb(255, 255, 255) : rgb(120, 255, 120));
-	}
-}
-
 void draw_hud()
 {
 	if (HUD_Buffer && HUD_Buffer->w == 640 && HUD_Buffer->h == 480 && HUD_Buffer->format->BytesPerPixel == 4 &&
@@ -135,18 +111,12 @@ void draw_hud()
 		fill(0, 0, kW, kHudH, rgb(0, 0, 0));
 }
 
-void draw_look_area()
-{
-	fill(0, kHudH, kW, kStripY - kHudH, rgb(0, 0, 0));
-	centred_text("drag here to look (Touch Screen Aiming)", 0, kHudH, kW, kStripY - kHudH, rgb(60, 60, 60));
-}
-
 void draw_map(bool allowed)
 {
 	if (!allowed)
 	{
-		fill(0, 0, kW, kMapH, rgb(0, 0, 0));
-		centred_text("Map unavailable", 0, 0, kW, kMapH, rgb(120, 120, 120));
+		fill(0, kMapY, kW, kMapH, rgb(0, 0, 0));
+		centred_text("Map unavailable", 0, kMapY, kW, kMapH, rgb(120, 120, 120));
 		return;
 	}
 	if (!s_map)
@@ -156,20 +126,21 @@ void draw_map(bool allowed)
 	SDL_FillRect(s_map, nullptr, SDL_MapRGB(s_map->format, 0, 0, 0));
 	overhead_map_data d;
 	d.mode = _rendering_game_map;
-	d.scale = world_view->overhead_map_scale;
+	d.scale = s_map_scale;
 	d.origin.x = world_view->origin.x;
 	d.origin.y = world_view->origin.y;
 	d.origin_polygon_index = world_view->origin_polygon_index;
 	d.width = kW;
 	d.height = kMapH;
 	d.half_width = kW / 2;
-	d.half_height = kMapH / 2;
-	d.top = d.left = 0;
+	d.half_height = kMapH / 2 + kMapNameSkip;   // the player stays in the middle
+	d.top = -kMapNameSkip;
+	d.left = 0;
 	d.draw_everything = false;
 	_set_port_to_custom(s_map);
 	_render_overhead_map(&d);
 	_restore_port();
-	SDL_Rect dst = {0, 0, kW, kMapH};
+	SDL_Rect dst = {0, kMapY, kW, kMapH};
 	SDL_BlitSurface(s_map, nullptr, s_surface, &dst);
 }
 
@@ -177,27 +148,13 @@ void draw_map(bool allowed)
 
 // --- Used by input_3ds.cpp ---------------------------------------------------
 
-int bottom_button_at(float x, float y)
+// A tap at (x, y), bottom-screen pixels, in game: on the map, zoom out one step.
+void bottom_tap(float, float y)
 {
-	if (y < kStripY)
-		return -1;
-	for (int i = 0; i < kButtonCount; ++i)
-	{
-		const int bx = kMargin + i * (kButtonW + kGap);
-		if (x >= bx - kGap / 2 && x < bx + kButtonW + kGap / 2)
-			return i;
-	}
-	return -1;
-}
-
-void bottom_button_set(int button, bool down)
-{
-	if (button < 0 || button >= kButtonCount)
+	if (y < kMapY)
 		return;
-	if (down)
-		s_pending |= kButtons[button].flag;
-	s_down[button] = down;
-	s_buttons_dirty = true;
+	s_map_scale = s_map_scale > OVERHEAD_MAP_MINIMUM_SCALE ? s_map_scale - 1 : kMapScaleMax;
+	s_map_dirty = true;
 }
 
 void bottom_force_redraw()
@@ -206,13 +163,6 @@ void bottom_force_redraw()
 }
 
 // --- Public ----------------------------------------------------------------------
-
-uint32_t take_touch_action_flags()
-{
-	const uint32_t flags = s_pending;
-	s_pending = 0;
-	return flags;
-}
 
 void bottom_frame(BottomMode mode, bool hud_changed)
 {
@@ -231,44 +181,25 @@ void bottom_frame(BottomMode mode, bool hud_changed)
 			return;
 		s_full = true;
 	}
-	if (mode != s_last_mode)
-	{
-		s_last_mode = mode;
-		s_full = true;
-	}
-
 	bool changed = false;
-	if (mode == BottomHud)
+	if (s_full || hud_changed)
 	{
-		if (s_full || hud_changed)
-		{
-			draw_hud();
-			changed = true;
-		}
-		if (s_full)
-			draw_look_area();
-	}
-	else
-	{
-		// The player moves, and the map marks what is seen: redraw it
-		// regularly, not only on changes.
-		const bool allowed = View_MapActive();
-		const bool tick = ++s_map_frame >= kMapEvery;
-		if (tick)
-			s_map_frame = 0;
-		if ((allowed && tick) || s_full || allowed != s_last_map_allowed)
-		{
-			draw_map(allowed);
-			changed = true;
-		}
-		s_last_map_allowed = allowed;
-	}
-	if (s_full || s_buttons_dirty)
-	{
-		draw_buttons();
+		draw_hud();
 		changed = true;
 	}
-	s_full = s_buttons_dirty = false;
+	// The player moves, and the map marks what is seen: redraw it
+	// regularly, not only on changes.
+	const bool allowed = View_MapActive();
+	const bool tick = ++s_map_frame >= kMapEvery;
+	if (tick)
+		s_map_frame = 0;
+	if ((allowed && tick) || s_full || s_map_dirty || allowed != s_last_map_allowed)
+	{
+		draw_map(allowed);
+		changed = true;
+	}
+	s_last_map_allowed = allowed;
+	s_full = s_map_dirty = false;
 	if (changed)
 		present_bottom(s_surface->pixels, s_surface->pitch);
 }

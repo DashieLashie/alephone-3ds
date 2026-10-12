@@ -136,20 +136,17 @@ void half_blit(const void* src, int src_pitch, int w, int h, void* dst, int dst_
 // input_3ds.cpp) ---
 
 // Who draws the bottom screen: the legend console (menus, dialogs, Classic)
-// or the game (HUD or map, and the touch buttons). Cheap to call every frame.
+// or the game (the HUD and the map). Cheap to call every frame.
 void bottom_game(bool game);
 bool bottom_is_game();
 
-// The Bottom Screen preference (graphics preferences, "bottom_screen").
-enum BottomMode { BottomHud = 0, BottomMap = 1, BottomClassic = 2 };
+// The Bottom Screen preference (graphics preferences, "bottom_screen"). The
+// stored values are 0 and 2; 1 was a Map-only mode and now reads as 0.
+enum BottomMode { BottomHudMap = 0, BottomClassic = 2 };
 
 // End of each rendered game frame (RenderOther/screen.cpp). `hud_changed`:
 // the HUD buffer was redrawn since the last call.
 void bottom_frame(BottomMode mode, bool hud_changed);
-
-// The touch buttons pressed since the last call, as action flags
-// (Misc/vbl.cpp parse_keymap). Main thread.
-uint32_t take_touch_action_flags();
 
 // --- Audio (docs/3ds/STAGE6.md; implementation: ports/3ds/source/audio_3ds.cpp) ---
 // The AudioBackend itself is declared in Sound/AudioBackend.h
