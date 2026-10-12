@@ -493,7 +493,9 @@ without the dot.
 
 **Draft:** `docs/3ds/devkitpro-3dsx-ld-report.md` (title, environment,
 reproducer inline, expected/actual, patch, workaround). **Not filed**; the
-user files it.
+user files it. **2026-10-12: deferred by the user**, kept as a note
+(`NEXT-SPRINT.md` item 13). Before filing: run the reproducer on the
+console and recheck `devkitarm-crtls` `master`.
 
 ## 7. Cosmetics
 

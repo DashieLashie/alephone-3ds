@@ -50,7 +50,7 @@ level change and the return to the menu included. (The main menu's
 | 2 | Hardware timing of the audio thread on core 1 | **Done**: mean load 28.5%, longest callback 28.15 ms of 31.29 ms (Azahar: 47%, 28 ms) | |
 | 3 | Whether stage 5's 2.8-3.9 s transition gaps were audible stalls or pauses | **Answered**: not reproduced (longest gap 35.8 ms), none heard | |
 | 4 | Ogg Opus / FLAC decoders | not needed for Marathon 1-3 data | no |
-| 5 | The console's `Marathon 2 Preferences` predates this stage and says `rate="44100"` | the session ran at 32728 with a temporary copy; the original file was put back. Change `rate` in the file to use the default | no |
+| 5 | The console's `Marathon 2 Preferences` predates this stage and says `rate="44100"` | the session ran at 32728 with a temporary copy; the original file was put back. Change `rate` in the file to use the default. *2026-10-12:* the user chose 32728; applied at the next console session (`NEXT-SPRINT.md` item 8) | no |
 
 **Moving on:** the next stage can start in this state. If a later change
 brings underruns, the first levers are the rate (already the DSP's 32728

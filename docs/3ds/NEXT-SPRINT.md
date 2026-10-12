@@ -104,12 +104,12 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | 5 | HUD/Map fewer frames than Classic | **Done**: a profiler artefact | none | no | Closed |
 | 6 | HOME > Close in the demo 14.4 s | Marks in place | S | yes | One run in stage 2 |
 | 7 | C-Stick vertical look too fast | **Done** (pitch at 0.5×) | S: feel | yes | Try in stage 2; tune with the vertical sensitivity / dead zone |
-| 8 | Prefs `rate="44100"` | Stage 2: the user's call | XS | no | Ask; 32728 is the DSP's native rate |
+| 8 | Prefs `rate="44100"` | **Decided: change to 32728** (user, 2026-10-12) | XS | ftpd only | First step of stage 2: `sprint8/setrate.sh IP` |
 | 9 | Player name from CFGU | Deferred (twice) | S | no | Skip unless asked |
 | 10 | 400x240 menu layouts | Deferred | L | yes | Its own stage |
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
 | 12 | Backup bundle | **Done** | none | no | Closed |
-| 13 | devkitPro LD report | Stage 2: the user's call | XS | no | Filing is outward-facing: the user decides |
+| 13 | devkitPro LD report | **Deferred by the user** (2026-10-12) | XS | for the repro | Kept as a note; see item 13 |
 
 Sources in brackets. Statuses were verified against the docs on 2026-10-12.
 
@@ -153,7 +153,11 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    user tries it; the Controller Advanced vertical sensitivity and dead zone are the
    next knobs. Touch-look tuning: with HUD + Map, by feel. [STAGE5 item 2]
 8. The console's prefs file still says `rate="44100"` (the default is the DSP's native
-   32728 Hz). **Stage 2:** ask the user whether to change it. [STAGE6 item 5]
+   32728 Hz). **Decided by the user (2026-10-12): change it to 32728.** Not applied
+   yet: the console was not on ftpd. **Stage 2, first step:** with ftpd running,
+   `build-3ds/hw/sprint8/setrate.sh IP` (sets only `<sound rate=...>`, keeps the rest,
+   saves the original in `sprint8/prefs-rate/original`). Then the benchmarks run at
+   32728, which also tests whether item 4's long frame goes away. [STAGE6 item 5]
 9. Player name from the console profile (CFGU) instead of "Bob User". Cosmetic,
    deferred twice by the user. **Deferred.** [STAGE3 stub 4; STAGE5 item 6]
 
@@ -172,8 +176,11 @@ Azahar) [PERF "Next candidates"]
 **Housekeeping**
 12. **Done**: branch backup bundle refreshed (see `STAGE5-PREREQS.md` item 8). [STAGE5-PREREQS item 8]
 13. The devkitPro linker-script report is drafted, not filed
-    (`docs/3ds/devkitpro-3dsx-ld-report.md`). Filing it is the user's call. **Stage 2.**
-    [STAGE5-PREREQS item 9]
+    (`docs/3ds/devkitpro-3dsx-ld-report.md`). **Deferred by the user (2026-10-12)**;
+    kept as a note. The port does not depend on it (`PATCHES.md` 12 works around the
+    bug). If it is ever filed: run the reproducer (`scripts/3ds/tests/exidx-repro/`) on
+    the console first (only verified in Azahar), check that `devkitarm-crtls` `master`
+    has not fixed it since 2026-10-11, and the user posts it. [STAGE5-PREREQS item 9]
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
@@ -181,18 +188,18 @@ previews are BMPs); Old 3DS untested (no hardware); one controller binding per a
 no keyboard for the Lua console. [STAGE3 "Stubs", STAGE6, ENVIRONMENT, STAGE5]
 
 ## Stage 2 runbook (with the user and the console)
-1. **Questions first** (no console needed): item 8 (switch `rate` to 32728?), item 13
-   (file the devkitPro report?), the two map-zoom choices (A.3). Items 9-11 stay
-   deferred unless the user says otherwise.
-2. **Build and upload:** `cmake --build build-3ds && cmake --build build-3ds-prof`; the
-   user starts ftpd; ask for the IP.
+1. **Questions first** (no console needed): the two map-zoom choices (A.3). Items 8
+   and 13 are decided (rate to 32728; the report deferred). Items 9-11 stay deferred
+   unless the user says otherwise.
+2. **Build and set up:** `cmake --build build-3ds && cmake --build build-3ds-prof`; the
+   user starts ftpd; ask for the IP; `build-3ds/hw/sprint8/setrate.sh IP` (item 8).
 3. **Benchmarks, profile build** (A.2, B1, B2, B4): `build-3ds/hw/sprint8/next.sh IP - - 0 0`
    (debug-perf level 0, HUD + Map), user switches to the netloader, run
    `build-3ds/hw/sprint8/launch.sh IP build-3ds-prof/alephone.3dsx build-3ds/hw/sprint8/hm-L0-3dslink.txt`
    in the background and monitor it; the user presses A twice. The transcript has the
    BENCH line and the level load's `(+N ms)` marks. Then `next.sh IP hm-L0 0 6`, ... ,
-   `next.sh IP hm-L20 20 rm`. If item 8 is yes, set the rate before the runs and note
-   it; compare level 0's `max` with the stage 7 runs.
+   `next.sh IP hm-L20 20 rm`. These run at 32728 Hz (item 8): note it, and compare
+   level 0's `max` and the `audio` zone with the stage 7 runs (44100 Hz).
 4. **Functional run, normal build** (A.2): STAGE7.md "Hardware checklist" step 3, plus:
    a save at level 1's pattern buffer (marks: "save: ..."), the level change at its exit
    (marks: "level change: ..."; does it still look frozen?), the C-Stick look (item 7),
