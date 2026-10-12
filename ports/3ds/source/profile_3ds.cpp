@@ -346,5 +346,10 @@ int bench_level()
 	return cfg.level;
 }
 
+bool bench_armed()
+{
+	return s_bench != Bench::Off;
+}
+
 } // namespace prof
 } // namespace a1_3ds

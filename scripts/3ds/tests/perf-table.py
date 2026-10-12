@@ -4,14 +4,16 @@
     python3 -I scripts/3ds/tests/perf-table.py build/perf/baseline.txt [build/perf/other.txt ...]
 
 One table row per file and level: the mean of its runs (ms per frame), and
-the spread of the frame time across runs. With two or more files, a last
-table compares each file's frame time with the first file's, level by level.
+the spread of the frame time across runs. "busy" is frame - idle: the work
+per frame, which keeps showing gains once the 30 fps cap is reached. With
+two or more files, a last table compares each file's busy time with the
+first file's, level by level.
 """
 import re
 import sys
 from collections import defaultdict
 
-COLS = ["fps", "frame", "max", "world", "render", "hud", "blit", "present", "idle", "other"]
+COLS = ["fps", "frame", "busy", "max", "world", "render", "hud", "blit", "present", "idle", "other"]
 
 
 def load(path):
@@ -20,7 +22,9 @@ def load(path):
         if "BENCH" not in line or "FAILED" in line:
             continue
         kv = dict(re.findall(r"(\w+)=([-\d.]+)", line))
-        runs[int(kv["level"])].append({k: float(v) for k, v in kv.items() if k != "level"})
+        r = {k: float(v) for k, v in kv.items() if k != "level"}
+        r["busy"] = r["frame"] - r["idle"]
+        runs[int(kv["level"])].append(r)
     return runs
 
 
@@ -43,15 +47,15 @@ def main(paths):
     if len(data) > 1:
         base_name, base = data[0]
         print()
-        print("| results | level | frame ms | vs " + base_name.rsplit('/', 1)[-1].removesuffix('.txt') + " | fps |")
+        print("| results | level | busy ms | vs " + base_name.rsplit('/', 1)[-1].removesuffix('.txt') + " | fps |")
         print("| --- | --- | --- | --- | --- |")
         for path, runs in data[1:]:
             name = path.rsplit("/", 1)[-1].removesuffix(".txt")
             for level in sorted(runs):
                 if level not in base:
                     continue
-                f0 = mean([r["frame"] for r in base[level]])
-                f1 = mean([r["frame"] for r in runs[level]])
+                f0 = mean([r["busy"] for r in base[level]])
+                f1 = mean([r["busy"] for r in runs[level]])
                 fps = mean([r["fps"] for r in runs[level]])
                 print(f"| {name} | {level} | {f1:.2f} | {100 * (f1 - f0) / f0:+.1f}% | {fps:.2f} |")
 

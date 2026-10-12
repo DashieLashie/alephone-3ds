@@ -2731,6 +2731,12 @@ static bool begin_game(
 			game_information.game_type= _game_of_kill_monsters;
 			game_information.game_options= _burn_items_on_death|_ammo_replenishes|_weapons_replenish|_monsters_replenish;
 			game_information.initial_random_seed= machine_tick_count();
+#ifdef A1_PROFILE
+			// debug-perf benchmark: the same start position (a level may have
+			// several) and the same monster behaviour in every run
+			if (a1_3ds::prof::bench_armed())
+				game_information.initial_random_seed= 0x3D5;
+#endif
 			game_information.difficulty_level= get_difficulty_level();
 			std::fill_n(game_information.parameters, 2, 0);
 				

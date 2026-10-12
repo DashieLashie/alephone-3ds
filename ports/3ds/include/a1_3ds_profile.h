@@ -61,6 +61,10 @@ void frame_done();
 // level 0), or -1.
 int bench_level();
 
+// True once bench_level() has started a benchmark (begin_game then uses a
+// fixed random seed).
+bool bench_armed();
+
 } // namespace prof
 } // namespace a1_3ds
 

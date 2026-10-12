@@ -1,0 +1,26 @@
+# Sprite check (docs/3ds/PERF.md, experiment b: LTO once made monsters
+# invisible upstream). The main menu's demo starts after 30 s idle; it
+# replays recorded play with monsters, so captures of two builds can be
+# compared by eye (and, as the replay is deterministic, often pixel by pixel).
+wait 75000
+screens sprites-01
+wait 4000
+screens sprites-02
+wait 4000
+screens sprites-03
+wait 4000
+screens sprites-04
+wait 4000
+screens sprites-05
+wait 4000
+screens sprites-06
+wait 4000
+screens sprites-07
+wait 4000
+screens sprites-08
+wait 4000
+screens sprites-09
+wait 4000
+screens sprites-10
+wait 4000
+quit
