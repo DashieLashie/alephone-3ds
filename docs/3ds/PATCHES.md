@@ -15,7 +15,8 @@ and `STAGE3-PREREQS.md`, not repeated here.
 Recorded 2026-10-10 on branch `3ds-port`, stage 3 (first `.3dsx` link);
 entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`),
-23-25 in stage 5's hardware session (default focus, linear heap).
+23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
+stage 6 (audio, `STAGE6.md`).
 
 ## Summary
 
@@ -46,6 +47,14 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 | 23 | `Source_Files/Misc/interface.cpp` | main menu starts with BEGIN NEW GAME highlighted | none |
 | 24 | `Source_Files/Misc/sdl_dialogs.cpp` | dialogs focus their first widget when they set no default | none |
 | 25 | `ports/3ds/source/a1_3ds_platform.cpp`: `__ctru_linear_heap_size` (port file) | 8 MiB linear heap, +24 MiB for malloc | none |
+| 26 | `Source_Files/Sound/AudioBackend.h` | the 3DS AudioBackend | none |
+| 27 | `Source_Files/Sound/Decoder.cpp` | Ogg Vorbis / MP3 decoders | Ogg Opus, FLAC (not decoded on 3DS) |
+| 28 | `Source_Files/Sound/SoundManager.h`, `SoundManager.cpp` | 3DS audio parameters | HRTF, 3D sounds, surround channel layouts (**by design**) |
+| 29 | `Source_Files/Misc/preferences.cpp` | sound dialog hides Channels, 3D Sounds, HRTF | as 28 |
+| 30 | `Source_Files/Sound/AudioPlayer.cpp`, `OpenALManager.h` | buffers filled per mixer pass | none |
+| 31 | `Source_Files/Sound/MusicPlayer.cpp`, `MusicPlayer.h` | endless recursion on an empty segment | none |
+| 32 | `Source_Files/Misc/interface.cpp`, `Source_Files/XML/XML_LevelScript.cpp` | three music busy-waits sleep; the fade waits are bounded | none |
+| 33 | `Source_Files/shell.cpp` | in-game frame pacing sleeps instead of spinning | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -546,3 +555,62 @@ the size then. Hardware check of the new split: next console session.
   `int32_t == long` cause) is downgraded to a warning by
   `scripts/3ds/build-libsndfile.sh` (`-Wno-error=incompatible-pointer-types`);
   the library is not patched.
+
+## Stage 6 audio (26-33)
+
+Added 2026-10-11 (`STAGE6.md`). All guarded by `#ifdef A1_PLATFORM_3DS`;
+the 3DS side is `ports/3ds/source/audio_3ds.cpp` (backend, instrumentation)
+and `ports/3ds/source/decoders_3ds.cpp` (Tremor, mpg123).
+
+**Non-3DS check** (2026-10-11, `ppcheck.sh`, `aleph-host-build` and
+`aleph-host-build-nonet`): `shell.cpp`, `Misc/interface.cpp`,
+`Sound/Decoder.cpp`, `MusicPlayer.cpp`, `SoundManager.cpp`,
+`AudioPlayer.cpp`, `OpenALManager.cpp` (for `AudioBackend.h` and
+`OpenALManager.h`), `Music.cpp` (for `MusicPlayer.h`) and
+`XML/XML_LevelScript.cpp` are byte-identical; `Misc/preferences.cpp` differs only in 10 `__LINE__`
+values inside logging macros (20 lines, inspected). 0 diagnostics.
+
+26. **`Sound/AudioBackend.h`**: `AudioBackend::CreateDefault()` returns
+    `a1_3ds::create_audio_backend()`: SDL's legacy device as before, but
+    always stereo S16 at the preferences' rate, with callback timing, the
+    audio thread's stack probe, DSP underrun counting and the missing-DSP
+    state. Replaces stage 5's `--wrap=SDL_OpenAudio` probe.
+27. **`Sound/Decoder.cpp`**: both factories try `a1_3ds::open_decoder()`
+    after `SndfileDecoder` (the 3DS libsndfile has no codecs): Ogg Vorbis
+    through Tremor, MP3 through mpg123, 16-bit output. Lost: Ogg Opus and
+    FLAC still have no decoder (rejected cleanly; `debug-decoders`).
+28. **`Sound/SoundManager.h`**: `DEFAULT_RATE` is 32728 Hz, the DSP's output
+    rate (the DSP then plays SDL's buffers 1:1). **`SoundManager.cpp`**,
+    `Parameters::Verify()`: clears `_hrtf_flag` and `_3d_sounds_flag`, sets
+    stereo, and puts a rate outside 8000-48000 Hz or a buffer outside
+    256-4096 samples back to the default. The rate stays configurable in
+    the preferences file (`<sound rate="...">`); a file written before this
+    stage says 44100, which still works.
+29. **`Misc/preferences.cpp`**: the sound dialog no longer shows Channels,
+    3D Sounds or HRTF (Headphones). The widgets are still created (patch 9's
+    pattern), so the accept code reads unchanged values.
+30. **`Sound/AudioPlayer.cpp`**: `FillBuffers()` fills at most
+    1 + (callback length / buffer length) buffers per pass, i.e. what
+    playback uses before the next pass plus one. Upstream fills every free
+    buffer: a starting track decoded four 8 KiB buffers (~370 ms of
+    22 kHz music) inside one callback, 96 ms against a 31 ms budget, and
+    the DSP ran dry (Azahar: 1 underrun at every music start; 0 after).
+    **`OpenALManager.h`**: `GetCallbackSeconds()` for it.
+31. **`Sound/MusicPlayer.cpp`**: `GetNextData()` returns 0 when a segment
+    gives no data right after it was (re)started. Upstream then rewinds and
+    recurses again, without end, on the audio thread's 80 KiB stack: an
+    empty or damaged music file looping crashed the game. **`MusicPlayer.h`**:
+    the `segment_just_started` flag.
+32. **`Misc/interface.cpp`**: `display_epilogue()`'s 10 ms wait and
+    `interface_fade_out()`'s wait for the music fade sleep 1 ms per
+    iteration instead of spinning; the fade wait gives up after 2 s (the fade
+    takes 0.5 s). **`XML/XML_LevelScript.cpp`**: `ResetLevelScript()` (every
+    level load) has the same wait and the same fix. Only the audio thread
+    can end those two waits, and upstream spins with no limit; while OpenAL
+    is paused `Music::Idle()` does nothing, so they would never end.
+    (`AUDIT.md` b listed the first; the other two were found here.)
+33. **`shell.cpp`**: in a game, the frame pacing also sleeps 1 ms through
+    the last third of the frame, where upstream spins (desktop sleeps
+    overshoot; the 3DS kernel's do not). A spinning main thread starves
+    every lower-priority thread on its core.
+

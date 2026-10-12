@@ -63,7 +63,8 @@ namespace a1_3ds {
 // source/selftest.cpp (engine headers; kept apart from <3ds.h>)
 void entropy_selftest();
 void audio_load_selftest();
-// source/audio_probe.cpp
+void decoder_selftest();
+// source/audio_3ds.cpp
 void audio_probe_log();
 // source/input_3ds.cpp
 void input_script_start();
@@ -81,9 +82,14 @@ const char kDebugScreensFlag[] = "debug-screens";
 // puts three images through the engine's WadImageCache and logs their file
 // names and three a1fs::unique_path() names (STAGE5-PREREQS.md item 2).
 const char kDebugEntropyFlag[] = "debug-entropy";
-// If this file exists, the audio probe (audio_probe.cpp) also reports every
-// 5 s once the main menu is up, not only at boot milestones and at exit.
+// If this file exists, the audio statistics (audio_3ds.cpp) are also
+// logged every 5 s once the main menu is up, not only at boot milestones
+// and at exit, and shown on the bottom screen (input_3ds.cpp).
 const char kDebugAudioFlag[] = "debug-audio";
+// If this file exists, decoder_selftest() runs once the main menu is up:
+// every file in audio-test/ and the scenario's Music.ogg is decoded twice
+// (with a rewind between) and checked (docs/3ds/STAGE6.md).
+const char kDebugDecodersFlag[] = "debug-decoders";
 
 const char kScenarioTemplate[] =
 	"# Aleph One 3DS: scenario folder.\n"
@@ -866,6 +872,8 @@ void main_menu_displayed()
 		threadCreate(menu_capture_thread, nullptr, 32 * 1024, 0x3f, -2, true);
 	if (exists(user_dir() + "/" + kDebugEntropyFlag))
 		entropy_selftest();
+	if (exists(user_dir() + "/" + kDebugDecodersFlag))
+		decoder_selftest();
 	if (exists(user_dir() + "/" + kDebugAudioFlag))
 	{
 		audio_load_selftest();

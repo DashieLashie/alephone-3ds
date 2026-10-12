@@ -65,6 +65,9 @@ private:
 	uint32_t current_preset_index;
 	uint32_t current_segment_index;
 	std::atomic_uint32_t requested_preset_index;
+#ifdef A1_PLATFORM_3DS
+	bool segment_just_started = true; // no data decoded since the last (re)start (audio thread)
+#endif
 
 	friend class OpenALManager;
 };

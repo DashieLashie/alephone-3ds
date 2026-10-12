@@ -17,6 +17,9 @@
 #include <cstdint>
 #include <string>
 
+class Decoder;          // Sound/Decoder.h
+class FileSpecifier;    // Files/FileHandler.h
+
 namespace a1_3ds {
 
 // --- Paths (docs/3ds/STAGE4.md) ---------------------------------------------
@@ -108,6 +111,58 @@ bool exit_requested();
 // the field accepts.
 enum class TextKind { Normal, Number, Password };
 bool text_input(const std::string& hint, std::string& text, size_t max_chars, TextKind kind);
+
+// --- Audio (docs/3ds/STAGE6.md; implementation: ports/3ds/source/audio_3ds.cpp) ---
+// The AudioBackend itself is declared in Sound/AudioBackend.h
+// (a1_3ds::create_audio_backend).
+
+// Why there is no sound device, if there is none: ndspInit() failed inside
+// SDL_OpenAudio(), most often because sdmc:/3ds/dspfirm.cdc is missing.
+// `detail` receives SDL's error text.
+enum class DspProblem { None, NoFirmware, Other };
+DspProblem dsp_problem(std::string* detail = nullptr);
+
+// The HOME menu, sleep or an applet suspended (true) or resumed (false) the
+// application; underruns and late callbacks are not counted meanwhile.
+void audio_set_suspended(bool suspended);
+
+// Running totals for the debug-audio overlay. max_ms is the longest
+// callback since the previous audio_stats() call.
+struct AudioStats
+{
+	bool open = false;
+	int rate = 0, samples = 0;
+	float budget_ms = 0;        // play time of one buffer
+	uint32_t calls = 0;         // callbacks so far
+	float busy_ms = 0;          // total time spent in them
+	float max_ms = 0;
+	uint32_t late = 0;          // callbacks > 1.5 buffers after the previous one
+	uint32_t over_budget = 0;   // callbacks longer than a buffer
+	uint32_t underruns = 0;     // the DSP ran out of queued audio
+	double played_s = 0;        // audio queued while not suspended
+};
+AudioStats audio_stats();
+
+// --- Music decoding (implementation: ports/3ds/source/decoders_3ds.cpp) ---
+
+// Ogg Vorbis (Tremor) and MP3 (mpg123) decoders, tried by Sound/Decoder.cpp
+// after libsndfile (built without codecs). Returns a new Decoder, or
+// nullptr if the file is neither.
+Decoder* open_decoder(FileSpecifier& file);
+
+// Decoding totals, for the overlay: the last file opened, and the time spent
+// decoding against the audio produced (all decoders, all threads).
+struct DecodeStats
+{
+	std::string last_file;      // name only
+	std::string last_codec;     // "Ogg Vorbis (Tremor)", "MP3 (mpg123)"
+	int last_rate = 0, last_channels = 0;
+	bool last_in_memory = false;
+	double decode_ms = 0;
+	double audio_s = 0;         // audio decoded
+	float max_call_ms = 0;      // longest Decode() since the previous reset
+};
+DecodeStats decode_stats(bool reset_max = true);
 
 } // namespace a1_3ds
 

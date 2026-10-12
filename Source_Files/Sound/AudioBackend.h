@@ -84,6 +84,13 @@ public:
 	void Unlock() override { SDL_UnlockAudio(); }
 };
 
+#ifdef A1_PLATFORM_3DS
+// Stereo S16 at the preferences' rate, with underrun/timing instrumentation
+// and the missing-DSP-firmware notice (ports/3ds/source/audio_3ds.cpp)
+namespace a1_3ds { std::unique_ptr<AudioBackend> create_audio_backend(); }
+inline std::unique_ptr<AudioBackend> AudioBackend::CreateDefault() { return a1_3ds::create_audio_backend(); }
+#else
 inline std::unique_ptr<AudioBackend> AudioBackend::CreateDefault() { return std::make_unique<SDLAudioBackend>(); }
+#endif
 
 #endif

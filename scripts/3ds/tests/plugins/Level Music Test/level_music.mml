@@ -1,0 +1,5 @@
+<marathon>
+  <default_levels>
+    <music file="Music.ogg"/>
+  </default_levels>
+</marathon>

@@ -24,6 +24,9 @@
 #include "Decoder.h"
 #include "SndfileDecoder.h"
 #include <memory>
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"	// open_decoder(): Ogg Vorbis (Tremor), MP3 (mpg123)
+#endif
 
 using std::unique_ptr;
 
@@ -33,6 +36,11 @@ unique_ptr<StreamDecoder> StreamDecoder::Get(FileSpecifier& File)
 	if (sndfileDecoder->Open(File))
 		return sndfileDecoder;
 
+#ifdef A1_PLATFORM_3DS // the 3DS libsndfile has no codecs
+	if (Decoder* decoder = a1_3ds::open_decoder(File))
+		return unique_ptr<StreamDecoder>(decoder);
+#endif
+
 	return 0;
 }
 
@@ -41,6 +49,11 @@ Decoder* Decoder::Get(FileSpecifier& File)
 	unique_ptr<SndfileDecoder> sndfileDecoder(std::make_unique<SndfileDecoder>());
 	if (sndfileDecoder->Open(File))
 		return sndfileDecoder.release();
+
+#ifdef A1_PLATFORM_3DS // the 3DS libsndfile has no codecs
+	if (Decoder* decoder = a1_3ds::open_decoder(File))
+		return decoder;
+#endif
 
 	return 0;
 }

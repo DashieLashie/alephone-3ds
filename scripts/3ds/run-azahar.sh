@@ -25,6 +25,16 @@
 #                  ports/3ds/source/input_3ds.cpp and scripts/3ds/tests/input/)
 #   --reset-prefs  move the game's preferences aside first (to <file>.bak), so it starts
 #                  with the defaults
+#   --audio-debug  audio statistics on the bottom screen and in the log every 5 s, plus a
+#                  burst of 8 sounds at the main menu (sdmc:/3ds/alephone/debug-audio flag)
+#   --decoders     run the decoder self-test at the main menu: build-3ds/audio-test (made by
+#                  scripts/3ds/tests/make-audio-test.sh) is copied to sdmc:/3ds/alephone/audio-test
+#                  and the debug-decoders flag is set
+#   --level-music  install scripts/3ds/tests/plugins/Level Music Test in the scenario's
+#                  Plugins (Music.ogg on every level; Marathon 2 has no level music);
+#                  without this option it is removed
+#   --no-dspfirm   hide sdmc:/3ds/dspfirm.cdc for this run (restored afterwards), to see
+#                  the game run without a DSP: no sound and the one-time notice
 #   -h, --help     this text
 #
 # Environment:
@@ -46,6 +56,10 @@ screens=0
 input_debug=0
 script=
 reset_prefs=0
+audio_debug=0
+no_dspfirm=0
+decoders=0
+level_music=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -56,6 +70,10 @@ while [ $# -gt 0 ]; do
 		--input-debug) input_debug=1 ;;
 		--script) shift; script=${1:?--script needs a file} ;;
 		--reset-prefs) reset_prefs=1 ;;
+		--audio-debug) audio_debug=1 ;;
+		--no-dspfirm) no_dspfirm=1 ;;
+		--decoders) decoders=1 ;;
+		--level-music) level_music=1 ;;
 		-h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
 		-*) echo "run-azahar: unknown option $1" >&2; exit 2 ;;
 		*) threedsx=$1 ;;
@@ -121,6 +139,23 @@ if [ ! -f "$dspfirm" ]; then
 	printf 'DSP1\000\020\000\000' | dd of="$dspfirm" bs=1 seek=256 conv=notrunc 2>/dev/null
 	echo "run-azahar: created placeholder $dspfirm (HLE audio only)"
 fi
+if [ "$no_dspfirm" = 1 ]; then
+	mv "$dspfirm" "$dspfirm.hidden"
+	echo "run-azahar: hid $dspfirm for this run"
+fi
+rm -rf "$userdir/audio-test"
+if [ "$decoders" = 1 ]; then
+	[ -d "$repo/build-3ds/audio-test" ] || die "build-3ds/audio-test missing (scripts/3ds/tests/make-audio-test.sh)"
+	cp -R "$repo/build-3ds/audio-test" "$userdir/audio-test"
+	: > "$userdir/debug-decoders"
+else
+	rm -f "$userdir/debug-decoders"
+fi
+if [ "$audio_debug" = 1 ]; then
+	: > "$userdir/debug-audio"
+else
+	rm -f "$userdir/debug-audio"
+fi
 rm -f "$userdir"/screen-*.bmp
 if [ "$screens" = 1 ]; then
 	: > "$userdir/debug-screens"
@@ -154,6 +189,12 @@ if [ "$copy_data" = 1 ]; then
 	# Update in place: keeps anything the game or the user added.
 	rsync -a "$src/" "$userdir/$name/"
 	echo "run-azahar: scenario $src -> sdmc:/3ds/alephone/$name"
+	plugin="$userdir/$name/Plugins/Level Music Test"
+	rm -rf "$plugin"
+	if [ "$level_music" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Level Music Test" "$plugin"
+		echo "run-azahar: installed the Level Music Test plugin"
+	fi
 fi
 
 echo "run-azahar: SD card $sdmc"
@@ -182,6 +223,10 @@ while kill -0 "$pid" 2>/dev/null; do
 	elapsed=$((elapsed + 1))
 done
 status=0
+if [ "$no_dspfirm" = 1 ]; then
+	mv "$dspfirm.hidden" "$dspfirm"
+	echo "run-azahar: restored $dspfirm"
+fi
 
 echo
 if [ "$screens" = 1 ] || [ -n "$script" ]; then

@@ -167,10 +167,20 @@ if(NOT A1_SNDFILE_FOUND)
 endif()
 target_link_libraries(a1_deps INTERFACE PkgConfig::A1_SNDFILE)
 
+# Music codecs libsndfile lacks on the 3DS (source/decoders_3ds.cpp):
+# Ogg Vorbis through Tremor, MP3 through mpg123 (devkitPro packages
+# 3ds-libvorbisidec, 3ds-libogg, 3ds-mpg123).
+pkg_check_modules(A1_CODECS IMPORTED_TARGET vorbisidec ogg libmpg123)
+if(NOT A1_CODECS_FOUND)
+  message(FATAL_ERROR "Tremor/libogg/mpg123 not found in ${A1_PORTLIBS}; "
+                      "install them: dkp-pacman -S 3ds-libvorbisidec 3ds-libogg 3ds-mpg123")
+endif()
+target_link_libraries(a1_deps INTERFACE PkgConfig::A1_CODECS)
+
 target_link_libraries(a1_deps INTERFACE PkgConfig::A1_SDL)
 
 # Only static archives may be linked.
-foreach(_a1_pkg A1_SDL A1_OPENAL A1_SNDFILE)
+foreach(_a1_pkg A1_SDL A1_OPENAL A1_SNDFILE A1_CODECS)
   if(TARGET PkgConfig::${_a1_pkg})
     get_target_property(_a1_libs PkgConfig::${_a1_pkg} INTERFACE_LINK_LIBRARIES)
     foreach(_a1_lib IN LISTS _a1_libs)
@@ -292,10 +302,14 @@ set(_a1_platform_src "${CMAKE_CURRENT_SOURCE_DIR}/source/a1_3ds_platform.cpp")
 target_sources(alephone PRIVATE "${_a1_platform_src}")
 # Debug self-tests that need engine headers (debug-entropy flag).
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/selftest.cpp")
-# Audio thread probe: stack use and callback timing (docs/3ds/STAGE5-PREREQS.md
-# items 3 and 5). The engine's SDL_OpenAudio() call goes through it.
-target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/audio_probe.cpp")
-target_link_options(alephone PRIVATE "LINKER:--wrap=SDL_OpenAudio")
+# Audio output (docs/3ds/STAGE6.md): the engine's AudioBackend (stereo S16
+# through SDL's ndsp driver), its timing/stack/underrun instrumentation and
+# the missing-DSP-firmware state. Underruns are seen where SDL queues
+# buffers to the DSP, so ndspChnWaveBufAdd is wrapped.
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/audio_3ds.cpp")
+target_link_options(alephone PRIVATE "LINKER:--wrap=ndspChnWaveBufAdd")
+# Ogg Vorbis (Tremor) and MP3 (mpg123) decoders for Sound/Decoder.cpp.
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/decoders_3ds.cpp")
 # Input: touch screen, HOME menu/sleep, system keyboard, debug-input log and
 # the debug-input-script injector (docs/3ds/STAGE5.md). The HID functions SDL's
 # N3DS joystick/touch code calls are wrapped so a script can feed them, and
@@ -390,6 +404,7 @@ add_custom_target(run-azahar
   COMMENT "Azahar: staging the SD card and starting the emulator")
 
 message(STATUS "Summary: SDL2 ${A1_SDL_sdl2_VERSION}, SDL2_ttf ${A1_SDL_SDL2_ttf_VERSION}, "
-               "audio: OpenAL Soft ${A1_OPENAL_VERSION}, decoding: libsndfile ${A1_SNDFILE_VERSION}, "
+               "audio: OpenAL Soft ${A1_OPENAL_VERSION}, decoding: libsndfile ${A1_SNDFILE_VERSION} "
+               "+ Tremor ${A1_CODECS_vorbisidec_VERSION} + mpg123 ${A1_CODECS_libmpg123_VERSION}, "
                "user dir \"${A1_3DS_USER_DIR}\", default scenario \"${A1_3DS_DEFAULT_SCENARIO}\", "
                "build type ${CMAKE_BUILD_TYPE}")

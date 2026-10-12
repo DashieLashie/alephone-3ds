@@ -1807,6 +1807,9 @@ static void display_epilogue(
 		do
 		{
 			Music::instance()->Idle();
+#ifdef A1_PLATFORM_3DS // threads share a core cooperatively: sleep, do not spin
+			sleep_for_machine_ticks(1);
+#endif
 		}
 		while (machine_tick_count()-ticks<10);
 	}
@@ -3522,8 +3525,20 @@ void interface_fade_out(
 		
 		if(fade_music) 
 		{
+#ifdef A1_PLATFORM_3DS
+			// Only the audio thread can end the fade (it retires the player),
+			// so sleep instead of spinning, and stop waiting after 2 s (the
+			// fade takes 0.5 s) in case audio is paused meanwhile.
+			const auto fade_wait_start = machine_tick_count();
+			while (Music::instance()->Playing() && machine_tick_count() - fade_wait_start < 2 * MACHINE_TICKS_PER_SECOND)
+			{
+				Music::instance()->Idle();
+				sleep_for_machine_ticks(1);
+			}
+#else
 			while(Music::instance()->Playing()) 
 				Music::instance()->Idle();
+#endif
 
 			/* and give up the memory */
 			Music::instance()->Pause();

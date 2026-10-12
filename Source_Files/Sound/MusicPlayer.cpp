@@ -42,7 +42,18 @@ SetupALResult MusicPlayer::SetUpALSourceIdle() {
 
 uint32_t MusicPlayer::GetNextData(uint8* data, uint32_t length) {
 	const auto dataSize = current_decoder->Decode(data, length);
+#ifdef A1_PLATFORM_3DS
+	if (dataSize) segment_just_started = false;
+#endif
 	if (dataSize == length) return dataSize;
+
+#ifdef A1_PLATFORM_3DS
+	// A segment that gives no data at all right after it was (re)started
+	// (an empty or damaged file) would make the code below recurse without
+	// end on the audio thread's stack: end the music instead.
+	if (!dataSize && segment_just_started) return 0;
+	segment_just_started = true;
+#endif
 
 	const auto nextPresetIndex = requested_preset_index.load();
 	const auto nextSegmentIndex = music_presets[current_preset_index].GetSegment(current_segment_index)->GetNextSegmentIndex(nextPresetIndex);

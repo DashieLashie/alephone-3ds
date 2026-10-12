@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 6 test (docs/3ds/STAGE6.md): Marathon 2 has no level music, so
+     the definition of done ("music + SFX") needs some. This plays the
+     scenario's own Music.ogg on every level, looping. Installed by
+     scripts/3ds/run-azahar.sh --level-music; on a console copy this folder
+     to sdmc:/3ds/alephone/Marathon2/Plugins/. -->
+<plugin name="Level Music Test" version="1.0" description="3DS audio test: Music.ogg as level music">
+  <mml file="level_music.mml"/>
+  <scenario name="Marathon 2"/>
+</plugin>

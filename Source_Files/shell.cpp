@@ -835,6 +835,16 @@ void main_event_loop(void)
 			{
 				sleep_for_machine_ticks(1);
 			}
+#ifdef A1_PLATFORM_3DS
+			// The kernel's sleep is accurate to far below 1 ms, so sleep
+			// through the last third of the frame too instead of spinning: a
+			// spinning thread starves lower-priority threads on its core
+			// (threads are cooperative on the 3DS).
+			else if (elapsed_machine_ticks < desired_elapsed_machine_ticks)
+			{
+				sleep_for_machine_ticks(1);
+			}
+#endif
 		}
 		else if (game_state != _game_in_progress)
 		{

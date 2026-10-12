@@ -97,7 +97,11 @@ public:
 
 	struct Parameters
 	{
+#ifdef A1_PLATFORM_3DS // the DSP's output rate: no resampling after OpenAL's
+		static const int DEFAULT_RATE = 32728;
+#else
 		static const int DEFAULT_RATE = 44100;
+#endif
 		static const int DEFAULT_SAMPLES = 1024;
 		float volume_db; // db
 		uint16 flags; // dynamic_tracking, etc. 

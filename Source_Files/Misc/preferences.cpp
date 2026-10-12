@@ -1626,8 +1626,11 @@ static void sound_dialog(void *arg)
 	w_select_popup* channel_w = new w_select_popup();
 	channel_w->set_labels(channel_labels);
 	channel_w->set_selection(mapping_channel_index.at(sound_preferences->channel_type));
+#ifndef A1_PLATFORM_3DS
+	// 3DS: always stereo (SoundManager::Parameters::Verify)
 	table->dual_add(channel_w->label("Channels"), d);
 	table->dual_add(channel_w, d);
+#endif
 
 	w_toggle* dynamic_w = new w_toggle(TEST_FLAG(sound_preferences->flags, _dynamic_tracking_flag));
 	table->dual_add(dynamic_w->label("Active Panning"), d);
@@ -1635,12 +1638,17 @@ static void sound_dialog(void *arg)
 
 	bool is_3d_sounds_enabled = sound_preferences->flags & _3d_sounds_flag;
 	w_toggle *sounds3d_w = new w_toggle(is_3d_sounds_enabled);
+#ifndef A1_PLATFORM_3DS
+	// 3DS: no 3D sounds or HRTF (SoundManager::Parameters::Verify)
 	table->dual_add(sounds3d_w->label("3D Sounds"), d);
 	table->dual_add(sounds3d_w, d);
+#endif
 
 	w_toggle *hrtf_w = new w_toggle((OpenALManager::Get() && OpenALManager::Get()->IsHrtfEnabled()) || sound_preferences->flags & _hrtf_flag);
+#ifndef A1_PLATFORM_3DS
 	table->dual_add(hrtf_w->label("HRTF (Headphones)"), d);
 	table->dual_add(hrtf_w, d);
+#endif
 	hrtf_w->set_enabled(OpenALManager::Get() && OpenALManager::Get()->GetHrtfSupport() != OpenALManager::HrtfSupport::Unsupported && is_3d_sounds_enabled && sound_preferences->channel_type == ChannelType::_stereo);
 
 	auto hrtf_enable_callback = [&](void*) {

@@ -209,8 +209,20 @@ void ResetLevelScript()
 	// For whatever previous music had been playing...
 	Music::instance()->Fade(0, MACHINE_TICKS_PER_SECOND/2, Music::FadeType::Sinusoidal);
 
+#ifdef A1_PLATFORM_3DS
+	// Only the audio thread can end the fade (it retires the player), so
+	// sleep instead of spinning, and stop waiting after 2 s (the fade takes
+	// 0.5 s): Music::Idle() does nothing while audio is paused.
+	const auto fade_wait_start = machine_tick_count();
+	while (Music::instance()->Playing() && machine_tick_count() - fade_wait_start < 2 * MACHINE_TICKS_PER_SECOND)
+	{
+		Music::instance()->Idle();
+		sleep_for_machine_ticks(1);
+	}
+#else
 	while (Music::instance()->Playing())
 		Music::instance()->Idle();
+#endif
 	
 	// If no scripts were loaded or none of them had music specified,
 	// then don't play any music

@@ -80,6 +80,9 @@ public:
 	float GetMusicVolume() const { return music_volume.load(); }
 	void ToggleDeviceMode(bool recording_device);
 	uint32_t GetFrequency() const { return audio_parameters.rate; }
+#ifdef A1_PLATFORM_3DS
+	float GetCallbackSeconds() const { return audio_parameters.rate ? static_cast<float>(audio_parameters.sample_frame_size) / audio_parameters.rate : 0.f; }
+#endif
 	uint32_t GetElapsedPauseTime() const { return elapsed_pause_time; }
 	void GetPlayBackAudio(uint8* data, int length);
 	HrtfSupport GetHrtfSupport() const;

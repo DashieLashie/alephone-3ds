@@ -15,6 +15,10 @@
 	  empty initial text, and its result is appended to the field.
 	- Bottom screen: a legend of the controls, or, with the debug-input flag
 	  file, a log of the raw SDL input events (also written to log.txt).
+	  With the debug-audio flag file, the last four rows show the audio
+	  statistics (audio_3ds.cpp, decoders_3ds.cpp). If the DSP could not be
+	  started (no dspfirm.cdc), a notice explaining how to dump the firmware
+	  replaces the legend once, until a button is pressed.
 	- debug-input-script: a test script that injects buttons, sticks and
 	  touches at the libctru HID level (the functions SDL's N3DS joystick and
 	  touch code call), for testing without a person at the console.
@@ -54,6 +58,9 @@ namespace {
 // If this file exists in the user dir, every input event is logged
 // (log.txt, and on the bottom screen instead of the legend).
 const char kDebugInputFlag[] = "debug-input";
+// If this file exists, the bottom screen's last rows show audio statistics
+// (a1_3ds_platform.cpp also logs them every 5 s).
+const char kDebugAudioFlag[] = "debug-audio";
 // Test script; see the comment above run_script_line().
 const char kInputScriptFile[] = "debug-input-script";
 
@@ -64,6 +71,7 @@ bool file_exists(const std::string& path)
 }
 
 bool s_debug_input = false;
+bool s_debug_audio = false;
 
 // --- Bottom screen: legend or event log --------------------------------------
 
@@ -98,6 +106,28 @@ const char kLegend[] =
 	"\n"
 	"Change them in Preferences > Controls.";
 
+// The missing-DSP notice: not shown yet, showing, dismissed (once per run).
+enum class DspNotice { Pending, Showing, Dismissed };
+DspNotice s_dsp_notice = DspNotice::Pending;
+
+const char kDspFirmwareNotice[] =
+	"\x1b[1;1H\x1b[31;1mNo sound: DSP firmware missing\x1b[0m\n"
+	"\n"
+	"Aleph One runs without sound: the\n"
+	"file sdmc:/3ds/dspfirm.cdc is not on\n"
+	"the SD card, and the 3DS needs it to\n"
+	"play sound from homebrew. Create it\n"
+	"once with Luma3DS:\n"
+	"\n"
+	" 1. Press L + D-Pad Down + SELECT to\n"
+	"    open the Rosalina menu.\n"
+	" 2. Miscellaneous options >\n"
+	"    Dump DSP firmware.\n"
+	" 3. Close Rosalina (B) and restart\n"
+	"    Aleph One.\n"
+	"\n"
+	"\x1b[32mPress any button to continue.\x1b[0m";
+
 void console_write(const char* text)
 {
 	if (!s_console_out)
@@ -119,12 +149,31 @@ void bottom_present()
 	gfxScreenSwapBuffers(GFX_BOTTOM, false);
 }
 
+void audio_overlay_draw();
+
 void bottom_redraw()
 {
 	if (!s_console_out)
 		return;
 	console_write("\x1b[2J");
-	if (s_debug_input)
+	if (s_dsp_notice == DspNotice::Showing)
+	{
+		std::string detail;
+		if (dsp_problem(&detail) == DspProblem::NoFirmware)
+			console_write(kDspFirmwareNotice);
+		else
+		{
+			console_write("\x1b[1;1H\x1b[31;1mNo sound: the DSP did not start\x1b[0m\n\n");
+			console_write(detail.substr(0, 39 * 3).c_str());
+			console_write("\n\nAleph One runs without sound. If\n"
+			              "sdmc:/3ds/dspfirm.cdc is damaged, dump\n"
+			              "it again: Rosalina menu (L + D-Pad\n"
+			              "Down + SELECT) > Miscellaneous\n"
+			              "options > Dump DSP firmware.\n\n"
+			              "\x1b[32mPress any button to continue.\x1b[0m");
+		}
+	}
+	else if (s_debug_input)
 	{
 		console_write("\x1b[1;1H\x1b[36;1mdebug-input\x1b[0m: raw SDL events\n");
 		for (const auto& line : s_overlay_lines)
@@ -135,6 +184,8 @@ void bottom_redraw()
 	}
 	else
 		console_write(kLegend);
+	if (s_debug_audio)
+		audio_overlay_draw();
 	bottom_present();
 }
 
@@ -157,7 +208,7 @@ void overlay_add(const std::string& line)
 {
 	if (!s_console_out)
 		return;
-	const size_t kRows = 29, kCols = 39;
+	const size_t kRows = s_debug_audio ? 25 : 29, kCols = 39;
 	s_overlay_lines.push_back(line.substr(0, kCols));
 	bool scrolled = false;
 	while (s_overlay_lines.size() > kRows)
@@ -165,7 +216,7 @@ void overlay_add(const std::string& line)
 		s_overlay_lines.pop_front();
 		scrolled = true;
 	}
-	if (scrolled)
+	if (scrolled || s_debug_audio)
 		bottom_redraw();
 	else
 	{
@@ -173,6 +224,82 @@ void overlay_add(const std::string& line)
 		console_write("\n");
 		bottom_present();
 	}
+}
+
+// --- Audio statistics (debug-audio) ---------------------------------------------
+
+// Rows 27-30, below the legend (25 rows) and the debug-input log (rows
+// 2-26 with this overlay). Each row is padded to 39 columns: writing the
+// 40th column of row 30 would scroll the console.
+std::string s_audio_rows[4];
+double s_audio_last_ms = -1e9;
+uint32_t s_audio_prev_calls = 0;
+float s_audio_prev_busy = 0;
+double s_dec_prev_ms = 0, s_dec_prev_audio = 0;
+
+void audio_overlay_draw()
+{
+	for (int i = 0; i < 4; ++i)
+	{
+		char pos[16];
+		snprintf(pos, sizeof pos, "\x1b[%d;1H", 27 + i);
+		console_write(pos);
+		std::string row = s_audio_rows[i].substr(0, 39);
+		row.resize(39, ' ');
+		console_write(i == 0 ? "\x1b[36m" : "");
+		console_write(row.c_str());
+		console_write("\x1b[0m");
+	}
+}
+
+// Main thread, from __wrap_hidScanInput: refresh once a second.
+void audio_overlay_update()
+{
+	const double now = elapsed_ms();
+	if (now - s_audio_last_ms < 1000.0)
+		return;
+	s_audio_last_ms = now;
+
+	char buf[4][64];
+	const AudioStats a = audio_stats();
+	const DecodeStats d = decode_stats();
+	if (a.open)
+	{
+		const uint32_t n = a.calls - s_audio_prev_calls;
+		const float avg = n ? (a.busy_ms - s_audio_prev_busy) / n : 0.0f;
+		snprintf(buf[0], sizeof buf[0], "audio %d Hz %d smp %.1f ms/buf", a.rate, a.samples, a.budget_ms);
+		snprintf(buf[1], sizeof buf[1], "mix avg %.1f max %.1f ms load %.0f%%", avg, a.max_ms,
+		         a.budget_ms > 0 ? 100.0f * avg / a.budget_ms : 0.0f);
+		snprintf(buf[2], sizeof buf[2], "underruns %lu %.2f/min %.1f min late %lu",
+		         static_cast<unsigned long>(a.underruns),
+		         a.played_s > 0 ? a.underruns * 60.0 / a.played_s : 0.0, a.played_s / 60.0,
+		         static_cast<unsigned long>(a.late));
+		s_audio_prev_calls = a.calls;
+		s_audio_prev_busy = a.busy_ms;
+	}
+	else
+	{
+		snprintf(buf[0], sizeof buf[0], "audio: no device");
+		snprintf(buf[1], sizeof buf[1], "%s", dsp_problem() == DspProblem::NoFirmware ? "DSP firmware missing" : "");
+		buf[2][0] = 0;
+	}
+	if (d.last_file.empty())
+		snprintf(buf[3], sizeof buf[3], "music: none decoded");
+	else
+	{
+		// Decode time per second of audio produced, over the last second.
+		const double audio = d.audio_s - s_dec_prev_audio;
+		const double ms = d.decode_ms - s_dec_prev_ms;
+		snprintf(buf[3], sizeof buf[3], "%s %d %s dec %.1f%% max %.1fms",
+		         d.last_codec.substr(0, d.last_codec.find(' ')).c_str(), d.last_rate,
+		         d.last_channels == 2 ? "st" : "mo", audio > 0 ? ms / (10.0 * audio) : 0.0, d.max_call_ms);
+		s_dec_prev_audio = d.audio_s;
+		s_dec_prev_ms = d.decode_ms;
+	}
+	for (int i = 0; i < 4; ++i)
+		s_audio_rows[i] = buf[i];
+	audio_overlay_draw();
+	bottom_present();
 }
 
 // --- Raw event log (debug-input) ------------------------------------------------
@@ -464,6 +591,7 @@ void push_window_event(Uint8 what)
 void on_suspend(const char* why)
 {
 	s_suspend_ms = elapsed_ms();
+	audio_set_suspended(true);   // not an underrun: the DSP stops by design
 	if (SDL_WasInit(SDL_INIT_AUDIO) && SDL_GetAudioStatus() == SDL_AUDIO_PLAYING)
 	{
 		SDL_PauseAudio(1);
@@ -484,6 +612,7 @@ void on_resume(const char* why)
 	const double now = elapsed_ms();
 	printf("[3ds] +%.1f ms: resumed (%s) after %.1f s%s\n", now, why, (now - s_suspend_ms) / 1000.0,
 	       s_audio_paused_by_us ? "; SDL audio resumed" : "");
+	audio_set_suspended(false);
 	if (s_audio_paused_by_us)
 	{
 		SDL_PauseAudio(0);
@@ -764,6 +893,9 @@ void __wrap_hidScanInput(void)
 	else
 		s_suppress &= hidKeysHeld();   // forget buttons once released
 
+	if (s_debug_audio && s_console_out)
+		audio_overlay_update();
+
 	Script& s = s_script;
 	script_step();
 	u32 held = s.held | (s.touching ? KEY_TOUCH : 0);
@@ -777,6 +909,26 @@ void __wrap_hidScanInput(void)
 	s.down = held & ~s.prev_held;
 	s.up = s.prev_held & ~held;
 	s.prev_held = held;
+	// The no-sound notice: shown once the DSP failed, dismissed by any
+	// button or a tap (real or scripted). The press that dismisses it is not
+	// passed on, so it does not also act on the menu.
+	if (s_console_out && s_dsp_notice == DspNotice::Pending && dsp_problem() != DspProblem::None)
+	{
+		s_dsp_notice = DspNotice::Showing;
+		printf("[3ds] +%.1f ms: showing the no-sound (DSP) notice on the bottom screen\n", elapsed_ms());
+		bottom_redraw();
+	}
+	else if (s_dsp_notice == DspNotice::Showing &&
+	         (((__real_hidKeysDown() | s.down) & ~KEY_TOUCH) || ((hidKeysHeld() | held) & KEY_TOUCH)))
+	{
+		s_suppress |= hidKeysHeld() & ~KEY_TOUCH;
+		s.down = 0;
+		if ((hidKeysHeld() | held) & KEY_TOUCH)
+			s_touch_blocked = true;
+		s_dsp_notice = DspNotice::Dismissed;
+		printf("[3ds] +%.1f ms: no-sound notice dismissed\n", elapsed_ms());
+		bottom_redraw();
+	}
 	if (s.quit)
 	{
 		// What SDL does while aptMainLoop() returns false.
@@ -865,6 +1017,7 @@ void input_script_start()
 void input_init()
 {
 	s_debug_input = file_exists(user_dir() + "/" + kDebugInputFlag);
+	s_debug_audio = file_exists(user_dir() + "/" + kDebugAudioFlag);
 
 	// What SDL reports (docs/3ds/STAGE5.md, "SDL's view of the controls").
 	const int n = SDL_NumJoysticks();

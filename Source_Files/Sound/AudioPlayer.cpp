@@ -82,9 +82,22 @@ void AudioPlayer::FillBuffers() {
 		queued_stereo = wantedStereo;
 	}
 
+#ifdef A1_PLATFORM_3DS
+	// Filling every free buffer at once (a track starting: four 8 KiB
+	// buffers of decoded music) took three callback periods on the 3DS and
+	// starved the DSP. Fill what playback uses until the next pass, plus one.
+	const int bytes_per_frame = (queued_format == AudioFormat::_8_bit ? 1 : queued_format == AudioFormat::_16_bit ? 2 : 4) * (queued_stereo ? 2 : 1);
+	const float buffer_seconds = static_cast<float>(buffer_samples) / (bytes_per_frame * queued_rate);
+	const int fill_limit = 1 + static_cast<int>(OpenALManager::Get()->GetCallbackSeconds() / buffer_seconds);
+	int filled = 0;
+#endif
+
 	for (auto& buffer : audio_source->buffers) { //now we process our buffers that are ready
 
 		if (buffer.second) continue;
+#ifdef A1_PLATFORM_3DS
+		if (filled++ >= fill_limit) return;
+#endif
 
 		std::array<uint8, buffer_samples> data = {};
 		uint32_t bufferOffset = 0;

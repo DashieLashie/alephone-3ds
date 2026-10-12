@@ -706,6 +706,20 @@ bool SoundManager::Parameters::Verify()
 	{
 		volume_db = MAXIMUM_VOLUME_DB;
 	}
+
+#ifdef A1_PLATFORM_3DS
+	// The 3DS output is stereo S16 through the DSP
+	// (ports/3ds/source/audio_3ds.cpp). HRTF and OpenAL's 3D positioning
+	// cost mixer time the 3DS lacks; the classic stereo panning (the
+	// upstream default) is used. The rate and buffer size stay configurable
+	// in the preferences file within what the DSP and SDL handle well.
+	flags &= ~(_hrtf_flag | _3d_sounds_flag);
+	channel_type = ChannelType::_stereo;
+	if (rate < 8000 || rate > 48000)
+		rate = DEFAULT_RATE;
+	if (samples < 256 || samples > 4096)
+		samples = DEFAULT_SAMPLES;
+#endif
 	
 	return true;
 }

@@ -1,0 +1,20 @@
+# Stage 6: keep the main menu up for 2.5 minutes so the intro music
+# (Music.ogg, 93.8 s, Tremor) reaches its end and loops (Rewind). The demo
+# starts after 30 s without input; a short HOME visit (focus gained) resets
+# that timer, and also exercises the suspend/resume path of the audio
+# statistics. Run with --audio-debug and a --timeout of 230 or more.
+wait 25000
+home 200
+wait 25000
+home 200
+log --- 60 s at the menu ---
+wait 25000
+home 200
+wait 25000
+home 200
+log --- 110 s at the menu: the music has looped by now ---
+wait 25000
+home 200
+wait 20000
+screens loop-menu
+log --- music loop test done ---

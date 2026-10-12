@@ -17,6 +17,7 @@
 
 #include "a1_3ds_platform.h"
 
+#include "Decoder.h"
 #include "FileHandler.h"
 #include "SoundManager.h"
 #include "WadImageCache.h"
@@ -28,8 +29,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
+#include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace a1_3ds {
 
@@ -123,6 +127,87 @@ void audio_load_selftest()
 			++played;
 		}
 	printf(" (%d at once)\n", played);
+}
+
+namespace {
+
+// Decodes a whole stream the way MusicPlayer does (8 KiB requests until a
+// short read). Returns the bytes decoded and an FNV-1a hash of them.
+size_t decode_all(StreamDecoder& d, uint32& hash, double& ms, float& max_ms)
+{
+	std::vector<uint8> buf(8192);
+	size_t total = 0;
+	hash = 2166136261u;
+	max_ms = 0;
+	const Uint64 t0 = SDL_GetPerformanceCounter();
+	for (int calls = 0; calls < 1000000; ++calls)
+	{
+		const Uint64 c0 = SDL_GetPerformanceCounter();
+		const int32 n = d.Decode(buf.data(), static_cast<int32>(buf.size()));
+		max_ms = std::max(max_ms, static_cast<float>((SDL_GetPerformanceCounter() - c0) * 1000.0 / SDL_GetPerformanceFrequency()));
+		for (int32 i = 0; i < n; ++i)
+			hash = (hash ^ buf[i]) * 16777619u;
+		total += n;
+		if (n < static_cast<int32>(buf.size()))
+			break;
+	}
+	ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+	return total;
+}
+
+} // namespace
+
+// Debug flag "debug-decoders" (docs/3ds/STAGE6.md): every file in
+// <user dir>/audio-test, and the scenario's Music.ogg, goes through the
+// engine's decoder factories (Sound/Decoder.cpp). Each one is decoded to the
+// end, rewound and decoded again (a looping track), and checked against
+// Decoder::Frames() (what replacement sounds rely on). Main thread.
+void decoder_selftest()
+{
+	std::vector<std::string> paths;
+	const std::string dir = user_dir() + "/audio-test";
+	if (DIR* d = opendir(dir.c_str()))
+	{
+		while (struct dirent* e = readdir(d))
+			if (e->d_name[0] != '.')
+				paths.push_back(dir + "/" + e->d_name);
+		closedir(d);
+	}
+	std::sort(paths.begin(), paths.end());
+	paths.push_back(scenario_dir() + "/Music.ogg");
+	printf("[3ds] debug-decoders: %zu files\n", paths.size());
+	int failures = 0;
+	for (const std::string& path : paths)
+	{
+		const char* name = strrchr(path.c_str(), '/') + 1;
+		FileSpecifier file(path.c_str());
+		std::unique_ptr<StreamDecoder> d = StreamDecoder::Get(file);
+		if (!d)
+		{
+			printf("[3ds] debug-decoders: %s: not decodable\n", name);
+			continue;
+		}
+		uint32 h1 = 0, h2 = 0;
+		double ms1 = 0, ms2 = 0;
+		float max1 = 0, max2 = 0;
+		const size_t n1 = decode_all(*d, h1, ms1, max1);
+		d->Rewind();
+		const size_t n2 = decode_all(*d, h2, ms2, max2);
+		const double seconds = d->BytesPerFrame() ? n1 / static_cast<double>(d->BytesPerFrame()) / d->Rate() : 0;
+		std::unique_ptr<Decoder> whole(Decoder::Get(file));
+		const long frames = whole ? whole->Frames() : -1;
+		const bool frames_ok = whole && static_cast<size_t>(frames) * whole->BytesPerFrame() == n1;
+		const bool ok = n1 > 0 && n1 == n2 && h1 == h2 && frames_ok;
+		failures += !ok;
+		printf("[3ds] debug-decoders: %s: %s, %.0f Hz %s, %.2f s; pass 1 %zu bytes %08lX in %.0f ms "
+		       "(%.1f%% of real time, longest 8 KiB request %.1f ms); after Rewind %zu bytes %08lX "
+		       "(longest request %.1f ms); Frames() %ld (%s) -> %s\n",
+		       name, d->GetAudioFormat() == AudioFormat::_16_bit ? "16-bit" : "float", d->Rate(),
+		       d->IsStereo() ? "stereo" : "mono", seconds, n1, static_cast<unsigned long>(h1), ms1,
+		       seconds > 0 ? ms1 / (10.0 * seconds) : 0.0, max1, n2, static_cast<unsigned long>(h2), max2, frames,
+		       frames_ok ? "matches" : "MISMATCH", ok ? "PASS" : "FAIL");
+	}
+	printf("[3ds] debug-decoders: done, %d failure(s)\n", failures);
 }
 
 } // namespace a1_3ds
