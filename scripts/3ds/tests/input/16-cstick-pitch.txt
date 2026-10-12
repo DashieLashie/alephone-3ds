@@ -1,0 +1,29 @@
+# C-Stick pitch speed (docs/3ds/NEXT-SPRINT.md B7, PATCHES.md 19). Holds the
+# C-Stick fully up for 100 ms (3-4 ticks; Azahar sometimes delivers more)
+# twice, then fully down for 200 ms, with a capture after each. With the 0.5
+# pitch scale a tick at full deflection is 6.1 of the +/-42.67 angle units
+# (+/-30 degrees): the first hold looks about halfway up, the second reaches
+# the top, the down hold comes back to about level.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 40000             # the level loads (~4 s since PATCHES.md 42; ~31 s before)
+screens pitch-0
+cstick 0 160
+wait 100
+cstick 0 0
+wait 500
+screens pitch-up1
+cstick 0 160
+wait 100
+cstick 0 0
+wait 500
+screens pitch-up2
+cstick 0 -160
+wait 200
+cstick 0 0
+wait 500
+screens pitch-down
+quit
+wait 5000

@@ -122,8 +122,13 @@ static const std::vector<AxisInfo> axis_mappings = {
 // that 90% counts as full (SDL maps the HID range +/-160 to +/-32767, and a
 // stick seldom reaches its last few units), then squared: half deflection
 // turns at a quarter speed. Holding full deflection on the yaw axis ramps
-// the speed up to 2x over half a second (kYawRampTicks ticks).
+// the speed up to 2x over half a second (kYawRampTicks ticks). The pitch
+// axis turns at kPitchScale of the yaw's speed (before the Controller
+// Advanced vertical sensitivity): Marathon's pitch range is only +/-30
+// degrees, which full deflection crossed in about 0.12 s, so the view
+// easily ended up at the sky (docs/3ds/NEXT-SPRINT.md B7).
 static const int kYawRampTicks = 15;
+static const float kPitchScale = 0.5f;
 static int full_yaw_ticks = 0;
 
 static float stick_deflection_3ds(int value, int deadzone)
@@ -225,6 +230,8 @@ int process_joystick_axes(int flags) {
 				full_yaw = full_yaw || x >= 0.95f;
 				response *= 1.f + full_yaw_ticks / static_cast<float>(kYawRampTicks);
 			}
+			else
+				response *= kPitchScale;
 			float norm = response * (static_cast<float>(controller_sensitivity) / FIXED_ONE);
 #else
 			float norm = val/32767.f * (static_cast<float>(controller_sensitivity) / FIXED_ONE);

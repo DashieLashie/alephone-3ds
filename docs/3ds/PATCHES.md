@@ -17,8 +17,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 14-15 with the stage 5 prerequisites, 16-22 in stage 5 (controls, `STAGE5.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
-36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 in the sprint after
-it (`NEXT-SPRINT.md`).
+36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 and an update to 19
+in the sprint after it (`NEXT-SPRINT.md`).
 
 ## Summary
 
@@ -42,7 +42,7 @@ it (`NEXT-SPRINT.md`).
 | 16 | `Source_Files/shell.cpp` | input init; HOME > Close quits without a dialog | none |
 | 17 | `Source_Files/main.cpp` | "main loop ended" milestone (log only) | none |
 | 18 | `Source_Files/Input/mouse_sdl.cpp` | touch screen mode follows mouse aiming | none |
-| 19 | `Source_Files/Input/joystick_sdl.cpp` | C-Stick response curve and turn acceleration | linear stick response (**by design**) |
+| 19 | `Source_Files/Input/joystick_sdl.cpp` | C-Stick response curve, turn acceleration, slower pitch | linear stick response (**by design**) |
 | 20 | `Source_Files/Misc/preferences.cpp` | 3DS default bindings, always run, "Touch Screen Aiming" label | upstream controller defaults (**by design**) |
 | 21 | `Source_Files/Misc/sdl_widgets.cpp`, `sdl_widgets.h` | 3DS button names; text fields use the system keyboard | cursor positioning by click in text fields |
 | 22 | `Source_Files/Misc/interface.cpp` | HOME > Close skips quit screens, fades, scenario reload | none |
@@ -474,7 +474,12 @@ inside logging macros (4 and 20 lines, inspected). 0 diagnostics.
 19. **`Input/joystick_sdl.cpp`**: in `process_joystick_axes()`, the aim
     axes' response is `x²` of the deflection past the dead zone (rescaled so
     90% is full) instead of linear, and holding full yaw deflection ramps the
-    speed to 2x over 15 ticks.
+    speed to 2x over 15 ticks. *Added in the sprint after stage 7:* the
+    pitch axis is scaled by `kPitchScale` (0.5) before the Controller
+    Advanced vertical sensitivity. Marathon's pitch range is ±30 degrees,
+    which full deflection crossed in about 0.12 s; the player kept ending
+    up looking at the sky (`STAGE5.md` open item 2). A constant rather than
+    a new default, so existing prefs files (which store 1.0) get it too.
 20. **`Misc/preferences.cpp`**: a 3DS `default_key_bindings` table (one
     controller code per action; keyboard and mouse codes as upstream),
     `_inputmod_interchange_run_walk` added to the default modifiers, and the
@@ -742,8 +747,8 @@ numbers are normalised. 0 diagnostics.
 
 ## The sprint after stage 7 (41-42)
 
-Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6). All guarded by
-`#ifdef A1_PLATFORM_3DS`.
+Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6, B7). All guarded by
+`#ifdef A1_PLATFORM_3DS`. Entry 19 was extended in the same sprint.
 
 41. **Timed log marks** (log only): `a1_3ds::time_mark("what")` writes
     `[3ds] +T ms: what (+D ms)`, D being the time since the previous mark
