@@ -16,6 +16,7 @@ cap the frame time stays 33 ms and the gain shows as idle time instead.
 | baseline | stage 6 build (re-run with a fixed seed, `bc7fc46`) | 66.9 / 63.8 / 63.7 | 15.0-15.7 | | |
 | a | direct framebuffer present | **23.1 / 21.0 / 20.7** (−66%) | **30.3** (capped) | identical to SDL's within ±1 per channel | **yes** |
 
+| b | `-O3` / `-ffast-math` / LTO / LTO + `-fno-strict-aliasing` | −0.3…−0.7% / ±0.3% / −3.5…−12% / −4.5% | 30.3 | LTO: **walls missing**; LTO + no-strict-aliasing: identical | no (none of them) |
 | c | half-resolution rendering, 2x upscale (the engine's Resolution: Low) | 16.7 / 16.1 / 15.8 (−24 to −28% vs a) | 30.3 | **visibly coarser**: loses the 2x2 supersampling | no (stays an option) |
 
 | d | force the 30 fps cap, no interpolation | (30 is already the default, without interpolation) | 60 / Unlimited: **42.8 / 48.0 / 48.2** | forcing 30 shows fewer frames to anyone who chose 60 | no (decide on hardware) |
@@ -68,6 +69,71 @@ and the clamp should go in. It is six lines:
  	// validate_graphics_preferences(), in the A1_PLATFORM_3DS block
 +	clamp(preferences->fps_target, static_cast<int16>(30));
 ```
+
+## Experiment b: compiler flags
+
+**Builds.** The experiment a code at `-O2` (devkitPro's Release flags,
+`-g -O2 -DNDEBUG`, with `-march=armv6k -mtune=mpcore -mfloat-abi=hard`)
+against `-O3`, `-O2 -ffast-math`, `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`
+(GCC `-flto`, engine only: SDL, OpenAL and the codecs are prebuilt
+archives) and LTO with `-fno-strict-aliasing`. Each in its own build
+directory, `perf-bench.sh exp-b-<variant>`.
+
+| Level | build | busy | vs -O2 | render | present | `.text` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | -O2 (a) | 23.10 | | 12.37 | 7.65 | 7.15 MB |
+| 0 | -O3 | 23.02 | −0.3% | 12.27 | 7.70 | 7.57 MB |
+| 0 | -ffast-math | 23.18 | +0.3% | 12.38 | 7.68 | 7.16 MB |
+| 0 | LTO | 20.30 | −12.1% | 11.15 | 6.02 | 7.01 MB |
+| 0 | LTO, no strict aliasing | 22.03 | −4.6% | **12.97** | 5.97 | |
+| 6 | -O2 (a) | 20.95 | | 10.08 | 7.74 | |
+| 6 | -O3 | 20.89 | −0.3% | 10.00 | 7.81 | |
+| 6 | -ffast-math | 20.89 | −0.3% | 10.08 | 7.68 | |
+| 6 | LTO | 18.58 | −11.3% | 9.22 | 6.21 | |
+| 6 | LTO, no strict aliasing | 19.98 | −4.7% | **10.80** | 6.03 | |
+| 20 | -O2 (a) | 20.70 | | 9.65 | 7.73 | |
+| 20 | -O3 | 20.56 | −0.7% | 9.58 | 7.71 | |
+| 20 | -ffast-math | 20.69 | −0.1% | 9.65 | 7.72 | |
+| 20 | LTO | 19.97 | −3.5% | 10.53 | 6.14 | |
+| 20 | LTO, no strict aliasing | 19.78 | −4.4% | **10.38** | 6.09 | |
+
+- **`-O3`**: −0.3 to −0.7%, about the run-to-run spread, for 414 KB
+  more code (+6% `.text`). Azahar charges nothing for instruction-cache
+  misses; on the console's 16 KB (Old 3DS) / 32 KB L1 I-cache the larger
+  code can cost more than it gains. **Not kept.**
+- **`-ffast-math`**: no change (the rasteriser and world are fixed-point;
+  float is in sound and a few setup paths). Only risk, no gain. **Not
+  kept.**
+- **LTO**: the largest number (−12% on level 0), but **it renders wrong**.
+  With the fixed seed the `-O2` build matches the baseline to ±1 per
+  channel at every spot, while the LTO build drops a whole wall of the
+  room seen through the opening on level 0 (black) and draws stray pixels
+  near the floor; level 6's building interior differs as well. Part of the
+  "gain" is polygons not drawn. Level 0, `-O2` left, LTO right (zoomed):
+
+  ![LTO drops a wall](img/perf-b-lto-wall.png)
+
+  The brief's warning was invisible *enemies* (an upstream report). The
+  main menu's demo replay (`tests/input/12-sprite-check.txt`) shows
+  monsters under LTO here (top `-O2`, bottom LTO, captured at slightly
+  different moments of the replay), so that exact symptom did not
+  reproduce, but the missing wall is the same kind of failure:
+
+  ![Monsters in the demo, -O2 and LTO](img/perf-b-lto-sprites.png)
+
+- **LTO + `-fno-strict-aliasing`**: the picture is **byte-identical** to
+  `-O2` at levels 0 and 6 (0 differing pixels; level 20's water is at a
+  different animation phase). So the LTO breakage is strict-aliasing
+  undefined behaviour in the engine that whole-program inlining exposes.
+  But without strict aliasing the rasteriser is **5-8% slower**; the net
+  −4.5% comes entirely from `present` (7.7 → 6.0 ms). **Not kept**: the
+  present gain is available without LTO (below), and the renderer's
+  aliasing bug stays a trap for any future LTO attempt.
+
+**What LTO pointed at.** At `-O2` the present loop kept its 16 source-row
+pointers on the stack (ARM has 13 general registers), reloading them for
+every pixel; LTO's code generation happened to do better. Rewriting the
+loop to fit in registers is a code change to experiment a (next section).
 
 ## Experiment c: half-resolution rendering
 
