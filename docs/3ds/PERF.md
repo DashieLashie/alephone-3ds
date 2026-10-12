@@ -505,6 +505,20 @@ pass, averages `measure` seconds, logs one line and saves both screens
 
 `gaps` counts stalls over 0.5 s inside the measured window (should be 0).
 
+**Reading `fps`, `frame` and `frames`** (worked out 2026-10-12,
+`NEXT-SPRINT.md` B5). The overlay's time is left out of the wall clock
+(`seconds`, `frame`, `fps`), so a run that draws the overlay reports a
+slightly shorter frame and higher fps than it ran at, and counts more
+frames in its 20 measured seconds. Add `overlay` back to `frame` to compare
+runs: stage 7's console runs, Classic 32.76 + 0.22 = 32.98 ms against
+HUD 32.98 + 0.01 = 32.99 ms (the overlay is not drawn in game when the
+bottom screen is the game's), are the same frame time; the 30.52 against
+30.32 fps and 622-624 against 619-620 frames were this, not a slower
+present. The real rate is **30.30 fps** in every mode: the engine's 30 Hz
+timer runs every `1000 / 30` = 33 ms (integer division, `Misc/vbl.cpp`
+`install_timer_task()`, upstream code), and with the 30 fps cap one frame is
+drawn per tick.
+
 **Running it.**
 
 | Command | Does |
