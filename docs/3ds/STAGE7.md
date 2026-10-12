@@ -214,6 +214,12 @@ console results are under "History".
 Script 14 used to tap R (the action key) to page; terminals do not read the
 key bindings, so it never paged. It now uses the terminal's own keys.
 
+The captures of a script are not comparable pixel for pixel across builds:
+a new game's random seed is `machine_tick_count()` at BEGIN NEW GAME
+(`interface.cpp`), and level 1 has several player starts chosen at random
+(`placement.cpp`), so a change in load time can put the player elsewhere.
+The benchmark's end-of-run captures are the ones to diff.
+
 ## Hardware checklist (New 3DS)
 
 For the console session (stage 2 of `NEXT-SPRINT.md`); the first version's
