@@ -68,6 +68,14 @@ sha256 a12d052f9b8a025d2c26e56874267bde52cf001ba58b4644e8370d06cff39dd4
 restored into a scratch repository (tag fetched at depth 1, then the
 bundle), tree `2156fa64…` identical to `HEAD`'s.
 
+**Refreshed 2026-10-12** (`NEXT-SPRINT.md` item 12; the last refresh had
+been `d19dae0`, stage 6): `3ds-port-2026-10-12-ad4716c.bundle`, `is okay`,
+4 321 877 bytes, sha256
+`d5bf2a164cfd03e1eb19e446c03fbddcdf915b0372ab31e3e06d369dbb3d4ae1`.
+Restored offline into a scratch repository (tag `release-20260930` fetched at
+depth 1 from the local repository, then the bundle): tree `90c74d5e…`
+identical to `HEAD`'s. Older bundles are kept.
+
 The bundle is incremental: its prerequisite `fc4c274` is upstream tag
 `release-20260930` (the shallow boundary). **Restore**, tested in a scratch
 directory: the restored tree matched the working copy (`diff -rq`, tracked
