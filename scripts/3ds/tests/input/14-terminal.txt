@@ -7,11 +7,14 @@ wait 3000
 tap A                  # past the chapter screen
 wait 16000
 screens s7-term-1
-tap R                  # action: next page
-wait 1500
+tap DOWN               # page down (terminals read their own keys,
+wait 1500              # computer_interface.cpp: D-Pad up/down, A next, B exit)
 screens s7-term-2
-tap R
+tap A                  # next page / next group
 wait 1500
 screens s7-term-3
+tap B                  # leave the terminal
+wait 1500
+screens s7-term-exit
 quit
 wait 5000
