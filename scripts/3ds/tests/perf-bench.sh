@@ -13,6 +13,10 @@
 # with the run) and build/perf/LABEL-L<level>-{top,bottom}.png (the screens
 # at the end of the last run of each level). The .3dsx defaults to
 # build-3ds-prof/alephone.3dsx (configure with -DA1_PROFILE=ON).
+#
+# PREFS="attr=value ..." sets attributes of the <graphics> preferences for
+# the series (e.g. PREFS="scmode_highres=false fps_target=60"); the file is
+# restored afterwards. The game must have written its preferences once.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 label=${1:?usage: perf-bench.sh LABEL [3dsx]}
@@ -25,6 +29,20 @@ results="$out/$label.txt"
 : > "$results"
 dsp=(--no-dspfirm)
 [ "${AUDIO:-0}" = 1 ] && dsp=()
+
+if [ -n "${PREFS:-}" ]; then
+	prefs="$HOME/Applications/Azahar-2126.2/user/sdmc/3ds/alephone/Marathon 2 Preferences"
+	[ -n "${PREFS_FILE:-}" ] && prefs=$PREFS_FILE
+	[ -f "$prefs" ] || { echo "perf-bench: $prefs not found (set PREFS_FILE)" >&2; exit 1; }
+	cp "$prefs" "$out/prefs.bak"
+	trap 'cp "$out/prefs.bak" "$prefs"; echo "perf-bench: preferences restored"' EXIT
+	for kv in $PREFS; do
+		k=${kv%%=*}; v=${kv#*=}
+		grep -q " $k=\"" "$prefs" || { echo "perf-bench: no $k in $prefs" >&2; exit 1; }
+		sed -i '' "s/ $k=\"[^\"]*\"/ $k=\"$v\"/" "$prefs"
+	done
+	echo "perf-bench: preferences: $PREFS" | tee -a "$results"
+fi
 
 for level in $levels; do
 	for run in $(seq 1 "$runs"); do
