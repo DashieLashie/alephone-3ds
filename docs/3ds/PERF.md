@@ -7,7 +7,70 @@ and no visual regression. Engine changes are listed in
 
 ## Results
 
+Every figure is ms per frame in Azahar (see "How to read these numbers").
+**busy** = frame − idle: the work per frame. Once the game reaches the 30 fps
+cap the frame time stays 33 ms and the gain shows as idle time instead.
+
+| Step | Change | busy, L0 / L6 / L20 | fps | Picture | Kept |
+| --- | --- | --- | --- | --- | --- |
+| baseline | stage 6 build (re-run with a fixed seed, `bc7fc46`) | 66.9 / 63.8 / 63.7 | 15.0-15.7 | | |
+| a | direct framebuffer present | **23.1 / 21.0 / 20.7** (−66%) | **30.3** (capped) | identical to SDL's within ±1 per channel | **yes** |
+
 <!-- EXPERIMENTS -->
+
+## Experiment a: direct framebuffer present
+
+**Change** (`ports/3ds/source/video_3ds.cpp`, `PATCHES.md` 35).
+`MainScreenUpdateRects()` hands the 640x480 screen surface to
+`a1_3ds::present_screen()`, which writes the top framebuffer itself:
+
+- **One pass.** For each output pixel, the 2x2 block of the surface is
+  averaged, converted XRGB8888 → RGBA8 (`<< 8`; the LCD ignores alpha) and
+  stored at its rotated place (the LCD scans 240-pixel columns, so screen
+  pixel (x, y) is `fb[x * 240 + 239 - y]`). The 40-pixel bars left and
+  right are cleared once per framebuffer, not every frame.
+- **Same picture as SDL.** The engine asks SDL for *linear* scaling
+  (`SDL_HINT_RENDER_SCALE_QUALITY`, `screen.cpp`), and SDL's bilinear
+  filter centres output pixel x on source 2x + 0.5: at exactly 2:1 that is
+  the 2x2 average. `UHADD8` (ARMv6 SIMD halving add, `__uhadd8`) averages
+  four channels in one instruction; it rounds down, so a channel can be 1
+  below SDL's. A first version sampled single pixels (nearest neighbour):
+  3.6 ms instead of 7.7, but **half the HUD's pixels differed** from SDL's
+  output (aliasing), so it was rejected.
+- **Cache-friendly order.** 8 output rows per pass: the 16 source rows are
+  read left to right, and every framebuffer column receives one 32-byte run
+  (a cache line). Azahar cannot show the effect (no cache model).
+- **VBlank sync.** `gfxScreenSwapBuffers(GFX_TOP, false)` takes effect at
+  the next VBlank. Before writing, if that swap is still pending
+  (`gspIsPresentPending`), it waits for the VBlank (`gspWaitForVBlank`):
+  otherwise it would draw into the buffer still on screen and tear. At 30
+  fps on a 60 Hz LCD it rarely waits. Then `GSPGPU_FlushDataCache` on the
+  framebuffer and the swap, as SDL's driver did.
+- SDL's path stays as the fallback for any other surface size or format
+  (logged once: `[3ds] video: direct present ...`).
+
+**Numbers** (`perf-bench.sh exp-a2`, against `baseline2`; ms per frame):
+
+| Level | | fps | frame | busy | render | hud | blit | **present** | idle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | before | 14.95 | 66.90 | 66.88 | 12.37 | 1.77 | 1.44 | 50.40 | 0.01 |
+| 0 | after | 30.32 | 32.97 | **23.10** | 12.37 | 0.90 | 1.44 | **7.65** | 9.88 |
+| 6 | before | 15.68 | 63.80 | 63.80 | 10.09 | 1.69 | 1.44 | 49.73 | 0.01 |
+| 6 | after | 30.36 | 32.94 | **20.95** | 10.08 | 0.89 | 1.44 | **7.74** | 11.98 |
+| 20 | before | 15.69 | 63.73 | 63.72 | 9.65 | 1.70 | 1.44 | 49.80 | 0.01 |
+| 20 | after | 30.36 | 32.95 | **20.70** | 9.65 | 0.89 | 1.44 | **7.73** | 12.25 |
+
+`present` −85% (50 → 7.7 ms); the game reaches the 30 fps cap and has
+10-12 ms to spare per frame. `hud` halved too: it is counted per frame, and
+the HUD is redrawn per game tick (30 Hz), so at 30 fps it is spread over
+twice as many frames. Nearest-neighbour variant (rejected): present 3.6 ms.
+
+**Picture** (top screens at the end of the run, fixed seed, compared with
+the baseline's pixel by pixel): levels 0 and 6 differ in 7.5k / 7.9k of
+96k pixels, **by at most 1** per channel (the rounding above); the bars are
+identical. Level 20 differs more in the view (animated water, captured at
+a different moment) and by at most 1 in the HUD.
+
 
 ## Baseline (stage 6 build + profiler, `3d2a6ca`)
 
@@ -34,6 +97,9 @@ Azahar 2126.2 in New 3DS mode, no DSP firmware (below).
 | 0 | 14.96 | 66.88 | 122.4 | 0.70 | 12.31 | 1.77 | 1.44 | **50.44** | 0.23 |
 | 6 | 15.64 | 63.95 | 118.8 | 0.56 | 10.26 | 1.69 | 1.44 | **49.78** | 0.21 |
 | 20 | 15.71 | 63.64 | 115.2 | 0.83 | 9.71 | 1.69 | 1.44 | **49.70** | 0.26 |
+
+Re-run with a fixed seed (`bc7fc46`, `baseline2`; the reference for the
+experiments): 66.90 / 63.80 / 63.73, within 0.3% of these.
 
 Run-to-run spread of the frame time: 0.1-0.9 ms (66.81-66.95, 63.49-64.41,
 63.56-63.71). `idle` is 0.01: the frame never finishes early, so the 30 fps

@@ -112,6 +112,16 @@ bool exit_requested();
 enum class TextKind { Normal, Number, Password };
 bool text_input(const std::string& hint, std::string& text, size_t max_chars, TextKind kind);
 
+// --- Video (docs/3ds/PERF.md; implementation: ports/3ds/source/video_3ds.cpp) ---
+
+// Puts the engine's 640x480 screen surface (XRGB8888 or ARGB8888) on the
+// top screen without SDL: halved to 320x240 (2x2 averages, as SDL's linear
+// scaling does), centred, rotated and converted into the framebuffer in one pass,
+// then swapped at the next VBlank. Waits for a VBlank first if the previous
+// swap has not happened yet. Returns false, having done nothing, for any
+// other size or format; the caller then presents through SDL.
+bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format);
+
 // --- Audio (docs/3ds/STAGE6.md; implementation: ports/3ds/source/audio_3ds.cpp) ---
 // The AudioBackend itself is declared in Sound/AudioBackend.h
 // (a1_3ds::create_audio_backend).

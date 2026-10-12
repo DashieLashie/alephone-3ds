@@ -73,6 +73,9 @@
 
 #include <algorithm>
 
+#ifdef A1_PLATFORM_3DS
+#include "a1_3ds_platform.h"	// present_screen()
+#endif
 #ifdef A1_PROFILE
 #include "a1_3ds_profile.h"	// frame profiler (docs/3ds/PERF.md)
 #endif
@@ -2321,6 +2324,13 @@ void MainScreenUpdateRects(size_t count, const SDL_Rect *rects)
 {
 #ifdef A1_PROFILE
 	A1_PROF_SCOPE(Present);
+#endif
+#ifdef A1_PLATFORM_3DS
+	// Straight into the framebuffer, without SDL's texture, renderer and
+	// window copies (docs/3ds/PERF.md); SDL presents what it cannot handle.
+	if (a1_3ds::present_screen(main_surface->pixels, main_surface->pitch,
+	                           main_surface->w, main_surface->h, main_surface->format->format))
+		return;
 #endif
 	SDL_UpdateTexture(main_texture, NULL, main_surface->pixels, main_surface->pitch);
 	SDL_RenderClear(main_render);

@@ -315,6 +315,9 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/selftest.cpp
 # buffers to the DSP, so ndspChnWaveBufAdd is wrapped.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/audio_3ds.cpp")
 target_link_options(alephone PRIVATE "LINKER:--wrap=ndspChnWaveBufAdd")
+# Direct present: the screen surface into the top framebuffer without SDL's
+# renderer (docs/3ds/PERF.md, experiment a).
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/video_3ds.cpp")
 # Frame profiler (A1_PROFILE builds; docs/3ds/PERF.md).
 if(A1_PROFILE)
   target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/profile_3ds.cpp")

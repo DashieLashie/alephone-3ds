@@ -56,6 +56,7 @@ stage 6 (audio, `STAGE6.md`), 34 onwards in the performance stage (`PERF.md`).
 | 32 | `Source_Files/Misc/interface.cpp`, `Source_Files/XML/XML_LevelScript.cpp` | three music busy-waits sleep; the fade waits are bounded | none |
 | 33 | `Source_Files/shell.cpp` | in-game frame pacing sleeps instead of spinning | none |
 | 34 | `RenderOther/screen.cpp`, `Misc/interface.cpp`, `GameWorld/marathon2.cpp`, `shell.cpp` | frame profiler call sites (`A1_PROFILE` builds only) | none |
+| 35 | `Source_Files/RenderOther/screen.cpp` | direct present into the framebuffer | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -635,3 +636,12 @@ Added 2026-10-11 (`PERF.md`).
     `shell.cpp` and `interface.cpp` byte-identical; `screen.cpp` and
     `marathon2.cpp` differ only in `__LINE__` values inside logging macros
     (14 and 4 lines, inspected). 0 diagnostics.
+35. **`RenderOther/screen.cpp`**, `MainScreenUpdateRects()`: calls
+    `a1_3ds::present_screen()` (`ports/3ds/source/video_3ds.cpp`) first,
+    which puts the 640x480 screen surface on the top screen itself: 2x2
+    averages (what SDL's linear scaling computes at 2:1), centred, rotated
+    and converted into the framebuffer in one pass, swapped at VBlank. SDL's
+    texture upload, renderer copy and N3DS framebuffer copy are skipped;
+    they remain the fallback for any other surface size or format. Measured
+    in `PERF.md` (experiment a). **Non-3DS check** (2026-10-11): differs
+    only in `__LINE__` values inside logging macros (as 34).
