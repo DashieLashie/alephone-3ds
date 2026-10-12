@@ -43,10 +43,12 @@ constexpr int kScreenW = 400, kScreenH = 240;
 constexpr int kSrcW = 640, kSrcH = 480;
 constexpr int kOutW = kSrcW / 2, kOutH = kSrcH / 2;
 constexpr int kBarW = (kScreenW - kOutW) / 2;
-// Output rows per pass: one 32-byte cache line of a framebuffer column.
-constexpr int kBlock = 8;
+// Output rows per pass: 16 bytes (half a cache line) of a framebuffer column.
+// The 2 * kBlock source row pointers stay in registers (ARM has 13 for
+// general use); 8 rows per pass made GCC keep 16 of them on the stack.
+constexpr int kBlock = 4;
 static_assert(kOutH % kBlock == 0, "rows per pass must divide the height");
-static_assert(kBlock == 8, "the inner loop is unrolled for 8 rows");
+static_assert(kBlock == 4, "the inner loop is unrolled for 4 rows");
 
 // The two framebuffers of the top screen, once their bars are black.
 const void* s_bars_cleared[2] = {nullptr, nullptr};
@@ -57,10 +59,17 @@ inline u32 to_fb(u32 xrgb)
 	return xrgb << 8;   // 0x00RRGGBB -> 0xRRGGBB00 (RGBA8; the LCD ignores A)
 }
 
-// The 2x2 block at column sx of two source rows, averaged per channel.
-inline u32 box(const u32* r0, const u32* r1, int sx)
+// The 2x2 block at the front of two source rows, averaged per channel; the
+// rows then move on by two pixels. A pair of pixels is one 64-bit load (LDRD).
+inline u32 box(const u32*& r0, const u32*& r1)
 {
-	return __uhadd8(__uhadd8(r0[sx], r0[sx + 1]), __uhadd8(r1[sx], r1[sx + 1]));
+	u64 a, b;
+	memcpy(&a, r0, sizeof a);
+	memcpy(&b, r1, sizeof b);
+	r0 += 2;
+	r1 += 2;
+	return __uhadd8(__uhadd8(static_cast<u32>(a), static_cast<u32>(a >> 32)),
+	                __uhadd8(static_cast<u32>(b), static_cast<u32>(b >> 32)));
 }
 
 void clear_bars(u32* fb)
@@ -108,27 +117,29 @@ bool present_screen(const void* pixels, int pitch, int width, int height, uint32
 	clear_bars(fb);
 
 	// kBlock output rows at a time (2 * kBlock source rows, read left to
-	// right); each output column gets one 32-byte run (a cache line) per pass.
+	// right); each output column gets one 16-byte run per pass.
 	const u8* src = static_cast<const u8*>(pixels);
 	u32* col0 = fb + kBarW * kScreenH;
 	for (int y0 = 0; y0 < kOutH; y0 += kBlock)
 	{
-		const u32* rows[2 * kBlock];
-		for (int i = 0; i < 2 * kBlock; ++i)
-			rows[i] = reinterpret_cast<const u32*>(src + (2 * y0 + i) * pitch);
+		const u8* row = src + 2 * y0 * pitch;
+		const u32* r0 = reinterpret_cast<const u32*>(row);
+		const u32* r1 = reinterpret_cast<const u32*>(row + pitch);
+		const u32* r2 = reinterpret_cast<const u32*>(row + 2 * pitch);
+		const u32* r3 = reinterpret_cast<const u32*>(row + 3 * pitch);
+		const u32* r4 = reinterpret_cast<const u32*>(row + 4 * pitch);
+		const u32* r5 = reinterpret_cast<const u32*>(row + 5 * pitch);
+		const u32* r6 = reinterpret_cast<const u32*>(row + 6 * pitch);
+		const u32* r7 = reinterpret_cast<const u32*>(row + 7 * pitch);
 		// Output row y0 + i lands at column offset 239 - (y0 + i).
 		u32* d = col0 + (kScreenH - kBlock - y0);
-		for (int x = 0; x < kOutW; ++x, d += kScreenH)
+		u32* const end = d + kOutW * kScreenH;
+		for (; d != end; d += kScreenH)
 		{
-			const int sx = 2 * x;
-			d[7] = to_fb(box(rows[0], rows[1], sx));
-			d[6] = to_fb(box(rows[2], rows[3], sx));
-			d[5] = to_fb(box(rows[4], rows[5], sx));
-			d[4] = to_fb(box(rows[6], rows[7], sx));
-			d[3] = to_fb(box(rows[8], rows[9], sx));
-			d[2] = to_fb(box(rows[10], rows[11], sx));
-			d[1] = to_fb(box(rows[12], rows[13], sx));
-			d[0] = to_fb(box(rows[14], rows[15], sx));
+			d[3] = to_fb(box(r0, r1));
+			d[2] = to_fb(box(r2, r3));
+			d[1] = to_fb(box(r4, r5));
+			d[0] = to_fb(box(r6, r7));
 		}
 	}
 

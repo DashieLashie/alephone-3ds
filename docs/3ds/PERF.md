@@ -16,6 +16,7 @@ cap the frame time stays 33 ms and the gain shows as idle time instead.
 | baseline | stage 6 build (re-run with a fixed seed, `bc7fc46`) | 66.9 / 63.8 / 63.7 | 15.0-15.7 | | |
 | a | direct framebuffer present | **23.1 / 21.0 / 20.7** (−66%) | **30.3** (capped) | identical to SDL's within ±1 per channel | **yes** |
 
+| a' | present loop fitted to registers (found through b) | **21.5 / 19.5 / 19.3** (−7% vs a) | 30.4 | byte-identical to a | **yes** |
 | b | `-O3` / `-ffast-math` / LTO / LTO + `-fno-strict-aliasing` | −0.3…−0.7% / ±0.3% / −3.5…−12% / −4.5% | 30.3 | LTO: **walls missing**; LTO + no-strict-aliasing: identical | no (none of them) |
 | c | half-resolution rendering, 2x upscale (the engine's Resolution: Low) | 16.7 / 16.1 / 15.8 (−24 to −28% vs a) | 30.3 | **visibly coarser**: loses the 2x2 supersampling | no (stays an option) |
 
@@ -99,7 +100,7 @@ directory, `perf-bench.sh exp-b-<variant>`.
 
 - **`-O3`**: −0.3 to −0.7%, about the run-to-run spread, for 414 KB
   more code (+6% `.text`). Azahar charges nothing for instruction-cache
-  misses; on the console's 16 KB (Old 3DS) / 32 KB L1 I-cache the larger
+  misses; with the ARM11 MPCore's 16 KB L1 instruction cache the larger
   code can cost more than it gains. **Not kept.**
 - **`-ffast-math`**: no change (the rasteriser and world are fixed-point;
   float is in sound and a few setup paths). Only risk, no gain. **Not
@@ -194,9 +195,10 @@ important.
   below SDL's. A first version sampled single pixels (nearest neighbour):
   3.6 ms instead of 7.7, but **half the HUD's pixels differed** from SDL's
   output (aliasing), so it was rejected.
-- **Cache-friendly order.** 8 output rows per pass: the 16 source rows are
-  read left to right, and every framebuffer column receives one 32-byte run
-  (a cache line). Azahar cannot show the effect (no cache model).
+- **Cache-friendly order.** 4 output rows per pass: the 8 source rows are
+  read left to right, and every framebuffer column receives one 16-byte run
+  (half a cache line). Azahar cannot show the effect (no cache model). (The
+  first version did 8 rows per pass; see "a'" below.)
 - **VBlank sync.** `gfxScreenSwapBuffers(GFX_TOP, false)` takes effect at
   the next VBlank. Before writing, if that swap is still pending
   (`gspIsPresentPending`), it waits for the VBlank (`gspWaitForVBlank`):
@@ -221,6 +223,21 @@ important.
 10-12 ms to spare per frame. `hud` halved too: it is counted per frame, and
 the HUD is redrawn per game tick (30 Hz), so at 30 fps it is spread over
 twice as many frames. Nearest-neighbour variant (rejected): present 3.6 ms.
+
+**a' (follow-up, found through experiment b).** With 8 output rows per
+pass, GCC kept the 16 source-row pointers on the stack and reloaded them
+for every pixel (`objdump` of `video_3ds.o`); LTO's code generation
+happened to avoid that, which is where its present gain came from. Now 4
+rows per pass, 8 row pointers advanced in place (they stay in registers),
+and each horizontal pixel pair is one 64-bit load: about 11 instructions
+per output pixel instead of ~18. Same arithmetic, so the output is
+byte-identical (0 differing pixels on all three levels):
+
+| Level | busy (a) | busy (a') | present (a) | present (a') |
+| --- | --- | --- | --- | --- |
+| 0 | 23.10 | **21.52** | 7.65 | **6.02** |
+| 6 | 20.95 | **19.48** | 7.74 | **6.20** |
+| 20 | 20.70 | **19.27** | 7.73 | **6.24** |
 
 **Picture** (top screens at the end of the run, fixed seed, compared with
 the baseline's pixel by pixel): levels 0 and 6 differ in 7.5k / 7.9k of
