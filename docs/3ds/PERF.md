@@ -15,11 +15,15 @@ change, no forced frame cap: each was measured and either gained nothing,
 broke the picture, or took something visible away (details per
 experiment below).
 
-**Not yet measured on hardware.** Azahar's timing has no cache or memory
-model (see "How to read these numbers"), so the console's absolute frame
-times are unknown; the checklist at the end measures them and decides the
-two open questions (whether to force 30 fps, whether Low resolution
-should be recommended).
+**Measured on a New 3DS** ("Hardware results" below): the default
+settings hold the **30 fps cap on all three spots with 14.5-15.2 ms idle
+per frame** (busy 17.6-18.3 ms). The console splits the time differently
+from Azahar: the rasteriser takes **37-46% less**, the present **39-47%
+more** (memory traffic), so `present` (8.7-8.8 ms) is now the largest
+zone. With a 60 target the console shows **53 fps**, so experiment d stays
+as it is (no clamp). Resolution: Low is not needed. The session also found
+and fixed a boot failure on hardware (`PATCHES.md` 25: the heap must fit
+the 96 MiB heap area).
 
 ## Results
 
@@ -35,6 +39,120 @@ cap the frame time stays 33 ms and the gain shows as idle time instead.
 | b | `-O3` / `-ffast-math` / LTO / LTO + `-fno-strict-aliasing` | −0.3…−0.7% / ±0.3% / −3.5…−12% / −4.5% | 30.3 | LTO: **walls missing**; LTO + no-strict-aliasing: identical | no (none of them) |
 | c | half-resolution rendering, 2x upscale (the engine's Resolution: Low) | 16.7 / 16.1 / 15.8 (−24 to −28% vs a) | 30.3 | **visibly coarser**: loses the 2x2 supersampling | no (stays an option) |
 | d | force the 30 fps cap, no interpolation | (30 is already the default, without interpolation) | 60 / Unlimited: **42.8 / 48.0 / 48.2** | forcing 30 shows fewer frames to anyone who chose 60 | no (decide on hardware) |
+
+## Hardware results (New 3DS, 2026-10-11)
+
+**Setup.** New 3DS, Luma3DS, Homebrew Launcher, 3dslink. The profiler
+build (`-DA1_PROFILE=ON`, Release `-O2`) at `2603d0d` (experiment a' plus
+the heap fix, `PATCHES.md` 25). DSP firmware present (sound on, 32728 Hz,
+the audio thread on core 1), `debug-audio` on. Each benchmark is one
+`debug-perf` run (`settle 8`, `measure 20`, `quit 1`) started by pressing
+A twice; default preferences unless noted. Logs and captures:
+`build-3ds/hw/` (not in git).
+
+**Same spots as Azahar.** Level 20's capture shows the same view as
+Azahar's; levels 0 and 6 show the same spot with the view turned by a few
+degrees (the fixed seed makes the level identical; the difference is in
+the input; in the 30-minute play-through the player saw no stick
+drift). The 1 102 differing HUD pixels per capture are the same on all three levels
+(the Azahar captures are from the baseline, through SDL's present).
+
+| ![L0](img/perf-hw-L0-top.png) | ![L6](img/perf-hw-L6-top.png) | ![L20](img/perf-hw-L20-top.png) |
+| --- | --- | --- |
+| level 0 | level 6 | level 20 |
+
+**BENCH lines** (ms per frame; busy = frame − idle):
+
+| Run | fps | frame | max | busy | world | render | hud | blit | present | idle | other | audio (core 1) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| L0 | 30.52 | 32.77 | 57.72 | **18.25** | 0.34 | **6.67** | 0.55 | 1.39 | **8.82** | 14.52 | 0.48 | 8.00 |
+| L6 | 30.53 | 32.76 | 58.04 | **17.70** | 0.32 | **6.32** | 0.55 | 1.37 | **8.68** | 15.06 | 0.47 | 8.14 |
+| L20 | 30.52 | 32.76 | 58.82 | **17.57** | 0.43 | **5.98** | 0.57 | 1.36 | **8.68** | 15.19 | 0.55 | 8.09 |
+| L0, Resolution: Low | 30.54 | 32.74 | 58.33 | 14.46 | 0.33 | 3.17 | 0.55 | 1.63 | 8.26 | 18.28 | 0.53 | 7.88 |
+| L0, Framerate Target 60 | **53.16** | 18.81 | 42.16 | 17.80 | 1.46 | 6.71 | 0.31 | 1.40 | 7.25 | 1.01 | 0.67 | 5.01 |
+
+`gaps=0` in every run; 622-624 frames per 20 s window at 30 fps, 1 078 at
+60. The bottom screen at the end of the level 0 run (profiler rows, then
+the `debug-audio` rows):
+
+![Overlay on the console, level 0](img/perf-hw-overlay-bottom.png)
+
+The level load (A on BEGIN NEW GAME to the first frame, chapter
+screen included) took 76-97 s per run.
+
+**Console against Azahar** (experiment a'; `render`, `hud`, `blit` from
+experiment a's run, which a' did not change):
+
+| Zone | Azahar L0 / L6 / L20 | New 3DS L0 / L6 / L20 | change |
+| --- | --- | --- | --- |
+| busy | 21.52 / 19.48 / 19.27 | 18.25 / 17.70 / 17.57 | −15% / −9% / −9% |
+| render | 12.37 / 10.08 / 9.65 | 6.67 / 6.32 / 5.98 | **−46% / −37% / −38%** |
+| present | 6.02 / 6.20 / 6.24 | 8.82 / 8.68 / 8.68 | **+47% / +40% / +39%** |
+| blit | 1.44 / 1.44 / 1.44 | 1.39 / 1.37 / 1.36 | −3% / −5% / −6% |
+| hud | 0.90 / 0.89 / 0.89 | 0.55 / 0.55 / 0.57 | −39% / −38% / −36% |
+| world | 0.36 (L0, experiment d) | 0.34 / 0.32 / 0.43 | about the same |
+| Low: render, L0 | 5.41 (44% of high) | 3.17 (48% of high) | |
+| 60 target: fps, L0 | 42.77 | **53.16** | +24% |
+
+- **The rasteriser is ~40% faster than Azahar says**, the
+  **present ~40-47% slower**. As "How to read these numbers" expected:
+  the console runs the game at 804 MHz with the L2 cache (SDL2main calls
+  `osSetSpeedupEnable`, `STAGE5-PREREQS.md`), which Azahar's fixed cost
+  per instruction does not model, nor memory traffic, which dominates the
+  present's pass over the 1.2 MB screen surface and the framebuffer.
+  Computation (`render`, `hud`) gains, the copy loses. `blit` (also a
+  copy, 0.8 MB) lands near Azahar's figure.
+- **On the console `present` is the largest zone** (8.7-8.8 ms), ahead of
+  `render` (6.0-6.7 ms). In Azahar it was the other way round.
+- **max**: the longest frame of every 30 fps window is 57.7-58.8 ms, Low
+  included; 42.2 ms at 60. Not investigated.
+- **Low resolution** saves 3.5 ms of `render` (busy −21%, Azahar −28%) and
+  `present` stays 8.3 ms: as in Azahar, its doubling and averaging are
+  wasted work. Not needed at these frame times.
+
+**Experiment d's decision: keep the option (no clamp).** With Framerate
+Target 60 the console shows **53.16 fps** on level 0, well above the ~40
+threshold; interpolation costs 1.1 ms (`world` 0.34 → 1.46), as in
+Azahar, and the main thread hardly sleeps (idle 1.0 ms). The default stays
+30. Level 6 was not repeated: the margin over the threshold is 13 fps.
+
+**Play-through** (Marathon 2 level 1 to the exit and on into level 2,
+30.4 min from boot to exit, default settings, sound at 32728 Hz, the Level
+Music Test plugin, `debug-audio`). The overlay figures were not noted
+during play; the player reports a steady frame rate with no slowdown over
+the 30 minutes, and:
+
+- **Hitches when entering areas not seen before.** Not measured (the
+  profiler logs per window only with `log 1` in `debug-perf`, which also
+  fixes the level and seed). Open.
+- **Level change and save terminals look frozen.** After level 1's exit
+  the screen looks frozen and broken until level 2 has loaded (a level load is
+  76-97 s, above); saving at a pattern buffer takes long enough to look
+  like a hang. Not timed. Open.
+- Audio: 0 underruns in 28.6 min played (`STAGE6.md`).
+
+**For the UI stage's view resolution** (the view gets the whole 400x240
+top screen). The two Resolution settings give two points of the
+rasteriser's cost on this console, level 0: 6.67 ms for 640x320 (204 800
+pixels) and 3.17 ms for 320x160 (51 200). A straight line through them is
+about **2.0 ms + 2.28 ms per 100 000 pixels**. Extrapolated (estimates,
+not measurements; a 5:3 view also shows more of the level than today's 2:1
+one):
+
+| View rendered at | pixels | render (est.) | present (est.) |
+| --- | ---: | --- | --- |
+| 640x320 (today) | 204 800 | 6.67 (measured) | 8.82 (measured; reads 640x480, writes 320x240) |
+| **800x480, 2x2-averaged to 400x240** | 384 000 | **~10.8** | ~11 (1.25x today's reads and writes) |
+| 400x240 native | 96 000 | ~4.2 | under a third of today's reads, no averaging; not measured |
+
+At 800x480 the frame would be roughly 0.3 world + 10.8 render + 11 present
++ 0.5 other ≈ 22.6 ms, plus ~2.6 blit if the view still goes through the
+screen surface and the bottom screen's HUD (0.55 today, plus its own
+present): **about 23-26 ms of the 33.3 ms**, so 30 fps with ~7-10 ms to
+spare; with a 60 target the interpolated rate would drop from 53 to about
+40. Native 400x240 would leave more than half the frame
+idle, but loses the 2x2 supersampling (experiment c: visibly coarser).
+`present` is the larger lever on this hardware.
 
 ## Experiment a: direct framebuffer present
 
@@ -243,6 +361,9 @@ change things for players who pick 60, 120 or Unlimited. Measured with
   for them, and no change at all for the default.
 - 60 and Unlimited behave the same here (neither reaches 60).
 
+**Hardware (2026-10-11): 53.16 fps with a 60 target on a New 3DS, so the
+option stays and the clamp below is not applied** ("Hardware results").
+
 **Decision: not kept for now** (no commit of the clamp). Whether 60 is
 worth offering depends on the console's real frame time, which Azahar
 does not give (no cache model): if a New 3DS cannot get clearly above ~40
@@ -397,7 +518,7 @@ the in-game HUD render as before. `log.txt` says which path is in use:
 ## Hardware checklist (New 3DS)
 
 About 25 minutes. Azahar gave the ranking; the console gives the real
-frame times.
+frame times. **Carried out 2026-10-11**: results in "Hardware results".
 
 1. Build the profiler build: `cmake -S ports/3ds -B build-3ds-prof
    -DA1_PROFILE=ON && cmake --build build-3ds-prof`.
@@ -430,8 +551,11 @@ frame times.
 
 ## Next candidates (not done)
 
-Ranked by the profile after a': `render` (9.7-12.4 ms) is now the largest
-item, then `present` (6.0-6.2), `blit` (1.4) and `hud` (0.9).
+Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now
+the largest item, then `present` (6.0-6.2), `blit` (1.4) and `hud` (0.9).
+**On a New 3DS the order is `present` (8.7-8.8 ms), then `render`
+(6.0-6.7), `blit` (1.4), `hud` (0.55)** ("Hardware results"), so present
+and blit work comes first there.
 
 - **Low resolution done properly:** in Resolution: Low the half-size view
   is doubled to 640x480 and then averaged back down (blit + present

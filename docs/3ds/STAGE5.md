@@ -23,9 +23,9 @@ Engine changes are fenced with `A1_PLATFORM_3DS` and listed in
 | 3 | Touch: relative mouse look (toggle in prefs), absolute pointer in menus | **Done.** Toggle = Controls > "Touch Screen Aiming" (the mouse-aiming switch, relabelled) |
 | 4 | Text entry through libctru swkbd | **Done.** Tapping or pressing A on a text field opens the system keyboard with the field's text |
 | 5 | HOME menu / sleep: pause game and audio, resume cleanly | **Done.** Plus HOME > Close: exits in 0.2 s from a game (was 4.6 s) |
-| | Hardware (DoD: finish Marathon 2 level 1 with the built-in controls) | **Not met yet.** Hardware session 2026-10-11: every control, touch, keyboard, HOME, lid and Close verified on a New 3DS; the level 1 play-through is still to do ("Hardware session") |
+| | Hardware (DoD: finish Marathon 2 level 1 with the built-in controls) | **Met** (2026-10-11, second console session, `PERF.md` "Hardware results"): level 1 played to the exit and on into level 2 on a New 3DS with the default controls, 30 min, HOME and lid used, no crash. First session: every control, touch, keyboard, HOME, lid and Close verified ("Hardware session") |
 
-## Stage status (2026-10-11, after the hardware session)
+## Stage status (2026-10-11, after the second console session)
 
 **Achieved.** Full single-player control works **on a New 3DS**: every
 button, both sticks, ZL/ZR, touch pointer and drag-to-look, the map, the
@@ -34,23 +34,28 @@ the remapping dialog. The main menu and dialogs work with A from the start
 (`PATCHES.md` 23-24). The stage 3-5 prerequisites have their hardware
 answers: the four dependency tests pass, ps:ps entropy works, the audio
 thread runs on core 1 with 9 of 80 KiB stack and no late callbacks
-(dialogs included), and the linear heap is cut to 8 MiB (`PATCHES.md` 25,
-+24 MiB for malloc). Details: "Hardware session" below.
+(dialogs included), and the linear heap is cut (`PATCHES.md` 25; on a New
+3DS heap 98 304 KiB, linear 19 960 KiB, after a boot fix in the second
+session). Details: "Hardware session" below. **Definition of done met**
+in the second console session: level 1 played to the exit on a New 3DS.
 
-**Missing:**
+**Open items:**
 
 | # | Item | Kind | Blocks the next stage? |
 | --- | --- | --- | --- |
-| 1 | Level 1 played to the exit with the built-in controls (the definition of done) | verification; every control it uses is verified on hardware | no: first task of the next console session |
-| 2 | C-Stick and touch-look sensitivity tuning | depends on 1; defaults unchanged | no |
-| 3 | Log lock and 8 MiB linear heap seen on hardware | verification; both pass in Azahar, the next boot log shows them | no |
-| 4 | HOME > Close during the menu demo takes 14.4 s (hardware only) | bug, open; from a game 0.34 s | no: the HOME menu stays responsive |
-| 5 | 2.8-3.9 s audio gaps at game/menu transitions | observation | no |
+| 1 | Level 1 played to the exit with the built-in controls (the definition of done) | **Done** (second console session): to the exit and into level 2, 30 min, no crash | |
+| 2 | C-Stick and touch-look sensitivity tuning | **Open.** The player finds the C-Stick's vertical look too fast relative to the horizontal: it is easy to end up looking at the sky. Wanted: a lower vertical than horizontal sensitivity. No stick drift seen. Touch look: left for the touch-mapping redesign | no |
+| 3 | Log lock and 8 MiB linear heap seen on hardware | **Log lock done** (0 non-printable bytes in `log.txt`). **The 8 MiB split did not boot** on the console (heap past the 96 MiB heap area); **fixed** (`PATCHES.md` 25): heap 98 304 KiB, linear 19 960 KiB | |
+| 4 | HOME > Close during the menu demo takes 14.4 s (hardware only) | bug, open; from a game 0.34 s; not re-tested | no: the HOME menu stays responsive |
+| 5 | 2.8-3.9 s audio gaps at game/menu transitions | **Not reproduced**: in 30 min with game starts, a level change, a return to the menu, HOME and sleep, the longest gap between audio callbacks was 35.8 ms and none was heard (`STAGE6.md`) | |
 | 6 | Player name from the console profile (CFGU) | cosmetic, deferred by the user | no |
+| 7 | Short hitches when entering areas not seen before | **Open**, seen in the play-through; not measured | no |
+| 8 | Level change and save terminals look frozen | **Open.** A level load takes 76-97 s (`PERF.md`); after level 1's exit the screen looks frozen and broken until level 2 has loaded, and saving at a pattern buffer takes long enough to look like a hang (not timed) | no |
 
 **Moving on:** the next stage can start with stage 5 in this state. What is
-missing is verification of controls that each already work on hardware,
-plus two small open issues; none of it is needed to start other work. The
+left is tuning (the vertical C-Stick look) and open issues found in play
+(hitches, loads and saves that look like hangs); none of it is needed to
+start other work. The
 game is slow (software renderer, 640x480 logical size letterboxed, about
 1.5 min to load a level from SD), which is the obvious candidate for the
 next stage, and the level 1 play-through is more useful once that improves.
@@ -536,13 +541,19 @@ Audio probe, see `STAGE5-PREREQS.md` items 3 and 5.
 
 ### Definition of done
 
-**Not met yet:** Marathon 2 level 1 was not played to the exit (no time
-in this session). Every control it needs works on hardware. The C-Stick
-and touch-look sensitivity are therefore still the defaults (Controller
-Advanced: sensitivity 65536 = 1.0, dead zone 3276 = 10%; Mouse: 16384 =
-0.25).
+**Met** in the second console session (2026-10-11, `PERF.md` "Hardware
+results"): Marathon 2 level 1 played to the exit with the default
+controls, then on into level 2 (30 min in all, HOME three times, the lid
+closed twice, no crash). The C-Stick and touch-look sensitivity are still
+the defaults (Controller Advanced: sensitivity 65536 = 1.0, dead zone 3276
+= 10%; Mouse: 16384 = 0.25); the vertical C-Stick look is too fast (open
+item 2).
 
 ### Next console session
+
+Carried out 2026-10-11 (`PERF.md` "Hardware results"): 1 done (0 bytes);
+2 failed, then fixed (`PATCHES.md` 25); 3 done, tuning still open (item
+2 above); 4 not done.
 
 1. ftpd: fetch `log.txt` (the run with the log lock) and check it has no
    binary bytes: `LC_ALL=C grep -c '[^[:print:][:space:]]' log.txt` → 0.

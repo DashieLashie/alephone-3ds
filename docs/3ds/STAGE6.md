@@ -20,28 +20,42 @@ changes are fenced with `A1_PLATFORM_3DS` and listed in
 | 3 | Music: Ogg via Tremor, MP3 via mpg123, bounded chunks, never a whole track in memory | **Done.** `decoders_3ds.cpp` (`PATCHES.md` 27); at most 8 KiB of PCM per request, and fewer buffers per mixer pass (30). Marathon 2's `Music.ogg` plays and loops |
 | 4 | NDSP init fails → silent, one-time notice (Luma3DS Rosalina), never crash | **Done.** Verified in Azahar with the firmware hidden |
 | 5 | Count underruns and callback time; show them in a debug overlay | **Done.** DSP underruns counted where SDL queues buffers; `debug-audio` shows them on the bottom screen and logs them every 5 s |
-| | **DoD: 10 min of play on hardware, music + SFX, 0 crashes, underruns < 1/min** | **Deferred** to a later console session (user, 2026-10-11). Azahar stand-in: **0 underruns in 13.0 min** (9.3 min of scripted level 1 play with looping level music and SFX), 0 callbacks over budget, no crash. Hardware checklist at the end |
+| | **DoD: 10 min of play on hardware, music + SFX, 0 crashes, underruns < 1/min** | **Met on a New 3DS** (2026-10-11, `PERF.md` "Hardware results"): **0 underruns in 28.6 min played**, Marathon 2 level 1 to the exit and into level 2 with the Level Music Test plugin (music + SFX), 0 callbacks over budget or late, no crash. Earlier Azahar stand-in: **0 underruns in 13.0 min** (9.3 min of scripted level 1 play with looping level music and SFX), 0 callbacks over budget, no crash. Hardware checklist at the end |
 
-## Stage status (2026-10-11)
+## Stage status (2026-10-11, after the console session)
 
-**Achieved in Azahar; hardware run deferred.** Every brief item is
-implemented and tested in the emulator. The definition of done is a
-hardware measurement and was deferred by the user to a later console
-session (the checklist at the end of this document; about 20 minutes with
-uploads).
+**Achieved, on hardware.** Every brief item is implemented and tested in
+the emulator, and the definition of done was met on a New 3DS in the
+console session of 2026-10-11 (`PERF.md` "Hardware results"; the checklist
+below). From that session's `log.txt` (30.4 min from boot to exit, 351
+audio reports, 32728 Hz, 1024 samples, `debug-audio`):
+
+| Figure | Hardware (New 3DS) |
+| --- | --- |
+| underruns | **0 in 28.6 min played** |
+| callbacks over budget / late (> 1.5 buffers apart) | 0 / 0 in every report |
+| longest gap between callbacks | 35.8 ms (one buffer is 31.3 ms) |
+| callback time | mean of the reports' averages 28.5% of a buffer; longest 28.15 ms of 31.29 ms (in gameplay, at 379 s) |
+| music decoding | 1 111.9 s of audio in 78.7 s (7.1% of real time) |
+| audio thread | core 1, priority 0x19, stack 9 of 80 KiB |
+| HOME / sleep | HOME 3 times, lid closed twice (0.7 s, 11.9 s): paused and resumed cleanly |
+
+The player heard no audio problems in the 30 minutes, game starts, the
+level change and the return to the menu included. (The main menu's
+2-minute music-loop check, checklist step 3, was not done separately.)
 
 | # | Open item | Kind | Blocks the next stage? |
 | --- | --- | --- | --- |
-| 1 | 10 min of play on hardware with music + SFX, underruns < 1/min | verification (DoD) | no |
-| 2 | Hardware timing: the audio thread runs on core 1 with a 30% CPU limit there; Azahar runs it on core 0, so the margins (47% load, 28 ms max of 31.3) are not yet confirmed | verification, part of 1 | no |
-| 3 | Whether stage 5's 2.8-3.9 s transition gaps were audible stalls or pauses | verification, part of 1 | no |
+| 1 | 10 min of play on hardware with music + SFX, underruns < 1/min | **Done** (above) | |
+| 2 | Hardware timing of the audio thread on core 1 | **Done**: mean load 28.5%, longest callback 28.15 ms of 31.29 ms (Azahar: 47%, 28 ms) | |
+| 3 | Whether stage 5's 2.8-3.9 s transition gaps were audible stalls or pauses | **Answered**: not reproduced (longest gap 35.8 ms), none heard | |
 | 4 | Ogg Opus / FLAC decoders | not needed for Marathon 1-3 data | no |
+| 5 | The console's `Marathon 2 Preferences` predates this stage and says `rate="44100"` | the session ran at 32728 with a temporary copy; the original file was put back. Change `rate` in the file to use the default | no |
 
-**Moving on:** the next stage can start in this state. The hardware run
-needs no code changes first, and its overlay and log give the figures
-directly; if it shows underruns, the first levers are the rate (already the
-DSP's 32728 Hz) and `samples` (2048 doubles SDL's queue to 188 ms) in the
-preferences file, without a rebuild.
+**Moving on:** the next stage can start in this state. If a later change
+brings underruns, the first levers are the rate (already the DSP's 32728
+Hz) and `samples` (2048 doubles SDL's queue to 188 ms) in the preferences
+file, without a rebuild.
 
 ## How audio works on the 3DS
 
@@ -245,6 +259,10 @@ not. Step 4 includes game starts and a START > YES.
 
 ## Known limitations
 
+- `debug-audio` plays 8 sounds at once when the main menu appears (its
+  mixer load test, `[3ds] debug-audio: playing sounds ...` in the log). On
+  the console this sounds like leftover test noise; delete the flag file
+  for normal play.
 - No Ogg Opus or FLAC decoder (portlibs have `opusfile` and `flac`; not
   needed for Marathon 1-3 data). Mono Ogg Vorbis was not in the test set
   (ffmpeg's built-in Vorbis encoder is stereo only); Tremor handles channels
