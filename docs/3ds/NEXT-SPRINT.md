@@ -11,6 +11,15 @@ decision from the user: done overnight) and **stage 2** (the console session and
 user's choices: the runbook at the end). Per item below: **Done**, **Stage 2**
 (waiting for the console or the user), or **Deferred**.
 
+**Status (2026-10-15, stage 2, commits `758f2f8`..).** The console session
+ran on 2026-10-13 (benchmarks, the functional run, Classic, the demo
+close, an SD write test). Stage 7 passed on the console (`758f2f8`). From
+its findings: the zoom moved to the D-Pad (`c61151d`), and the Sounds file
+is read in one read per header and sound (`30f3b72`, `PATCHES.md` 43), the
+likely cause of slow sounds in loads, of part of the 12 s scenario reload
+and of the start-of-level hitches. The user then left town: **the console
+re-check of those changes is the "Catch-up runbook" at the end** (stage 3).
+
 ## Read first
 - `docs/3ds/STAGE7.md`: the bottom screen (HUD + Map), now recorded from the Azahar
   side; "Hardware results (New 3DS)" is pending, and "Hardware checklist" is the list
@@ -90,6 +99,14 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
    commit "3DS port: stage 7 revision, HUD + Map".
    - **Stage 2, the user's choices:** should the map zoom be remembered across sessions
      (today it starts at 2 at each launch)? Is a small zoom indicator or hint wanted?
+   - **Done (2026-10-13/15).** Console: busy **14.02 / 13.50 / 13.54 ms** (pass,
+     4.0-4.3 below Classic), 30 fps, `gaps=0`; the functional checklist passed
+     (`STAGE7.md` "Hardware results"), committed as "3DS port: stage 7 revision,
+     HUD + Map" (`758f2f8`). The user's choices: zoom **not** remembered, **no**
+     indicator; taps and drags clashed, so the zoom is now on the D-Pad's map
+     zoom keys and taps do nothing (`c61151d`, `PATCHES.md` 44; Azahar passes).
+     Terminal's A on the second page: not tried (the terminal was one page).
+     **Left:** the D-Pad zoom on the console (catch-up run C).
 
 ## B. Backlog: open items from earlier sessions
 
@@ -97,18 +114,19 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 
 | # | Item | Status | Cost left | Console? | Recommendation |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Level loads 76-97 s, look frozen; slow saves | **Fix done** (Azahar 31 s → 3-4 s), marks in place | S: measure | yes | Measure first thing in stage 2; then decide on a progress screen and the save preview |
-| 2 | Hitches entering new areas | Stage 2 | S | yes | Measure with `log 1` during the B1 runs |
-| 3 | Boot 41.8 s | Marks in place | S-M | yes | Measure; fix only what dominates |
-| 4 | Level 0's max frame 107-120 ms | Stage 2 | S | yes | With item 8: one run at 32728 Hz |
+| A | Stage 7 revision on the console | **Done** (`758f2f8`): busy 14.02 / 13.50 / 13.54 ms, 4.0-4.3 below Classic; D-Pad zoom done in Azahar | S: re-check | yes | Catch-up runbook, run C |
+| 1 | Level loads; slow saves | Loads **done** (console 2.9-6.2 s, "fine"); sounds fix (43) to measure; **save 69 s open**, split by new marks | S-M | yes | Catch-up runbook; then fix the save step, or "Saving..." |
+| 2 | Hitches entering new areas | **Measured**: 72-314 ms frames in `world` in the first ~10 s; 43 is the likely fix | S: measure | yes | Catch-up runbook, runs A-B |
+| 3 | Boot 41.8 s | **Measured**: scenario files 12.1 s, sound 9.4 s, dialog theme 5.2 s; 43 cuts part of the first two (Azahar) | S-M | yes | Measure 43; then the rest of the 12 s, the theme |
+| 4 | Level 0's max frame | **Not the sound rate** (105 ms at 32728 Hz); same as item 2 | none | with 2 | Closed into item 2 |
 | 5 | HUD/Map fewer frames than Classic | **Done**: a profiler artefact | none | no | Closed |
-| 6 | HOME > Close in the demo 14.4 s | Marks in place | S | yes | One run in stage 2 |
-| 7 | C-Stick vertical look too fast | **Done** (pitch at 0.5×) | S: feel | yes | Try in stage 2; tune with the vertical sensitivity / dead zone |
-| 8 | Prefs `rate="44100"` | **Decided: change to 32728** (user, 2026-10-12) | XS | ftpd only | First step of stage 2: `sprint8/setrate.sh IP` |
+| 6 | HOME > Close in the demo | **Measured**: 13.4 s, 12.5 s of it the scenario reload; the APT exit hook had not run | S | yes | With item 3's reload; check the exit hook |
+| 7 | C-Stick vertical look | **Done**: "feels right now" (2026-10-13) | none | no | Closed |
+| 8 | Prefs `rate="44100"` | **Done**: 32728 on the card (2026-10-13); `audio` 10.2-10.8 → 7.7-7.8 ms | none | no | Closed |
 | 9 | Player name from CFGU | Deferred (twice) | S | no | Skip unless asked |
 | 10 | 400x240 menu layouts | Deferred | L | yes | Its own stage |
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
-| 12 | Backup bundle | **Done** | none | no | Closed |
+| 12 | Backup bundle | **Done** (refreshed after each session) | none | no | Closed |
 | 13 | devkitPro LD report | **Deferred by the user** (2026-10-12) | XS | for the repro | Kept as a note; see item 13 |
 
 Sources in brackets. Statuses were verified against the docs on 2026-10-12.
@@ -126,18 +144,42 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    level load and a save on the console (the marks are in the log); if the load still
    looks frozen, ask about a progress screen; if "save: file written" is slow, shrink
    the preview (320x180 at map scale 2).
+   **Stage 2 (2026-10-13):** a level loads in **2.9-6.2 s** on the console (shapes
+   0.49 s; the **sounds 1.4-4.6 s** lead); level 1 → 2 took 3.0 s and looked
+   **fine** (no progress screen). A save took **69 s** in "save: file written",
+   but an SD write test writes the same 2.98 MB in 0.66 s, so a smaller preview
+   would not fix it; `save_game_file()` now has marks per step. The sounds were
+   read 4 KB at a time: one read per sound now (`PATCHES.md` 43; Azahar 0.96 →
+   0.50 s). **Left:** measure both on the console (catch-up run C); then fix
+   the slow save step, or, if it cannot be fixed, a small "Saving..." message
+   (the user's fallback).
 2. **Short hitches when entering areas not seen before.** Never measured. [STAGE5 item 7]
    **Stage 2:** the `debug-perf-L*` files in `sprint8/` have `log 1`; play into new
    areas and read `max` per window.
+   **Measured (2026-10-13):** one to four frames of 72-314 ms (level 20: 314) in
+   the first ~10 s of each level, all in `world`; afterwards `max` stays at
+   38-41 ms. The user still feels them. In Azahar 8 sounds (595 KB) load on first
+   use in level 0's first seconds, inside `update_world()`; `PATCHES.md` 43 reads
+   each with one read instead of 4 KB at a time. **Left:** catch-up runs A-B
+   (per-window `max` before and after).
 3. **Boot takes 41.8 s to the main menu** on the console ("preferences loaded" →
    "sound initialized" 9.6 s; "screen initialized" → `initialize_application()` done
    19.4 s). **Stage 1:** both stretches are split into marked steps (`PERF.md` "Load
    times", Azahar table; "environment (scenario files)" 4.1 s and sound 2.7 s lead
    there). **Stage 2:** read the console's split, then decide.
+   **Measured (2026-10-13):** 41.8 s to the menu again; the scenario files 12.1 s,
+   sound 9.4 s and the dialog theme 5.2 s are 26.7 s of it (`PERF.md` "Load
+   times"). Both of the first two read every sound header 4 KB at a time
+   (`PATCHES.md` 43: 2.59 → 0.51 s in Azahar); the scenario reload is now split
+   into map, physics, shapes, sounds, resources. **Left:** catch-up run A's boot
+   marks; then the largest remaining step.
 4. **Level 0's longest frame is 107-120 ms** in every mode on the console (58 ms in the
    PERF session). The sound rate differed: the console's prefs say `rate="44100"`, PERF
    ran at 32728. **Stage 2:** try 32728 (item 8); with `log 1`, find when in the window
    it happens. [STAGE7 "Hardware results"]
+   **Closed into item 2 (2026-10-13):** 105 ms at 32728 Hz, so not the rate; it is
+   one of item 2's early-level `world` frames, which level 0's window catches
+   because it starts 8 s in.
 5. ~~HUD/Map counted about 0.5% fewer frames than Classic.~~ **Done, no code change**:
    the profiler leaves its overlay's time out of the wall clock and only Classic draws
    the overlay in game; frame + overlay is 32.98-32.99 ms in every mode, the engine's
@@ -145,6 +187,12 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
 6. **HOME > Close during the main menu's demo takes 14.4 s** (hardware only; 0.34 s from
    a game). **Stage 1:** every step of `finish_game()` is marked. **Stage 2:** one
    HOME > Close during the demo; read the marks. [STAGE5 item 4]
+   **Measured (2026-10-13):** 13.4 s, of which **12.5 s "environment reloaded"**,
+   the same scenario reload as every quit to the menu (12.0 s) and boot. The
+   reload is skipped when the system asked to close (`PATCHES.md` 22), but the log
+   has no "the system asked the application to close" line: the APT exit hook had
+   not run when the demo ended. **Left:** with item 3 (a faster reload helps both);
+   check when the exit hook runs (the demo may end on the HOME press itself).
 
 **Controls and settings**
 7. **The C-Stick's vertical look is too fast.** **Done in stage 1** (`3ba6e23`,
@@ -152,12 +200,15 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    ±30° limit in 0.23 s instead of 0.12 s (logged with script 16). **Stage 2:** the
    user tries it; the Controller Advanced vertical sensitivity and dead zone are the
    next knobs. Touch-look tuning: with HUD + Map, by feel. [STAGE5 item 2]
+   **Done (2026-10-13):** "feels right now".
 8. The console's prefs file still says `rate="44100"` (the default is the DSP's native
    32728 Hz). **Decided by the user (2026-10-12): change it to 32728.** Not applied
    yet: the console was not on ftpd. **Stage 2, first step:** with ftpd running,
    `build-3ds/hw/sprint8/setrate.sh IP` (sets only `<sound rate=...>`, keeps the rest,
    saves the original in `sprint8/prefs-rate/original`). Then the benchmarks run at
    32728, which also tests whether item 4's long frame goes away. [STAGE6 item 5]
+   **Done (2026-10-13):** the card's prefs say 32728; the `audio` zone fell from
+   10.2-10.8 to 7.7-7.8 ms; item 4's frame stayed.
 9. Player name from the console profile (CFGU) instead of "Bob User". Cosmetic,
    deferred twice by the user. **Deferred.** [STAGE3 stub 4; STAGE5 item 6]
 
@@ -210,3 +261,40 @@ no keyboard for the Lua console. [STAGE3 "Stubs", STAGE6, ENVIRONMENT, STAGE5]
 6. **Record:** STAGE7.md "Hardware results (New 3DS)" and captures; PERF.md "Load times"
    console column; STAGE5 open items; this file. Delete `debug-perf` from the card.
    Commit per piece; refresh the backup bundle.
+
+## Catch-up runbook (stage 3: the console re-check, when the user is back)
+
+Everything below needs the console; nothing else is waiting. The builds at
+`30f3b72` have the D-Pad zoom, the sound reads (`PATCHES.md` 43) and the new
+marks. The card is ready: prefs `rate="32728"`, `bottom_screen="0"`, no
+`debug-perf`. Same driving as "How to drive the console"; IP was
+192.168.100.72. Kill any leftover 3dslink first
+(`pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`): one left from a run that
+ended with a lid close holds port 17491 and the next launch cannot bind.
+
+1. **Build:** `export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM;
+   cmake --build build-3ds && cmake --build build-3ds-prof`.
+2. **Run A, profile build, level 0:** `build-3ds/hw/sprint8/next.sh IP - - 0`,
+   netloader, `launch.sh IP build-3ds-prof/alephone.3dsx build-3ds/hw/sprint8/s3-L0-3dslink.txt`,
+   A twice. Compare with `hm-L0-3dslink.txt` (2026-10-13): boot marks ("sound:
+   sounds file opened", "environment: ..." against 9.4 s and 12.1 s), the load's
+   "entering_map: monster sounds" (was 3.96 s as "sounds"), per-window `max`
+   and `world` in the first windows (was 80-112 ms), busy (was 14.02).
+3. **Run B, level 20:** `next.sh IP s3-L0 0 20`, the same; compare with
+   `hm-L20-3dslink.txt` (first window 314 ms, sounds 4.61 s, busy 13.54).
+4. **Run C, normal build:** `next.sh IP s3-L20 20 rm`. New game (HUD + Map):
+   D-Pad Down/Up zoom the bottom map between 1 and 3 (a click at the ends),
+   taps do nothing, a drag looks, SELECT opens the top map and Up/Down zoom
+   that one; does the start of the level still hitch? Save at level 1's
+   pattern buffer (the "save_game_file: ..." marks split the 69 s), quit to
+   the main menu ("environment: ..." marks split the 12 s), wait for the
+   demo, HOME > Close (is there a "system asked the application to close"
+   line?). Fetch `log.txt` over ftpd.
+5. **Decide with the user** from the numbers: the slow save step (fix it, or a
+   "Saving..." message as the user asked if it cannot be fixed); the next
+   step of the scenario reload and boot (the dialog theme's 5.2 s too).
+   Measure before and after; keep only measured gains.
+6. **Record:** `PERF.md` "Load times" (console after 43), `STAGE7.md` (D-Pad
+   zoom on the console), `STAGE5.md` open items, this file; commit per piece;
+   refresh the backup bundle (`STAGE5-PREREQS.md` item 8).
+
