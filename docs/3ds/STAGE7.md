@@ -12,8 +12,8 @@ settings, HUD, Map and Classic, plus touch buttons; it passed on a New 3DS
 **and** a more zoomed-out map on the bottom screen, without touch buttons
 (the console's buttons already do MAP, ACTION and NEXT WEAPON). The
 **revision** (`490f9ca`) merged HUD and Map into one **HUD + Map** setting.
-This document describes the revision. Its Azahar results are in; the
-console session is still to come (stage 2 of
+This document describes the revision. It passed in Azahar and, on
+2026-10-13, on a New 3DS ("Hardware results (New 3DS)", stage 2 of
 [`NEXT-SPRINT.md`](NEXT-SPRINT.md)).
 
 | ![HUD + Map, top](img/stage7r-top.png) | ![HUD + Map, bottom](img/stage7r-bottom.png) |
@@ -32,7 +32,7 @@ Azahar captures from `13-bottom-screen.txt` (level 1, after a short walk).
 | 2 | HUD draw refactored minimally (`A1_PLATFORM_3DS`) to target another surface; prefs [HUD on bottom \| Map on bottom \| Classic] | **Done, revised.** Graphics > Heads-Up Display > **Bottom Screen**: HUD + Map (default) or Classic (HUD on Top). The HUD is still drawn into its 640x480 buffer by the engine; only where that buffer goes changed (`PATCHES.md` 37). The first version's separate HUD and Map settings became the one HUD + Map setting at the user's request |
 | 3 | Touch buttons (map, action, next weapon) injecting the same actions as the key bindings | **Built, then removed at the user's request.** The first version had them and they passed on the console ("History"); the console's own buttons do the same actions, and the space went to the map. A tap on the map now zooms it (`PATCHES.md` 38 removed) |
 | 4 | Terminals readable at 400x240 (font scaling via SDL2_ttf) or terminals on the bottom screen | **Done, by font scaling** in both settings: the terminal fonts are resized (SDL2_ttf) and the terminal rectangles fitted to the screen, and the engine reflows the text (`PATCHES.md` 36) |
-| | **DoD: all modes work on hardware; perf regression < 1 ms/frame (A1_PROFILE)** | **Azahar: met.** HUD + Map is 3.7-4.0 ms *below* Classic in busy time; Classic is unchanged. **Console: pending** (stage 2 of `NEXT-SPRINT.md`); the first version met it on a New 3DS. The budget, restated with the user: Classic within 1 ms of before, HUD + Map at or below Classic + 1 ms |
+| | **DoD: all modes work on hardware; perf regression < 1 ms/frame (A1_PROFILE)** | **Met on a New 3DS** (2026-10-13): HUD + Map busy 14.02 / 13.50 / 13.54 ms, **4.0-4.3 ms below Classic** (budget: at or below Classic + 1 ms), 30 fps, `gaps=0`; both settings work. In Azahar HUD + Map is 3.7-4.0 ms below Classic. The budget, restated with the user: Classic within 1 ms of before, HUD + Map at or below Classic + 1 ms. One finding: taps on the map and drags to look sometimes clashed, so the user moved the zoom to the D-Pad |
 
 ## The modes
 
@@ -195,13 +195,93 @@ measured again on the revision's code).
 
 ## Hardware results (New 3DS)
 
-**Pending: stage 2 of [`NEXT-SPRINT.md`](NEXT-SPRINT.md).** To record here:
-BENCH lines for HUD + Map on levels 0, 6 and 20 (pass: busy at or below
-Classic + 1 ms, that is **19.24 / 18.84 / 18.55 ms**, Classic being the
-first version's 18.24 / 17.84 / 17.55; and 30 fps with `gaps=0`); the
-functional checks ("Hardware checklist"); the memory line at
-`main loop ended`; captures as `img/stage7r-hw-*.png`. The first version's
-console results are under "History".
+**Setup** (2026-10-13). New 3DS, Luma3DS, Homebrew Launcher, 3dslink, as in
+the first version's session ("History"). Builds of `b15ab17` (code as at
+`3ba6e23`): `build-3ds-prof` for the benchmarks, `build-3ds` for the
+functional run. Sound at **32728 Hz** from this session on: the prefs file
+on the card had 44100 Hz, and was set to the DSP's native rate first
+(`NEXT-SPRINT.md` item 8). Logs, transcripts and captures:
+`build-3ds/hw/sprint8/` (not in git).
+
+| ![HUD + Map, top, New 3DS](img/stage7r-hw-top.png) | ![HUD + Map, bottom, New 3DS](img/stage7r-hw-bottom.png) |
+| --- | --- |
+| level 0 at the end of the benchmark, captured on the console | the HUD over the map, zoom 2 |
+
+**BENCH lines** (ms per frame; busy = frame − idle; one `debug-perf` run per
+level with `log 1`; "Classic" is the first version's console run):
+
+| Level | fps | frame | max | **busy** | vs Classic | world | render | hud | blit | present | **bottom** | idle | audio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 30.59 | 32.69 | 105.4 | **14.02** | **−4.22** | 0.44 | 5.78 | 0.11 | 0.96 | 4.33 | 1.93 | 18.67 | 7.81 |
+| 6 | 30.62 | 32.66 | 40.4 | **13.50** | **−4.34** | 0.30 | 5.10 | 0.11 | 0.96 | 4.29 | 2.28 | 19.16 | 7.73 |
+| 20 | 30.63 | 32.65 | 40.2 | **13.54** | **−4.01** | 0.41 | 4.87 | 0.11 | 0.95 | 4.23 | 2.43 | 19.11 | 7.78 |
+
+620 frames in each 20 s window, `gaps=0`, overlay 0.00 (not drawn in game).
+
+**Pass criteria: met.** Busy is **13.50-14.02 ms** against a budget of
+19.24 / 18.84 / 18.55 (Classic + 1 ms): 4.0-4.3 ms *below* Classic. 30 fps
+holds (frame + overlay 32.65-32.69 ms, the engine's 33 ms tick).
+
+- **Against the estimate** (13.7 / 12.8 / 12.7, the first version's HUD mode
+  plus its map cost): 0.3-0.8 ms above it. `render`, `hud`, `blit` and
+  `present` match HUD mode's to 0.1 ms (5.71 / 5.02 / 4.78 render then,
+  same 400x240 view); the difference is `bottom`, **1.93-2.43 ms** against
+  HUD's 0.84-0.86 and Map's 1.61-1.84: the HUD and a map every 3rd frame.
+- **Against Azahar** (17.85 / 15.55 / 15.23): −21% / −13% / −11%, as the
+  first version (the rasteriser is faster on the console, copies slower).
+- **`audio`** (core 1) is 7.73-7.81 ms at 32728 Hz, against 10.2-10.8 at
+  44100 Hz in the first version's runs: the DSP no longer resamples.
+- **`max`** on level 0 is still **105 ms** at 32728 Hz, so the sound rate was
+  not the cause (`NEXT-SPRINT.md` B4). The per-window lines place it: every
+  window with a long frame (72-314 ms on levels 0, 6 and 20) has `world`
+  at 1.7-21.9 ms instead of ~0.3, and all fall in the first ~10 s of the
+  level; afterwards `max` stays at 38-41 ms. Level 0 shows it in the result
+  because its measured window starts 8 s in. The likely cause, sounds
+  loaded on first use inside `update_world()`, is followed in
+  `NEXT-SPRINT.md` B2.
+
+**Memory** (`main loop ended`):
+
+| Run | malloc in use | linear heap free |
+| --- | --- | --- |
+| benchmarks, levels 0 / 6 / 20 (profile build) | 24 663 / 23 311 / 23 215 KiB | 17 840 KiB of 19 952 |
+| HUD + Map functional run: 4 dialog round trips, HOME, sleep, level change, save (normal build) | 30 386 KiB | **17 848 KiB** of 19 960 |
+| Classic run, then the main menu's demo and HOME > Close | 25 956 KiB | 17 848 KiB |
+
+The linear heap ends at the same free size as in every run since the
+performance stage.
+
+**Functional checks** (normal build, the user on the console; ✓ = as
+expected):
+
+| Check | HUD + Map |
+| --- | --- |
+| Start a game: top and bottom screens as in the captures | ✓ |
+| Tap the map: zoom 1, 3, 2 | works, but **taps and drags to look sometimes clashed**; the user asked for the zoom on buttons (below) |
+| Tap the HUD: nothing changes | ✓ |
+| Drag anywhere to look (Touch Screen Aiming on) | ✓ (the clash above) |
+| START: dialog, legend on the bottom screen; B: game, HUD and map back | ✓ (4 round trips: `terminals:` 640x320 ↔ 400x240 in the log) |
+| Terminal in level 1: legible, page | ✓; A on the second page not tried (the terminal was one page, and it teleported the player on) |
+| C-Stick vertical look at half the yaw's speed | ✓ "feels right now" (`NEXT-SPRINT.md` B7) |
+| Level change, level 1 → 2 | ✓ 2.97 s, "fine as is" (no progress screen wanted) |
+| HOME and back | ✓ (3.7 s) |
+| Sleep (lid closed) and wake: the bottom screen comes back | ✓ (1.0 s) |
+| Quit to the main menu: the legend is back | ✓ |
+
+Classic, briefly: a game started and was quit to the main menu normally
+(the log; no visual remarks recorded), then the main menu's demo and
+HOME > Close (`NEXT-SPRINT.md` B6).
+
+**The user's decisions** (2026-10-13): the map zoom is **not** remembered
+across sessions and gets **no indicator**; the zoom moves from taps to
+the D-Pad's map zoom keys, so a touch only ever looks (done after this
+session, "Map zoom" above; console re-check pending).
+
+Also found in this session, outside stage 7 (`NEXT-SPRINT.md`, `PERF.md`
+"Load times"): a save took **69 s** in "save: file written" (an SD write
+test writes the same 2.98 MB in 0.66 s, so not the card); every return to
+the main menu spends **12 s** reloading the scenario files; hitches in the
+first seconds of each level.
 
 ## Testing (Azahar 2126.2)
 
@@ -222,8 +302,8 @@ The benchmark's end-of-run captures are the ones to diff.
 
 ## Hardware checklist (New 3DS)
 
-For the console session (stage 2 of `NEXT-SPRINT.md`); the first version's
-list was carried out on 2026-10-12 ("History").
+Carried out on 2026-10-13 (stage 2 of `NEXT-SPRINT.md`, "Hardware
+results" above); the first version's list on 2026-10-12 ("History").
 
 1. Build `build-3ds` and `build-3ds-prof`; copy or 3dslink `alephone.3dsx`.
 2. With the profile build and `debug-perf`, one BENCH for HUD + Map on
@@ -250,12 +330,14 @@ list was carried out on 2026-10-12 ("History").
 - The map is redrawn at 10 Hz (every 3rd frame); that frame is about 5 ms
   longer in Azahar.
 - The map's zoom starts at 2 at every launch, and nothing on screen shows
-  the zoom level (both are open questions for the user).
+  the zoom level (both kept that way by the user, 2026-10-13).
 - A tap's few pixels of motion (at most 6) also reach the look.
 - Networked games keep the scenario's terminal layout (their pages are
   counted before the game).
-- First version, on the console: level 0's longest frame was 107-120 ms in
-  all three modes, Classic included (backlog item B4 in `NEXT-SPRINT.md`).
+- On the console, the first ~10 s of a level have one to four frames of
+  72-314 ms, in `world` (level 0's longest was 107-120 ms in all three
+  modes of the first version, Classic included, and 105 ms here at
+  32728 Hz; `NEXT-SPRINT.md` B2, B4).
   Its other open point, HUD and Map counting fewer frames than Classic, is
   explained: it is the profiler leaving out the time of its overlay, which
   only Classic draws in game; the real rate is 30.30 fps in every mode
