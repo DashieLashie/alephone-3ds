@@ -154,6 +154,12 @@ enum BottomMode { BottomHudMap = 0, BottomClassic = 2 };
 // the HUD buffer was redrawn since the last call.
 void bottom_frame(BottomMode mode, bool hud_changed);
 
+// The map zoom keys (RenderOther/screen_shared.h zoom_overhead_map_in/out):
+// with the bottom screen's map shown and the main map closed, zoom the
+// bottom map one step (+1 in, -1 out). 1: zoomed; 0: already at the limit;
+// -1: not handled (the main map's zoom changes as upstream).
+int bottom_map_zoom(int step);
+
 // --- Audio (docs/3ds/STAGE6.md; implementation: ports/3ds/source/audio_3ds.cpp) ---
 // The AudioBackend itself is declared in Sound/AudioBackend.h
 // (a1_3ds::create_audio_backend).

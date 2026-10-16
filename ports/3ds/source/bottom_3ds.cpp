@@ -9,12 +9,12 @@
 	- under it, 320x160, the overhead map, rendered at the bottom screen's
 	  own resolution by the engine's map renderer into a separate surface
 	  (the main map, opened with the map key, is untouched). It has its own
-	  zoom, more zoomed out than the main map's default: a tap on it
-	  (bottom_tap(), from input_3ds.cpp) zooms out one step, and from the
-	  widest back to the closest.
+	  zoom, more zoomed out than the main map's default: while the main map
+	  is closed, the map zoom keys (D-Pad Up/Down by default) zoom it
+	  (bottom_map_zoom(), from RenderOther/screen_shared.h).
 
 	The whole screen is also where the finger drags to look (Touch Screen
-	Aiming); a tap is a touch that barely moves (input_3ds.cpp).
+	Aiming, input_3ds.cpp); taps do nothing, so a drag never zooms.
 
 	The picture is composed in a 320x240 XRGB8888 surface and presented only
 	when something on it changed (present_bottom(), video_3ds.cpp). With
@@ -57,7 +57,7 @@ constexpr int kHudH = 80;
 constexpr int kMapY = kHudH, kMapH = kH - kHudH;
 constexpr int kMapEvery = 3;
 // The map's own zoom (overhead_map_data::scale: each step doubles; the main
-// map's default is 3). A tap zooms out one step, from 1 back to kMapScaleMax.
+// map's default is 3). The zoom keys step it between 1 and kMapScaleMax.
 constexpr short kMapScaleDefault = 2, kMapScaleMax = 3;
 // The renderer writes the level name at the top of the game map (baseline
 // 25 pixels down in Monaco 18 by default, RenderOther/overhead_map.cpp). The
@@ -148,21 +148,24 @@ void draw_map(bool allowed)
 
 // --- Used by input_3ds.cpp ---------------------------------------------------
 
-// A tap at (x, y), bottom-screen pixels, in game: on the map, zoom out one step.
-void bottom_tap(float, float y)
-{
-	if (y < kMapY)
-		return;
-	s_map_scale = s_map_scale > OVERHEAD_MAP_MINIMUM_SCALE ? s_map_scale - 1 : kMapScaleMax;
-	s_map_dirty = true;
-}
-
 void bottom_force_redraw()
 {
 	s_full = true;
 }
 
 // --- Public ----------------------------------------------------------------------
+
+int bottom_map_zoom(int step)
+{
+	if (!bottom_is_game() || !world_view || world_view->overhead_map_active)
+		return -1;
+	const int scale = s_map_scale + step;
+	if (scale < OVERHEAD_MAP_MINIMUM_SCALE || scale > kMapScaleMax)
+		return 0;
+	s_map_scale = static_cast<short>(scale);
+	s_map_dirty = true;
+	return 1;
+}
 
 void bottom_frame(BottomMode mode, bool hud_changed)
 {

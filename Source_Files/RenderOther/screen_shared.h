@@ -405,6 +405,11 @@ void ResetFieldOfView()
 bool zoom_overhead_map_out(
 	void)
 {
+#ifdef A1_PLATFORM_3DS
+	// HUD + Map with the main map closed: the bottom screen's map (STAGE7.md)
+	if (int r = a1_3ds::bottom_map_zoom(-1); r >= 0)
+		return r == 1;
+#endif
 	bool Success = false;
 	if (world_view->overhead_map_scale > OVERHEAD_MAP_MINIMUM_SCALE)
 	{
@@ -418,6 +423,11 @@ bool zoom_overhead_map_out(
 bool zoom_overhead_map_in(
 	void)
 {
+#ifdef A1_PLATFORM_3DS
+	// HUD + Map with the main map closed: the bottom screen's map (STAGE7.md)
+	if (int r = a1_3ds::bottom_map_zoom(+1); r >= 0)
+		return r == 1;
+#endif
 	bool Success = false;
 	if (world_view->overhead_map_scale < OVERHEAD_MAP_MAXIMUM_SCALE)
 	{

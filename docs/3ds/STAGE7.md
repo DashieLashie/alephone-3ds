@@ -3,7 +3,7 @@
 Recorded 2026-10-12 on branch `3ds-port`, on top of the performance stage
 (`9a5c4a5`). Goal: put the HUD and the overhead map on the bottom screen and
 keep terminals readable. Engine changes are fenced with `A1_PLATFORM_3DS`
-and listed in [`PATCHES.md`](PATCHES.md) (entries 36-40); the rest is port
+and listed in [`PATCHES.md`](PATCHES.md) (entries 36-40, 44); the rest is port
 code (`ports/3ds/source/bottom_3ds.cpp`, `video_3ds.cpp`, `input_3ds.cpp`).
 
 The stage went through two versions. The **first** (`f8328ab`) had three
@@ -20,9 +20,10 @@ This document describes the revision. It passed in Azahar and, on
 | --- | --- |
 | **HUD + Map** (default): the view fills the top screen, 400x240 1:1 | the HUD halved to 320x80 over the overhead map, 320x160, at zoom 2 |
 | ![Map at zoom 1](img/stage7r-zoom1-bottom.png) | ![Map at zoom 3](img/stage7r-zoom3-bottom.png) |
-| a tap on the map zooms out one step: zoom 1 (the widest) | the next tap goes back to the closest, zoom 3; one more tap is 2 again |
+| D-Pad Down zooms the map out: zoom 1 (the widest) | D-Pad Up zooms it in, up to zoom 3 (the closest); it starts at 2 |
 
-Azahar captures from `13-bottom-screen.txt` (level 1, after a short walk).
+Azahar captures from `13-bottom-screen.txt` (level 1, after a short walk;
+the zoom captures from its D-Pad version, 2026-10-15).
 
 ## Summary
 
@@ -30,7 +31,7 @@ Azahar captures from `13-bottom-screen.txt` (level 1, after a short walk).
 | --- | --- | --- |
 | 1 | Does SDL2's N3DS driver support a second window on the bottom screen? If yes use it, else a 320x240 buffer blitted to `gfxGetFramebuffer(GFX_BOTTOM)` | **Supported, not used** (below). The bottom screen is composed in a 320x240 buffer and written to the framebuffer directly, like the top screen since `PERF.md` experiment a |
 | 2 | HUD draw refactored minimally (`A1_PLATFORM_3DS`) to target another surface; prefs [HUD on bottom \| Map on bottom \| Classic] | **Done, revised.** Graphics > Heads-Up Display > **Bottom Screen**: HUD + Map (default) or Classic (HUD on Top). The HUD is still drawn into its 640x480 buffer by the engine; only where that buffer goes changed (`PATCHES.md` 37). The first version's separate HUD and Map settings became the one HUD + Map setting at the user's request |
-| 3 | Touch buttons (map, action, next weapon) injecting the same actions as the key bindings | **Built, then removed at the user's request.** The first version had them and they passed on the console ("History"); the console's own buttons do the same actions, and the space went to the map. A tap on the map now zooms it (`PATCHES.md` 38 removed) |
+| 3 | Touch buttons (map, action, next weapon) injecting the same actions as the key bindings | **Built, then removed at the user's request.** The first version had them and they passed on the console ("History"); the console's own buttons do the same actions, and the space went to the map (`PATCHES.md` 38 removed). The map's zoom is on the D-Pad's map zoom keys (`PATCHES.md` 44) |
 | 4 | Terminals readable at 400x240 (font scaling via SDL2_ttf) or terminals on the bottom screen | **Done, by font scaling** in both settings: the terminal fonts are resized (SDL2_ttf) and the terminal rectangles fitted to the screen, and the engine reflows the text (`PATCHES.md` 36) |
 | | **DoD: all modes work on hardware; perf regression < 1 ms/frame (A1_PROFILE)** | **Met on a New 3DS** (2026-10-13): HUD + Map busy 14.02 / 13.50 / 13.54 ms, **4.0-4.3 ms below Classic** (budget: at or below Classic + 1 ms), 30 fps, `gaps=0`; both settings work. In Azahar HUD + Map is 3.7-4.0 ms below Classic. The budget, restated with the user: Classic within 1 ms of before, HUD + Map at or below Classic + 1 ms. One finding: taps on the map and drags to look sometimes clashed, so the user moved the zoom to the D-Pad |
 
@@ -38,7 +39,7 @@ Azahar captures from `13-bottom-screen.txt` (level 1, after a short walk).
 
 | Bottom Screen | Top screen in game | Bottom screen in game |
 | --- | --- | --- |
-| **HUD + Map** (default, stored as 0) | the view, **400x240 1:1** (whole screen) | the HUD halved to 320x80 (2x2 average) over the overhead map, 320x160; a tap on the map zooms it out one step, a drag anywhere looks |
+| **HUD + Map** (default, stored as 0) | the view, **400x240 1:1** (whole screen) | the HUD halved to 320x80 (2x2 average) over the overhead map, 320x160; D-Pad Up/Down zoom the map, a drag anywhere looks |
 | **Classic** (stored as 2) | as before: 640x480 halved, the 75% view, the HUD | as before: the controls legend |
 
 The setting is the `bottom_screen` attribute of `<graphics>` in the prefs
@@ -94,14 +95,18 @@ messages) is twice as large on screen as before.
     its own scale (D-Pad up/down);
   - the 320x240 result is presented (`present_bottom()`, rotated and
     converted to RGB565) only when something on it changed.
-- **Map zoom** (`input_3ds.cpp`, `bottom_3ds.cpp`). A **tap** is a touch that
-  is lifted within 300 ms (`kTapMs`) and never moves more than 6 pixels
-  (`kTapSlop`) from where it went down. A tap on rows 80-239 calls
-  `bottom_tap()`, which zooms the map out one step
-  (`overhead_map_data::scale`: each step doubles), from the widest back to
-  the closest: **2 → 1 → 3 → 2**. It starts at 2 (`kMapScaleDefault`; the
-  main map's default is 3) at each launch. A tap on the HUD does nothing.
-  A tap's few pixels of motion still go to the look, like any touch.
+- **Map zoom** (`bottom_3ds.cpp`, `screen_shared.h`, `PATCHES.md` 44). The
+  engine's map zoom keys (D-Pad Up in, Down out by default, rebindable in
+  Controls) call `zoom_overhead_map_in()` / `_out()`, which first offer the
+  step to `bottom_map_zoom()`: while the bottom screen shows the map and the
+  main map is closed, it zooms the bottom map one step
+  (`overhead_map_data::scale`: each step doubles) between **1** (the
+  widest) and **3** (the closest), with the usual success or failure click
+  at the ends. It starts at 2 (`kMapScaleDefault`; the main map's default
+  is 3) at each launch. With the main map open the keys zoom it, as
+  upstream. Taps on the bottom screen do nothing. *Until 2026-10-13 a tap
+  on the map zoomed it (2 → 1 → 3 → 2); on the console taps and drags to
+  look sometimes clashed, and the user moved the zoom to the D-Pad.*
 - **Look**. With Touch Screen Aiming on (the default), a drag anywhere on
   the bottom screen turns and looks; with it off the touch is the pointer.
   At the 400x240 logical size SDL no longer doubles the relative motion, so
@@ -275,7 +280,8 @@ HOME > Close (`NEXT-SPRINT.md` B6).
 **The user's decisions** (2026-10-13): the map zoom is **not** remembered
 across sessions and gets **no indicator**; the zoom moves from taps to
 the D-Pad's map zoom keys, so a touch only ever looks (done after this
-session, "Map zoom" above; console re-check pending).
+session, "Map zoom" above; passes in Azahar; **console re-check pending**,
+`NEXT-SPRINT.md` "Catch-up runbook").
 
 Also found in this session, outside stage 7 (`NEXT-SPRINT.md`, `PERF.md`
 "Load times"): a save took **69 s** in "save: file written" (an SD write
@@ -287,7 +293,7 @@ first seconds of each level.
 
 | Script / option | Checks | Revision result (2026-10-12) |
 | --- | --- | --- |
-| `run-azahar.sh --script scripts/3ds/tests/input/13-bottom-screen.txt --timeout 150` | per setting: start a game, walk, tap the map three times (zoom 1, 3, 2), tap the HUD (no change), drag to look (no zoom), START dialog (640x480, legend on the bottom screen), back to the game, HOME, HOME > Close | **HUD + Map: pass** (the captures above). **Classic: pass**: legend on the bottom screen throughout, taps do nothing on the map (there is none), the drag looks, the dialog and HOME come back |
+| `run-azahar.sh --script scripts/3ds/tests/input/13-bottom-screen.txt --timeout 150` | per setting: start a game, walk, D-Pad Down twice (zoom 1, then the limit), Up three times (3, then the limit), taps on the map and the HUD (no change), Down (2), SELECT and Up (the main map zooms, the bottom map does not), drag to look, START dialog (640x480, legend on the bottom screen), back to the game, HOME, HOME > Close | **HUD + Map: pass** (the captures above). D-Pad version (2026-10-15, two runs): the map rows change by 19 800-42 800 pixels at each zoom step and by 0-36 (a moving dot) at the limits, after the taps and with the main map open, while the main map's capture changes. **Classic: pass** (tap version): legend on the bottom screen throughout, taps do nothing on the map (there is none), the drag looks, the dialog and HOME come back |
 | `run-azahar.sh --terminal-test --script scripts/3ds/tests/input/14-terminal.txt --timeout 150` | per setting: the Terminal Test plugin (solo Lua) opens terminal 0 three seconds into level 1; the script pages down (D-Pad), taps A, and leaves with B | **Both: pass** for the layout (log: `terminals: 400x240, font 10/12` and `640x320, font 19/22`), page down, and B back to the game with the bottom screen restored. A on the second page left it unchanged in both settings: not explained yet; to try on the console |
 | `PREFS="bottom_screen=N" RUNS=1 scripts/3ds/tests/perf-bench.sh LABEL` | the benchmark per setting | "Performance" |
 
@@ -310,7 +316,9 @@ results" above); the first version's list on 2026-10-12 ("History").
    levels 0, 6 and 20.
 3. HUD + Map, normal build:
    - start a game: the top and bottom screens look like the captures above;
-   - tap the map: zoom 1, then 3, then 2; tap the HUD: nothing changes;
+   - D-Pad Down / Up: the bottom map zooms between 1 and 3 (a failure
+     click at the ends); taps on the map or the HUD change nothing; with the
+     main map open (SELECT) Up / Down zoom that one;
    - drag anywhere on the bottom screen to look (Touch Screen Aiming on);
    - START: the dialog shows, the legend comes back; B: the game, HUD and
      map come back (three round trips);
@@ -331,7 +339,6 @@ results" above); the first version's list on 2026-10-12 ("History").
   longer in Azahar.
 - The map's zoom starts at 2 at every launch, and nothing on screen shows
   the zoom level (both kept that way by the user, 2026-10-13).
-- A tap's few pixels of motion (at most 6) also reach the look.
 - Networked games keep the scenario's terminal layout (their pages are
   counted before the game).
 - On the console, the first ~10 s of a level have one to four frames of
@@ -349,10 +356,10 @@ results" above); the first version's list on 2026-10-12 ("History").
 | --- | --- |
 | `ports/3ds/source/bottom_3ds.cpp` (new) | the bottom screen in game: the HUD halved, the map and its zoom |
 | `ports/3ds/source/video_3ds.cpp` | 400x240 1:1 top present, `present_bottom()`, `half_blit()` |
-| `ports/3ds/source/input_3ds.cpp` | bottom screen owner (legend / game), taps (map zoom), touch look scale |
+| `ports/3ds/source/input_3ds.cpp` | bottom screen owner (legend / game), touch look scale |
 | `ports/3ds/include/a1_3ds_platform.h` | the declarations above |
 | `ports/3ds/include/a1_3ds_profile.h`, `profile_3ds.cpp` | the `bottom` zone |
-| `Source_Files/RenderOther/screen.cpp`, `screen_shared.h` | screen size, layout, HUD routing, terminals (`PATCHES.md` 36-37) |
+| `Source_Files/RenderOther/screen.cpp`, `screen_shared.h` | screen size, layout, HUD routing, terminals, map zoom keys (`PATCHES.md` 36-37, 44) |
 | `Source_Files/Misc/sdl_dialogs.cpp` | dialogs at 640x480 (`PATCHES.md` 39) |
 | `Source_Files/Misc/preferences.cpp`, `preferences.h` | the Bottom Screen preference (`PATCHES.md` 40) |
 | `scripts/3ds/tests/input/13-bottom-screen.txt`, `14-terminal.txt`, `plugins/Terminal Test/` | tests |

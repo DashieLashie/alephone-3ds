@@ -66,6 +66,7 @@ in the sprint after it (`NEXT-SPRINT.md`).
 | 40 | `Source_Files/Misc/preferences.cpp`, `preferences.h` | Bottom Screen preference | none |
 | 41 | `shell.cpp`, `Misc/interface.cpp`, `Files/game_wad.cpp`, `GameWorld/marathon2.cpp`, `XML/QuickSave.cpp`, `RenderMain/shapes.cpp` | timed log marks in boot, level loads, saves and `finish_game()` (log only) | none |
 | 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
+| 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -745,9 +746,10 @@ against `4981724`): `screen.cpp` (14 / 12 lines), `preferences.cpp` (20)
 and `vbl.cpp` (8) differ only in `__LINE__` values: 0 lines differ once
 numbers are normalised. 0 diagnostics.
 
-## The sprint after stage 7 (41-42)
+## The sprint after stage 7 (41-42, 44)
 
-Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6, B7). All guarded by
+Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6, B7); 44 on 2026-10-15,
+after the first console session. All guarded by
 `#ifdef A1_PLATFORM_3DS`. Entry 19 was extended in the same sprint.
 
 41. **Timed log marks** (log only): `a1_3ds::time_mark("what")` writes
@@ -778,10 +780,19 @@ Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6, B7). All guarded by
     with this (`NEXT-SPRINT.md` B1). If the read comes back short, the file
     is parsed as before. Marathon 1 shapes (resources, already in memory)
     are untouched.
+44. **`RenderOther/screen_shared.h`** `zoom_overhead_map_in()` / `_out()`
+    (the map zoom keys, D-Pad Up/Down by default): first ask
+    `a1_3ds::bottom_map_zoom(±1)`, which zooms the bottom screen's map
+    (HUD + Map, `STAGE7.md`) when it is shown and the main map is closed,
+    between scale 1 and 3, and returns whether it did (the usual success /
+    failure click). Otherwise the main map zooms as upstream. Replaces the
+    revision's tap-to-zoom: on the console taps and drags to look clashed
+    (`NEXT-SPRINT.md` A.3), so a touch on the bottom screen now only looks.
 
 **Non-3DS check** (2026-10-12, `ppcheck.sh`, both volumes; the script now
 also counts the differing lines with every number normalised):
 `shell.cpp`, `interface.cpp` and `joystick_sdl.cpp` byte-identical;
 `game_wad.cpp` (10 lines), `marathon2.cpp` (4), `QuickSave.cpp` (2) and
 `shapes.cpp` (2) differ only in numbers: 0 lines with numbers normalised.
-0 diagnostics.
+0 diagnostics. For 44 (2026-10-15): `screen.cpp` byte-identical in both
+volumes.

@@ -16,9 +16,8 @@
 	- Bottom screen: a legend of the controls, or, with the debug-input flag
 	  file, a log of the raw SDL input events (also written to log.txt).
 	  In game with the HUD and the map on the bottom screen (docs/3ds/STAGE7.md)
-	  bottom_3ds.cpp draws it instead (bottom_game()), and a tap on it (a
-	  touch that barely moves) goes to bottom_tap() (map zoom) as well as
-	  being a pointer press or look motion as usual.
+	  bottom_3ds.cpp draws it instead (bottom_game()); a touch there only
+	  looks (the map zooms with the map zoom keys, screen_shared.h).
 	  With the debug-audio flag file, the last four rows show the audio
 	  statistics (audio_3ds.cpp, decoders_3ds.cpp). If the DSP could not be
 	  started (no dspfirm.cdc), a notice explaining how to dump the firmware
@@ -57,7 +56,6 @@ namespace a1_3ds {
 double elapsed_ms();
 void save_screens(const std::string& tag);
 // source/bottom_3ds.cpp
-void bottom_tap(float x, float y);
 void bottom_force_redraw();
 
 namespace {
@@ -452,14 +450,6 @@ bool s_touch_block_pending = false; // decide at the next scan (after a keyboard
 float s_last_tx = 0, s_last_ty = 0;   // bottom-screen pixels
 float s_look_rem_x = 0, s_look_rem_y = 0;
 int s_pointer_x = 0, s_pointer_y = 0; // window pixels
-// A tap on the game's bottom screen: down and up within kTapMs, never more
-// than kTapSlop bottom-screen pixels from where it went down. Its look
-// motion (at most a few pixels) still goes through.
-constexpr double kTapMs = 300;
-constexpr float kTapSlop = 6;
-bool s_tap = false;                // the finger down may still be a tap
-float s_tap_x = 0, s_tap_y = 0;
-double s_tap_ms = 0;
 
 SDL_Window* main_window()
 {
@@ -539,21 +529,8 @@ void handle_finger(const SDL_TouchFingerEvent& f, Uint32 type)
 	const float tx = f.x * GSP_SCREEN_HEIGHT_BOTTOM;   // 0..320
 	const float ty = f.y * GSP_SCREEN_WIDTH;           // 0..240
 
-	if (type == SDL_FINGERDOWN)
-	{
-		s_tap = s_bottom_game && !s_touch_blocked;
-		s_tap_x = tx;
-		s_tap_y = ty;
-		s_tap_ms = elapsed_ms();
-	}
-	else if (s_tap && (std::fabs(tx - s_tap_x) > kTapSlop || std::fabs(ty - s_tap_y) > kTapSlop))
-		s_tap = false;
-
 	if (type == SDL_FINGERUP)
 	{
-		if (s_tap && s_bottom_game && elapsed_ms() - s_tap_ms <= kTapMs)
-			bottom_tap(s_tap_x, s_tap_y);
-		s_tap = false;
 		s_finger_down = false;
 		s_touch_blocked = false;
 		release_pointer(w);
@@ -678,7 +655,6 @@ void on_suspend(const char* why)
 	push_window_event(SDL_WINDOWEVENT_FOCUS_LOST);
 	release_pointer(main_window());
 	s_finger_down = false;
-	s_tap = false;
 }
 
 void on_resume(const char* why)
@@ -694,7 +670,7 @@ void on_resume(const char* why)
 	}
 	push_window_event(SDL_WINDOWEVENT_FOCUS_GAINED);
 	push_window_event(SDL_WINDOWEVENT_EXPOSED);   // dialogs redraw on this
-	s_touch_block_pending = true;   // a touch that closed the HOME menu is not a tap
+	s_touch_block_pending = true;   // a touch that closed the HOME menu does not look
 	bottom_redraw();
 	if (s_bottom_game)
 		bottom_force_redraw();   // the HOME menu may have replaced the bottom screen
@@ -1149,7 +1125,6 @@ void bottom_game(bool game)
 {
 	if (game == s_bottom_game || !s_console_out)
 		return;
-	s_tap = false;
 	if (game)
 	{
 		// Double-buffered, so a HUD update never shows half drawn. The
