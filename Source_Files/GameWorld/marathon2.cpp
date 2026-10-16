@@ -692,6 +692,9 @@ bool entering_map(bool restoring_saved)
 #endif
 
 	load_all_monster_sounds();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("entering_map: monster sounds");
+#endif
 	load_all_game_sounds(static_world->environment_code);
 #ifdef A1_PLATFORM_3DS
 	a1_3ds::time_mark("entering_map: sounds");

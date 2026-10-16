@@ -185,6 +185,23 @@ void SoundHeader::ConvertSignedToUnsignedByte(uint8* data, int length)
 
 bool SoundHeader::Load(OpenedFile &SoundFile)
 {
+#ifdef A1_PLATFORM_3DS
+	// The header's bytes with one read, parsed from memory (docs/3ds/PATCHES.md
+	// 43): the stream buffer below fills 4 KB per header, and each fill is a
+	// file system call on the SD card. A System 7 header is at most 64 bytes.
+	char bytes[64];
+	int32 start;
+	if (SoundFile.GetPosition(start))
+	{
+		if (SoundFile.Read(sizeof bytes, bytes))
+		{
+			io::stream_buffer<io::array_source> mb(bytes, sizeof bytes);
+			BIStreamBE ms(&mb);
+			return Load(ms);
+		}
+		SoundFile.SetPosition(start);
+	}
+#endif
 	io::stream_buffer<opened_file_device> sb(SoundFile);
 	BIStreamBE s(&sb);
 
@@ -193,6 +210,22 @@ bool SoundHeader::Load(OpenedFile &SoundFile)
 
 std::shared_ptr<SoundData> SoundHeader::LoadData(OpenedFile& SoundFile)
 {
+#ifdef A1_PLATFORM_3DS
+	// The header and the samples with one read, parsed from memory (as Load()
+	// above); through the stream buffer the samples came 4 KB per read.
+	int32 start;
+	if (data_offset && length > 0 && SoundFile.GetPosition(start))
+	{
+		std::vector<char> bytes(data_offset + length);
+		if (SoundFile.Read(bytes.size(), bytes.data()))
+		{
+			io::stream_buffer<io::array_source> mb(bytes.data(), bytes.size());
+			BIStreamBE ms(&mb);
+			return LoadData(ms);
+		}
+		SoundFile.SetPosition(start);
+	}
+#endif
 	io::stream_buffer<opened_file_device> sb(SoundFile);
 	BIStreamBE s(&sb);
 	

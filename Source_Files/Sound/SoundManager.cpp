@@ -32,6 +32,10 @@ SOUND.C
 #include "shell_options.h"
 #include "Movie.h"
 
+#ifdef A1_PLATFORM_3DS
+namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+#endif
+
 #undef SLOT_IS_USED
 #undef SLOT_IS_FREE
 #undef MARK_SLOT_AS_FREE
@@ -154,6 +158,9 @@ void SoundManager::Initialize(const Parameters& new_parameters)
 	get_default_sounds_spec(InitialSoundFile);
 	if (OpenSoundFile(InitialSoundFile))
 	{
+#ifdef A1_PLATFORM_3DS
+		a1_3ds::time_mark("sound: sounds file opened");
+#endif
 		atexit(::Shutdown);
 		parameters.flags = 0;
 		initialized = true;

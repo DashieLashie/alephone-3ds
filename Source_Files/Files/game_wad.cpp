@@ -1481,12 +1481,18 @@ bool save_game_file(FileSpecifier& File, const std::string& metadata, const std:
 		OpenedFile SaveFile;
 		if(open_wad_file_for_writing(TempFile,SaveFile))
 		{
+#ifdef A1_PLATFORM_3DS
+			a1_3ds::time_mark("save_game_file: temporary file opened");
+#endif
 			/* Write out the new header */
 			if (write_wad_header(SaveFile, &header))
 			{
 				offset= SIZEOF_wad_header;
 		
 				wad= build_save_game_wad(&header, &wad_length);
+#ifdef A1_PLATFORM_3DS
+				a1_3ds::time_mark("save_game_file: game wad built");
+#endif
 				if (wad)
 				{
 					/* Set the entry data.. */
@@ -1496,13 +1502,22 @@ bool save_game_file(FileSpecifier& File, const std::string& metadata, const std:
 					/* Save it.. */
 					if (write_wad(SaveFile, &header, wad, offset))
 					{
+#ifdef A1_PLATFORM_3DS
+						a1_3ds::time_mark("save_game_file: game wad written");
+#endif
 						/* Update the new header */
 						offset+= wad_length;
 						header.directory_offset= offset;
 						header.parent_checksum= read_wad_file_checksum(MapFileSpec);
+#ifdef A1_PLATFORM_3DS
+						a1_3ds::time_mark("save_game_file: map checksum read");
+#endif
 						
 						/* Create metadata wad */
 						meta_wad = build_meta_game_wad(metadata, imagedata, &header, &wad_length);
+#ifdef A1_PLATFORM_3DS
+						a1_3ds::time_mark("save_game_file: preview wad built");
+#endif
 						if (meta_wad)
 						{
 							set_indexed_directory_offset_and_length(&header,
@@ -1510,6 +1525,9 @@ bool save_game_file(FileSpecifier& File, const std::string& metadata, const std:
 							
 							if (write_wad(SaveFile, &header, meta_wad, offset))
 							{
+#ifdef A1_PLATFORM_3DS
+								a1_3ds::time_mark("save_game_file: preview wad written");
+#endif
 								offset+= wad_length;
 								header.directory_offset= offset;
 						
@@ -1517,6 +1535,9 @@ bool save_game_file(FileSpecifier& File, const std::string& metadata, const std:
 								{
 									/* We win. */
 									success= true;
+#ifdef A1_PLATFORM_3DS
+									a1_3ds::time_mark("save_game_file: header and directory written");
+#endif
 								}
 							}
 							
@@ -1530,6 +1551,9 @@ bool save_game_file(FileSpecifier& File, const std::string& metadata, const std:
 
 			err = SaveFile.GetError();
 			close_wad_file(SaveFile);
+#ifdef A1_PLATFORM_3DS
+			a1_3ds::time_mark("save_game_file: file closed");
+#endif
 		}
 		
 		if (!err)
@@ -1538,6 +1562,9 @@ bool save_game_file(FileSpecifier& File, const std::string& metadata, const std:
 			{
 				err = 1;
 			}
+#ifdef A1_PLATFORM_3DS
+			a1_3ds::time_mark("save_game_file: renamed");
+#endif
 		}
 	}
 	

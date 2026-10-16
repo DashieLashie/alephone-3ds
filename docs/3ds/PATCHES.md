@@ -64,8 +64,9 @@ in the sprint after it (`NEXT-SPRINT.md`).
 | 38 | (removed) | touch button action flags; removed with the buttons, `vbl.cpp` is back to its stage 3 state | none |
 | 39 | `Source_Files/Misc/sdl_dialogs.cpp` | in-game dialogs at 640x480 | none |
 | 40 | `Source_Files/Misc/preferences.cpp`, `preferences.h` | Bottom Screen preference | none |
-| 41 | `shell.cpp`, `Misc/interface.cpp`, `Files/game_wad.cpp`, `GameWorld/marathon2.cpp`, `XML/QuickSave.cpp`, `RenderMain/shapes.cpp` | timed log marks in boot, level loads, saves and `finish_game()` (log only) | none |
+| 41 | `shell.cpp`, `Misc/interface.cpp`, `Files/game_wad.cpp`, `GameWorld/marathon2.cpp`, `XML/QuickSave.cpp`, `RenderMain/shapes.cpp`, `Misc/preferences.cpp`, `Sound/SoundManager.cpp` | timed log marks in boot, level loads, saves and `finish_game()` (log only) | none |
 | 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
+| 43 | `Source_Files/Sound/SoundFile.cpp` | a sound header, and a sound's samples, read with one read each and parsed from memory | none |
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
 
 The complete list of stubs and lost functionality, including items not tied
@@ -746,10 +747,10 @@ against `4981724`): `screen.cpp` (14 / 12 lines), `preferences.cpp` (20)
 and `vbl.cpp` (8) differ only in `__LINE__` values: 0 lines differ once
 numbers are normalised. 0 diagnostics.
 
-## The sprint after stage 7 (41-42, 44)
+## The sprint after stage 7 (41-44)
 
-Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6, B7); 44 on 2026-10-15,
-after the first console session. All guarded by
+Added 2026-10-12 (`NEXT-SPRINT.md`, items B1, B3, B6, B7); 43-44 and the
+last 41 call sites on 2026-10-15, after the first console session. All guarded by
 `#ifdef A1_PLATFORM_3DS`. Entry 19 was extended in the same sprint.
 
 41. **Timed log marks** (log only): `a1_3ds::time_mark("what")` writes
@@ -769,6 +770,14 @@ after the first console session. All guarded by
     saves); `RenderMain/shapes.cpp` `load_collections()` (unloaded, read and
     decoded, shapes patches, shading tables, software texture extras). The
     files without the port header declare `a1_3ds::time_mark()` themselves.
+    *Added 2026-10-15*, where the console was slow and Azahar is not:
+    `game_wad.cpp` `save_game_file()` (temporary file opened, game wad
+    built and written, map checksum read, preview wad built and written,
+    header and directory, file closed, renamed); `Misc/preferences.cpp`
+    `load_environment_from_preferences()` (map file, physics, shapes file,
+    sounds file, external resources); `Sound/SoundManager.cpp`
+    `Initialize()` (sounds file opened); `entering_map()` now marks the
+    monster sounds apart from the rest.
 42. **`RenderMain/shapes.cpp`** `load_collection()`: for a Marathon 2/∞
     shapes file, the collection's byte range (`length` or `length16` from
     its header) is read with one `SDL_RWread()` into a buffer and parsed
@@ -780,6 +789,22 @@ after the first console session. All guarded by
     with this (`NEXT-SPRINT.md` B1). If the read comes back short, the file
     is parsed as before. Marathon 1 shapes (resources, already in memory)
     are untouched.
+43. **`Sound/SoundFile.cpp`** `SoundHeader::Load(OpenedFile&)` and
+    `LoadData(OpenedFile&)`: the header's 64 bytes (a System 7 header is
+    50 or 60), and for the data the header plus its samples
+    (`data_offset + length`), are read with one `OpenedFile::Read()` and
+    parsed from an `io::array_source` stream over them by the unchanged
+    `Load(BIStreamBE&)` / `LoadData(BIStreamBE&)`. Upstream wraps the file
+    in a boost `stream_buffer`, which reads 4 KB per fill: every header
+    (975 of them, all read when the Sounds file is opened at boot and on
+    each return to the main menu) cost a 4 KB read, and a sound's samples
+    came 4 KB per read, also for sounds first played during the game,
+    inside `update_world()`. In Azahar: opening the Sounds file 2.59 →
+    0.51 s, a level's sounds 0.96 → 0.50 s (level 0) and 0.34 → 0.18 s
+    (level 1). Checked with a temporary CRC log of every header and load:
+    the same 975 headers in the same order and the same 107 sounds
+    (3.3 MB), byte for byte. If a read comes back short, the stream path
+    runs as before. Marathon 1 sounds (resources) are untouched.
 44. **`RenderOther/screen_shared.h`** `zoom_overhead_map_in()` / `_out()`
     (the map zoom keys, D-Pad Up/Down by default): first ask
     `a1_3ds::bottom_map_zoom(±1)`, which zooms the bottom screen's map
@@ -794,5 +819,10 @@ also counts the differing lines with every number normalised):
 `shell.cpp`, `interface.cpp` and `joystick_sdl.cpp` byte-identical;
 `game_wad.cpp` (10 lines), `marathon2.cpp` (4), `QuickSave.cpp` (2) and
 `shapes.cpp` (2) differ only in numbers: 0 lines with numbers normalised.
-0 diagnostics. For 44 (2026-10-15): `screen.cpp` byte-identical in both
-volumes.
+0 diagnostics.
+
+**Non-3DS check for 43-44 and the new 41 marks** (2026-10-15, both
+volumes): `screen.cpp` (for `screen_shared.h`), `marathon2.cpp` and
+`SoundManager.cpp` byte-identical; `game_wad.cpp` (8 lines),
+`SoundFile.cpp` (2) and `preferences.cpp` (20) differ only in numbers:
+0 lines with numbers normalised. 0 diagnostics.

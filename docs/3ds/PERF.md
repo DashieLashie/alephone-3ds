@@ -535,9 +535,9 @@ looked like a hang, boot took 41.8 s and HOME > Close during the menu demo
 (`PATCHES.md` 41): `[3ds] +T ms: what (+D ms)`, D being the time since the
 previous mark. Azahar's timings are not the console's (its SD card is a host
 folder, and its CPU and file system costs differ: boot's "fonts and
-plugins" is 10.9 s there and 2.9 s on the console), so the console figures
-are for the next console session; Azahar shows which steps exist and which
-dominate.
+plugins" is 10.9 s there and 2.9 s on the console). The console figures
+below are from the New 3DS session of 2026-10-13 (`NEXT-SPRINT.md` stage 2;
+logs in `build-3ds/hw/sprint8/`), with `PATCHES.md` 42 and before 43.
 
 **Test:** `run-azahar.sh --load-test --script scripts/3ds/tests/input/15-load-test.txt
 --timeout 200`. The Load Test plugin (solo Lua) saves 5 s into level 0
@@ -545,19 +545,23 @@ dominate.
 (`Players[0]:teleport_to_level(1)`) and saves again 5 s into level 1; logs in
 `build-3ds/hw/sprint8/azahar/load-test-*.log` (not in git).
 
-**Level loads** (Azahar, seconds; "before" is the code at `063edfd`, "after"
-adds `PATCHES.md` 42):
+**Level loads** (seconds; Azahar "before" is the code at `063edfd`, "after"
+adds `PATCHES.md` 42; the console ran the "after" code):
 
-| Step (mark) | new game, level 0: before | after | level change, level 1: before | after |
-| --- | --- | --- | --- | --- |
-| `goto_level`: level script (MML) | 0.38 | 0.34 | 0.37 | 0.37 |
-| map read | 0.13 | 0.15 | 0.13 | 0.14 |
-| Lua loaded | 0.10 | 0.12 | 0.10 | 0.10 |
-| **`load_collections`: read and decoded** | **28.41** | **0.73** | **28.02** | **0.72** |
-| shading tables (`update_color_environment`) | 1.33 | 1.33 | 1.17 | 1.17 |
-| `entering_map`: sounds | 0.90 | 0.90 | 0.32 | 0.32 |
-| `start_game` | 0.24 | 0.24 | 0.15 | 0.14 |
-| **whole load** | **31.5** | **3.8** | **30.3** | **3.0** |
+| Step (mark) | new game, level 0: Azahar before | after | **console** | level change, level 1: Azahar before | after | **console** (1 → 2) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `goto_level`: level script (MML) | 0.38 | 0.34 | 0.20 | 0.37 | 0.37 | 0.19 |
+| map read | 0.13 | 0.15 | 0.08 | 0.13 | 0.14 | 0.08 |
+| Lua loaded | 0.10 | 0.12 | 0.01 | 0.10 | 0.10 | 0.01 |
+| **`load_collections`: read and decoded** | **28.41** | **0.73** | **0.49** | **28.02** | **0.72** | **0.49** |
+| shading tables (`update_color_environment`) | 1.33 | 1.33 | 0.54 | 1.17 | 1.17 | 0.48 |
+| **`entering_map`: sounds** | 0.90 | 0.90 | **3.96** | 0.32 | 0.32 | **1.44** |
+| `start_game` | 0.24 | 0.24 | 0.17 | 0.15 | 0.14 | 0.09 |
+| **whole load** | **31.5** | **3.8** | **5.5** | **30.3** | **3.0** | **3.0** |
+
+On the console, new games on levels 6 and 20 took 2.9 s and 6.2 s (sounds
+1.39 s and 4.61 s), and a second level 0 5.5 s (sounds 4.00 s). Before
+`PATCHES.md` 42 a level took **76-97 s** there.
 
 (Whole load: from the chapter screen's mark to `start_game`'s for a new
 game, from "level change: movie" for a level change.)
@@ -575,47 +579,102 @@ game, from "level change: movie" for a level change.)
 - **On the console** each small read is an IPC call to the file system,
   so the gain is expected to be at least as large; to be measured with the
   same marks (the 76-97 s were never split).
+- **On the console** the shapes take 0.49 s (Azahar 0.73), and a level load
+  is **2.9-6.2 s**. The largest step is now the **sounds**, 1.4-4.6 s
+  (Azahar 0.3-0.9 s): each sound is read 4 KB at a time (`PATCHES.md` 43,
+  below).
 - The level change still shows the last game frame while it loads (no
-  chapter screen on most levels). At 3-4 s that may be acceptable; a
-  progress screen is a design choice left for the user.
+  chapter screen on most levels). On the console (level 1 → 2, 3.0 s) the
+  user found it **"fine as is"**: no progress screen.
 
 **Saves** (Azahar): metadata 0.4 ms, map preview 100 ms, file written
-126-147 ms, surplus check 0.1 ms: about 0.25 s. Azahar writes to a host
-folder, so the console's SD writes are the open question. Each save is
-**2.98 MB**, 2.76 MB of it the preview: the overhead map rendered at
-1280x720 and stored as a 24-bit BMP (without SDL2_image there is no PNG,
-`QuickSave.cpp` `build_map_preview()`). If "file written" is slow on the
-console, the candidate is a smaller preview (320x180 at map scale 2 shows the
-same area in 1/16 of the bytes; the load dialog shows it at 128x72).
+126-147 ms, surplus check 0.1 ms: about 0.25 s. **On the console**: metadata
+8 ms, map preview 76 ms, **file written 69 162 ms**, surplus check 8 ms. The
+SD card is not the cause: a test program (`scripts/3ds/tests/sdwrite-test/`)
+writes 2.98 MB the way `save_game_file()` does (`"wb+"`, a seek and one
+`fwrite()` per piece) in **0.66 s** on the same console, 4.5 MB/s
+(fixed 8 KB `fwrite()`s: 0.76 MB/s growing the file, 1.4 MB/s preallocated;
+one `FSFILE_Write()` of the whole buffer: 1.6 MB/s). `save_game_file()` now
+marks each of its steps (`PATCHES.md` 41) to find the 69 s on the console;
+in Azahar they add up to 0.13 s. Each save is **2.98 MB**, 2.76 MB of it
+the preview: the overhead map rendered at 1280x720 and stored as a 24-bit
+BMP (without SDL2_image there is no PNG, `QuickSave.cpp`
+`build_map_preview()`). A smaller preview (320x180 at map scale 2 shows the
+same area in 1/16 of the bytes; the load dialog shows it at 128x72) would
+save at most ~0.6 s of real writing, so it waits for the split. If the
+69 s cannot be removed, the user asked for a small "Saving..." message
+on screen during the save.
 
-**Boot** after "preferences loaded" (Azahar, from the same logs):
+**Boot** after "preferences loaded" (ms; Azahar from the same logs, the
+console from two boots on 2026-10-13, which agree to 1.5%):
 
-| Step | ms |
-| --- | --- |
-| directories | 375 |
-| image cache | 74 |
-| preferences written, plugin MML | 103 |
-| SDL_ttf, HTTP, timers | 0.2 |
-| sound initialized | 2 707 |
-| intro music, keyboard, gamma | 262 |
-| screen initialized | 346 |
-| `initialize_marathon` | 26 |
-| screen drawing | 114 |
-| dialogs (theme) | 1 180 |
-| terminals, shape handler | 834 |
-| fades, images | 155 |
-| environment (scenario files), game state | 4 131 |
+| Step | Azahar | **console** |
+| --- | --- | --- |
+| directories | 375 | 107 |
+| image cache | 74 | 20-25 |
+| preferences written, plugin MML | 103 | 97-103 |
+| SDL_ttf, HTTP, timers | 0.2 | 8 |
+| **sound initialized** | 2 707 | **9 350-9 420** |
+| intro music, keyboard, gamma | 262 | 198-201 |
+| screen initialized | 346 | 215-218 |
+| `initialize_marathon` | 26 | 74-75 |
+| screen drawing | 114 | 63-67 |
+| **dialogs (theme)** | 1 180 | **5 239-5 268** |
+| terminals, shape handler | 834 | 1 727-1 728 |
+| fades, images | 155 | 184-190 |
+| **environment (scenario files), game state** | 4 131 | **12 137** |
+| **time to main menu** (from `main()`) | | **41 835-41 946** |
 
-On the console the two slow stretches were "preferences loaded" → "sound
-initialized" (9.6 s, Azahar 3.3 s) and "screen initialized" →
-`initialize_application()` done (19.4 s, Azahar 6.4 s); the marks above
-split both. Not changed yet: measure on the console first.
+Three steps are 26.7 s of the console's 41.8 s boot: the scenario files
+(12.1 s), sound (9.4 s) and the dialog theme (5.2 s). Both of the first two
+open the Sounds file, which reads every sound header (975) 4 KB at a time;
+`PATCHES.md` 43 takes that from 2.59 s to 0.51 s in Azahar (below).
 
 **Leaving a game** (`finish_game()`, B6): every step is marked. HOME >
 Close from a game (the load test's `quit`, which skips the fades and the
-scenario reload, `PATCHES.md` 22) takes 26 ms in Azahar; the console's
-14.4 s happen only when HOME > Close interrupts the menu demo, which the
-marks will place.
+scenario reload, `PATCHES.md` 22) takes 26 ms in Azahar. **On the
+console** (ms):
+
+| Step | quit to the menu (HUD + Map) | quit to the menu (Classic) | **HOME > Close during the demo** | benchmark's quit (`quit 1`) |
+| --- | --- | --- | --- | --- |
+| replay stopped | 25 | 29 | 10 | 1 276 |
+| fades, `leaving_map` | 517 | 516 | 522 | 9 |
+| **environment reloaded** | **12 015** | **12 016** | **12 473** | 13 (skipped) |
+| main menu | 313 | 315 | 359 | 8 |
+| whole `finish_game()` | 12.9 s | 12.9 s | **13.4 s** | 1.3 s |
+
+The demo close's time is the **scenario reload**
+(`load_environment_from_preferences()`), the same 12 s as boot's
+"environment" step and as every quit to the menu. `PATCHES.md` 22 skips it
+when the system asked the application to close, but that log line
+("the system asked the application to close", the APT exit hook) is
+missing from the demo run, so the reload ran: when HOME > Close ends the
+demo, the hook has not been called yet. The reload is now split
+(`PATCHES.md` 41: map file, physics, shapes file, sounds file, external
+resources); in Azahar its sounds file step goes from 2.60 s to 0.52 s with
+`PATCHES.md` 43.
+
+**Sounds read with one read** (`PATCHES.md` 43, 2026-10-15). The Sounds
+file was read through a boost `stream_buffer`, 4 KB per file read: a 4 KB
+read for each of the 975 sound headers whenever the file is opened (boot,
+twice, and every return to the menu), and a sound's samples 4 KB at a
+time, also for the sounds first played during the game, inside
+`update_world()` (8 sounds, 595 KB, in level 0's first seconds in Azahar:
+the likely cause of the start-of-level hitches, `NEXT-SPRINT.md` B2). Now
+each header and each sound is one read. Azahar, load test, before → after:
+
+| Step | before | after |
+| --- | --- | --- |
+| boot: sounds file opened (`SoundManager::Initialize()`) | 2 593 | **508** |
+| boot: environment: sounds file | 2 605 | **518** |
+| level 0 (new game): monster sounds (all of a level's sounds) | 961 | **496** |
+| level 1 (level change): monster sounds | 335 | **177** |
+
+The headers and sounds are byte-identical (a temporary CRC log of every
+header and load: the same 975 headers in order, the same 107 sounds,
+3.3 MB). Benchmark captures and every zone but `bottom` (the map's content
+at that moment) are unchanged. **Console: to be measured** (`NEXT-SPRINT.md`
+"Catch-up runbook").
 
 ## Menus and dialogs
 
@@ -695,3 +754,4 @@ and blit work comes first there.
 | `scripts/3ds/run-azahar.sh` | `--perf LEVEL` |
 | `scripts/3ds/tests/perf-bench.sh`, `perf-table.py` (new) | benchmark series and tables |
 | `scripts/3ds/tests/input/11-perf-bench.txt`, `12-sprite-check.txt` (new) | start a benchmark game; capture the demo replay |
+| `scripts/3ds/tests/sdwrite-test/` (new, 2026-10-15) | SD card write speed on the console (`build.sh` → `build/sdwrite-test/sdwrite.3dsx`, run with 3dslink `-s`); "Load times", saves |

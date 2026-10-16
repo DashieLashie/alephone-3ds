@@ -117,6 +117,10 @@ May 22, 2003 (Woody Zenfell):
 #include <lmcons.h>
 #endif
 
+#ifdef A1_PLATFORM_3DS
+namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+#endif
+
 // 8-bit support is still here if you undefine this, but you'll need to fix it
 // #define TRUE_COLOR_ONLY 1
 
@@ -4598,6 +4602,9 @@ void load_environment_from_preferences(
 			set_to_default_map();
 		}
 	}
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("environment: map file");
+#endif
 
 	File = prefs->physics_file;
 	if (!File.Exists() && !find_wad_file_that_has_checksum(File,
@@ -4607,6 +4614,9 @@ void load_environment_from_preferences(
 
 	set_physics_file(File);
 	import_definition_structures();
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("environment: physics");
+#endif
 	
 	File = prefs->shapes_file;
 	if (!File.Exists() && !find_file_with_modification_date(File,
@@ -4615,6 +4625,9 @@ void load_environment_from_preferences(
 	}
 
 	open_shapes_file(File);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("environment: shapes file");
+#endif
 
 	File = prefs->sounds_file;
 	if (!File.Exists() && !find_file_with_modification_date(File,
@@ -4623,6 +4636,9 @@ void load_environment_from_preferences(
 	}
 
 	SoundManager::instance()->OpenSoundFile(File);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("environment: sounds file");
+#endif
 
 	File = prefs->resources_file;
 	if (!File.Exists())
@@ -4632,6 +4648,9 @@ void load_environment_from_preferences(
 
 	set_external_resources_file(File);
 	set_external_resources_images_file(File);
+#ifdef A1_PLATFORM_3DS
+	a1_3ds::time_mark("environment: external resources");
+#endif
 }
 
 
