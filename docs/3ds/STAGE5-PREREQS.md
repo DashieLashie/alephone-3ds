@@ -76,6 +76,11 @@ Restored offline into a scratch repository (tag `release-20260930` fetched at
 depth 1 from the local repository, then the bundle): tree `90c74d5e…`
 identical to `HEAD`'s. Older bundles are kept.
 
+**Refreshed 2026-10-15** (after the stage 2 console session):
+`3ds-port-2026-10-15-df14b52.bundle`, `is okay`, 4 402 303 bytes, sha256
+`ceb793f172c95fd6f03acf5e2782ea275b4d37ab0e38ecd369f8f107b6a99071`.
+Restored offline the same way: tree `69e1739d…` identical to `HEAD`'s.
+
 The bundle is incremental: its prerequisite `fc4c274` is upstream tag
 `release-20260930` (the shallow boundary). **Restore**, tested in a scratch
 directory: the restored tree matched the working copy (`diff -rq`, tracked
