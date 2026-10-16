@@ -722,6 +722,36 @@ frame times. **Carried out 2026-10-11**: results in "Hardware results".
    the top screen while turning (there should be none: the swap waits for
    VBlank).
 
+## Stage 10 P0: software baseline at 30 and 60 (Azahar — non-authoritative)
+
+Recorded 2026-10-16 on branch `stage10-c3d` (`1e51162`, no code change),
+the reference for stage 10's GPU present
+([`CITRO3D_DESIGN.md`](CITRO3D_DESIGN.md), 0.5 and P0). Profiler build
+(`-DA1_PROFILE=ON`, Release), Azahar 2126.2, no DSP firmware, one run per
+level:
+`PREFS="fps_target=30|60 bottom_screen=0|2" RUNS=1 perf-bench.sh p0-<mode><fps>`.
+Logs in `build/perf/p0-*` (not in git). busy = frame − idle.
+
+| Series | fps L0 / L6 / L20 | busy L0 / L6 / L20 | render | present | blit | bottom |
+| --- | --- | --- | --- | --- | --- | --- |
+| HUD + Map @30 | 30.31 / 30.32 / 30.36 | 17.35 / 15.54 / 15.20 | 11.20 / 8.98 / 8.63 | 1.41 | 1.20 | 2.44 / 2.85 / 2.69 |
+| HUD + Map @60 | **52.62 / 58.07 / 57.09** | 18.35 / 15.93 / 16.10 | 11.20 / 8.98 / 8.63 | 1.47-1.49 | 1.20 | 2.43 / 2.30 / 2.68 |
+| Classic @30 | 30.36 / 30.36 / 30.36 | 21.55 / 19.44 / 19.30 | 12.37 / 10.08 / 9.65 | 6.04-6.24 | 1.44 | — |
+| Classic @60 | **47.40 / 52.91 / 52.74** | 21.09 / 18.64 / 18.37 | 12.38 / 10.08 / 9.66 | 4.59-4.62 | 1.44-1.46 | — |
+
+- **Repeatable:** Classic @30 is within 0.04 ms busy of experiment a'
+  (21.52 / 19.48 / 19.27, "Results"), seven builds later.
+- **HUD + Map @60 is the stage 10 target's first data point** (≥ 55 fps,
+  design 0.5): in Azahar L6 and L20 pass, L0 does not (52.62). `gaps=0`
+  and `max` 43.9-48.2 ms in every run.
+- **Azahar puts the HUD + Map time in `render`, not in `present`:** 1.41 ms
+  here against 4.33 ms on the console (`STAGE7.md`:220), and `render`
+  11.20 against 5.78 (the ~40% skew of "Hardware results", both ways). The
+  GPU present (P1) removes `present` work, so in Azahar it can show at most
+  ~1.4 ms per frame in HUD + Map; whether it reaches the target is a
+  console question (G0-b, design section 10).
+- Console runs of the four series: pending (design section 10, item 3).
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now
