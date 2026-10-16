@@ -273,8 +273,9 @@ expected):
 | Sleep (lid closed) and wake: the bottom screen comes back | ✓ (1.0 s) |
 | Quit to the main menu: the legend is back | ✓ |
 
-Classic, briefly: a game started and was quit to the main menu normally
-(the log; no visual remarks recorded), then the main menu's demo and
+Classic, briefly: a game started, the legend was on the bottom screen,
+START and B brought the dialog and the game back, and it quit to the main
+menu normally (confirmed by the user), then the main menu's demo and
 HOME > Close (`NEXT-SPRINT.md` B6).
 
 **The user's decisions** (2026-10-13): the map zoom is **not** remembered
