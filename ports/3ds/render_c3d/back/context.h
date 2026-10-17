@@ -54,7 +54,8 @@ bool on_main_thread();
 // release_and_fini() from any thread. On the main thread: release_and_fini(), true. On
 // another thread: no citro3d call; asks the main thread to release at its next present and
 // sleeps until it has (true) or until a bounded wait runs out (false: citro3d still owns the
-// top screen). True at once when citro3d is down. `who` names the caller in the log.
+// top screen). True at once when citro3d is down; the request is then still recorded, so
+// citro3d does not start later (ensure_up). `who` names the caller in the log.
 bool release_from_any_thread(const char* who);
 // present_screen() is about to return false; counted while citro3d is up.
 void note_false_return();

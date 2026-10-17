@@ -427,7 +427,7 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 			fflush(stdout);
 			if (cfg.test_vhalt == 1)
 				vhalt("debug-c3d test_vhalt");   // never returns
-			// 2, 3: the error screen from a thread other than main (critic P1 minor 4). Lower
+			// 2, 3, 4: the error screen from a thread other than main (critic P1 minor 4). Lower
 			// priority than the main thread, same core: it runs while the main thread sleeps
 			// between frames, i.e. possibly between two C3D frames, and the main thread keeps
 			// presenting until it serves the release request.

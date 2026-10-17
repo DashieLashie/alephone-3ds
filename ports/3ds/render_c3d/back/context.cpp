@@ -155,8 +155,12 @@ bool release_from_any_thread(const char* who)
 
 void release_and_fini()
 {
-	if (!s_up)
+	// s_up is cleared only at the end (after the logs); a fatal error raised on this thread
+	// while releasing (e.g. by a failing printf) must not release a second time.
+	static bool s_releasing = false;
+	if (!s_up || s_releasing)
 		return;
+	s_releasing = true;
 	++s_releases;
 	printf("[c3d] release #%u: ending the frame, retiring the queue, detaching the top screen\n", s_releases);
 	fflush(stdout);
@@ -181,6 +185,7 @@ void release_and_fini()
 	// Last: a thread waiting in release_from_any_thread() goes on (and may take the console
 	// over) only when this thread is done, logging included.
 	s_up = false;
+	s_releasing = false;
 }
 
 bool top_surrendered()
