@@ -298,3 +298,48 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
    zoom on the console), `STAGE5.md` open items, this file; commit per piece;
    refresh the backup bundle (`STAGE5-PREREQS.md` item 8).
 
+## Stage 10 G0-b runbook (the citro3d GPU present on the console)
+
+Stage 10 is **paused at G0** (user's decision, 2026-10-16; `CITRO3D_DESIGN.md`
+0.5): P1 (`386b7d4`, tag `port-stage10-P1`, branch `stage10-c3d`) passed
+review, but its Azahar gate (G0-a, `present` −50%) cannot be judged in an
+emulator that charges instructions, not cache misses (`PERF.md` "Stage 10
+P1"). G0-b decides it: **keep the GPU present if HUD + Map `present` drops
+≥ 2 ms with no visible change**. Then the user decides G1 (build the 3D
+renderer). Same driving as "How to drive the console"; kill leftover
+3dslink first.
+
+1. **Build** (in the `stage10-c3d` checkout): `build-3ds-prof` (OFF, the P0
+   reference) and `build-3ds-c3d-prof` (`-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`),
+   plus `build-3ds-c3d` (ON, normal) for the functional runs.
+2. **Benchmarks:** the four P0 series on the console (Bottom Screen 0 and 2,
+   Framerate Target 30 and 60, `debug-perf` L0/L6/L20), once with
+   `build-3ds-prof`, once with `build-3ds-c3d-prof` and
+   `scripts/3ds/tests/c3d/p1-gpu.cfg` put on the card as
+   `/3ds/alephone/debug-c3d` (`sd-ftp.sh IP put`). Run **Classic @60 L0 three
+   times** each way (Azahar showed 47.40 → 44.64 fps on one run). Compare
+   `present`, busy and fps; HUD + Map @60 against the target (≥ 55 fps,
+   design 0.5).
+3. **Frame-indexed test** (no tearing, design 5.1): `p1-calibrate-altload.cfg`
+   as `debug-c3d`, @30 and @60; fetch `screen-c3d-cal-*-top.bmp`, check with
+   `python3 -I scripts/3ds/tests/c3d-pixdiff.py cal <files>`: every capture
+   uniform and frame N or N−1. Watch the top screen for tears.
+4. **Functional** (`build-3ds-c3d`, `p1-gpu.cfg`): menus, a dialog in HUD +
+   Map, Classic, HOME and back, sleep (lid) and wake, HOME > Close (log:
+   `gfxExit call #1 (citro3d up: release first)`, `release #1`). Then
+   `p1-vhalt.cfg`: the error screen must appear (in Azahar it is black either
+   way), log one release and two `gfxExit` calls. Then `p1-odd.cfg`: a
+   letterboxed 300x200 test picture once a second.
+5. **Look:** the L20 liquid (Azahar's capture differences there came from
+   timing, critic P1 finding 1); orientation and colours of every screen
+   (transfer flags `FLIP_VERT`, full 512x256).
+6. **Record:** `PERF.md` "Stage 10 P1" (console columns, G0-b verdict),
+   `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
+   `debug-c3d` and `debug-perf` from the card.
+7. **Decide with the user:** keep or drop the GPU present (G0-b); whether to
+   fix the critic's P1 minors (4: `error_screen()` from a non-main thread
+   must not call citro3d; 5: flush 480 KiB, not 512; 1: a `present_diff`
+   self-check mode); whether to try the zero-copy present (critic P1
+   finding 3: one engine edit, the GPU reads `main_surface` from linear
+   memory, TEV reorders the channels); G1.
+
