@@ -31,7 +31,9 @@
 #include <arm_acle.h>   // __uhadd8
 #include <citro3d.h>
 
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <vector>
@@ -184,6 +186,14 @@ void busy_wait_ms(int ms)
 	while (svcGetSystemTick() < end) {}
 }
 
+// test_vhalt 2 / 3: the fatal-error paths on a thread other than main.
+void test_vhalt_thread(void* arg)
+{
+	if (reinterpret_cast<intptr_t>(arg) == 2)
+		abort();   // on_abort -> error_screen -> a1_c3d_release_top
+	vhalt("debug-c3d test_vhalt 3 (second thread)");   // SDL_Quit's gfxExit, then the error screen
+}
+
 } // namespace
 
 bool present_init()
@@ -299,11 +309,23 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		// Also with "present cpu": the same forced vhalt() without citro3d is the baseline of the
 		// error screen.
 		static const uint64_t first = svcGetSystemTick();
-		if (svcGetSystemTick() - first > 20 * kTicksPerSecond)
+		static bool thread_started = false;
+		if (!thread_started && svcGetSystemTick() - first > 20 * kTicksPerSecond)
 		{
-			printf("[c3d] test_vhalt: calling vhalt() (citro3d %s)\n", is_up() ? "up" : "not in use");
+			printf("[c3d] test_vhalt %d: calling %s (citro3d %s)\n", cfg.test_vhalt,
+			       cfg.test_vhalt == 1 ? "vhalt()" : cfg.test_vhalt == 2 ? "abort() on a second thread"
+			                                                             : "vhalt() on a second thread",
+			       is_up() ? "up" : "not in use");
 			fflush(stdout);
-			vhalt("debug-c3d test_vhalt");   // never returns
+			if (cfg.test_vhalt == 1)
+				vhalt("debug-c3d test_vhalt");   // never returns
+			// 2, 3: the error screen from a thread other than main (critic P1 minor 4). Lower
+			// priority than the main thread, same core: it runs while the main thread sleeps
+			// between frames, i.e. possibly between two C3D frames, and the main thread keeps
+			// presenting until it serves the release request.
+			thread_started = true;
+			if (!threadCreate(test_vhalt_thread, reinterpret_cast<void*>(cfg.test_vhalt), 32 * 1024, 0x3f, -2, true))
+				printf("[c3d] test_vhalt: threadCreate failed\n");
 		}
 	}
 	if (!ensure_up())

@@ -807,6 +807,44 @@ citro3d (identical), so Azahar cannot show them.
    staging cost ~1 MiB of the linear heap; design 10, 12).
 6. Whether the L20 liquid difference above also shows there.
 
+### P1 follow-ups (critic P1 minors 4, 5, 1; 2026-10-17)
+
+Fixed on `stage10-c3d` after G0 (no milestone tag). The critic's wording is in its P1
+review; the summary is `NEXT-SPRINT.md` G0-b item 7. Azahar — non-authoritative.
+
+- **Minor 4: `error_screen()` / `gfxExit()` off the main thread.** The critic: "an
+  assert on the audio thread would then make citro3d calls while the main thread may
+  be inside a frame ... record the main thread's id at init; from any other thread,
+  skip the citro3d calls". `back/context.cpp` records the kernel thread id
+  (`svcGetThreadId(CUR_THREAD_HANDLE)`, `svc.h`:913) when citro3d comes up (always in
+  a present, so on the main thread). `a1_c3d_release_top()` and the `gfxExit` wrapper
+  go through `release_from_any_thread()`: on the main thread, unchanged; on another
+  thread, no citro3d call: it sets a request that the main thread's next present
+  serves (release, then the CPU present), and sleeps up to 500 ms for it. If the main
+  thread never presents again (blocked), citro3d is left up; `error_screen()` then
+  keeps off the top screen and `__wrap_gfxExit` skips the real `gfxExit()` (freeing
+  the framebuffers under live GPU frames is worse than leaving them to the process
+  exit that follows). A plain "skip" (the critic's minimum) would have let `SDL_Quit`'s
+  `gfxExit()` on that thread free the framebuffers under the main thread's frames.
+  Callers checked: `main.cpp`:84/97 (main), `csalerts_sdl.cpp`:181 `alert_user` (any
+  thread, via `vhalt`), `on_abort`/`on_terminate` (the failing thread), the two boot
+  errors in `a1_3ds_platform.cpp` (main, before citro3d). New `debug-c3d` values
+  `test_vhalt 2` (`abort()` on a second thread, `p1-vhalt-thread.cfg`) and
+  `test_vhalt 3` (`vhalt()` on a second thread, `p1-vhalt-thread-sdl.cfg`).
+  Results, script `17-c3d-vhalt.txt`:
+  - `p1-vhalt.cfg` (main thread): as in P1: `gfxExit call #1 (citro3d up: release
+    first)`, `release #1`, the error screen, `tap A`, `gfxExit call #2 (citro3d down)`.
+  - `test_vhalt 3`: `gfxExit on a thread other than main (thread 8, main 1): asking the
+    main thread to release`, `release requested by another thread: releasing on the main
+    thread`, `release #1`, the main thread's CPU present starts, `gfxExit: released by
+    the main thread`; then the real `gfxExit()` on thread 8.
+  - Neither off-main run reaches the error screen, **with or without citro3d**
+    (`present cpu`: the same): a pre-existing port problem, now `NEXT-SPRINT.md` backlog
+    item 14. `test_vhalt 2` dies in newlib's `_write_r` before `error_screen()` is
+    reached, so its citro3d hand-off is not exercised in Azahar.
+  - Linear heap: 19912 -> 19908 KiB at boot in every run (the larger program image; the
+    heap is what remains); free after release 17796 KiB, as at boot.
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

@@ -128,6 +128,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
 | 12 | Backup bundle | **Done** (refreshed after each session) | none | no | Closed |
 | 13 | devkitPro LD report | **Deferred by the user** (2026-10-12) | XS | for the repro | Kept as a note; see item 13 |
+| 14 | Fatal error off the main thread | **Found** 2026-10-17 (Azahar, also without citro3d): no error screen | S-M | yes | Ask the user; see item 14 |
 
 Sources in brackets. Statuses were verified against the docs on 2026-10-12.
 
@@ -233,6 +234,21 @@ Azahar) [PERF "Next candidates"]
     the console first (only verified in Azahar), check that `devkitarm-crtls` `master`
     has not fixed it since 2026-10-11, and the user posts it. [STAGE5-PREREQS item 9]
 
+**Found by stage 10's P1 follow-ups**
+14. **A fatal error on a thread other than main never reaches the error screen**
+    (Azahar — non-authoritative, 2026-10-17, branch `stage10-c3d`, `debug-c3d`
+    `present cpu` so citro3d plays no part). `test_vhalt 2` (`abort()` on a second
+    thread): nothing is logged after the call, the error screen does not appear;
+    Azahar logs one null read in newlib's `_write_r` (the first stdio call of
+    `die_with_message`). `test_vhalt 3` (`vhalt()` on a second thread): `SDL_Quit`
+    runs there (`gfxExit` logged, `FATAL:` logged), then the process faults in a loop
+    in libctru `hidScanInput` (HID shut down by `SDL_Quit` while the main thread still
+    scans input). An assertion on the audio thread would end the same way: the 3DS
+    returns to the Homebrew Launcher, or hangs, with no message. The citro3d side is
+    handled (critic P1 minor 4, `PERF.md` "P1 follow-ups"). A fix (e.g. hand the whole
+    fatal path to the main thread, or stop the main thread before `shutdown_application()`)
+    is a design choice for the user, and the console behaviour is unknown.
+
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
 previews are BMPs); Old 3DS untested (no hardware); one controller binding per action;
@@ -330,16 +346,27 @@ renderer). Same driving as "How to drive the console"; kill leftover
    `p1-vhalt.cfg`: the error screen must appear (in Azahar it is black either
    way), log one release and two `gfxExit` calls. Then `p1-odd.cfg`: a
    letterboxed 300x200 test picture once a second.
+   4b. (P1 minor 4) `p1-vhalt-thread-sdl.cfg` with
+   `scripts/3ds/tests/input/17-c3d-vhalt.txt` copied as `debug-input-script`:
+   the log must show `gfxExit on a thread other than main`, `release requested by
+   another thread`, `release #1`, `gfxExit: released by the main thread`, with no
+   crash in citro3d. What happens after that (backlog item 14: in Azahar the process
+   faults in `hidScanInput`, also without citro3d) is recorded, not judged here.
+   Then `p1-vhalt-thread.cfg` likewise (Azahar dies before the hand-off).
 5. **Look:** the L20 liquid (Azahar's capture differences there came from
    timing, critic P1 finding 1); orientation and colours of every screen
    (transfer flags `FLIP_VERT`, full 512x256).
 6. **Record:** `PERF.md` "Stage 10 P1" (console columns, G0-b verdict),
    `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
    `debug-c3d` and `debug-perf` from the card.
-7. **Decide with the user:** keep or drop the GPU present (G0-b); whether to
-   fix the critic's P1 minors (4: `error_screen()` from a non-main thread
-   must not call citro3d; 5: flush 480 KiB, not 512; 1: a `present_diff`
-   self-check mode); whether to try the zero-copy present (critic P1
+7. **Decide with the user:** keep or drop the GPU present (G0-b); the critic's
+   P1 minors (`PERF.md` "P1 follow-ups"):
+   - [x] 4: `error_screen()` from a non-main thread must not call citro3d (done
+     2026-10-17: hand-off to the main thread; console: step 4b);
+   - [ ] 5: flush 480 KiB, not 512;
+   - [ ] 1: a `present_diff` self-check mode;
+
+   whether to try the zero-copy present (critic P1
    finding 3: one engine edit, the GPU reads `main_surface` from linear
    memory, TEV reorders the channels); G1.
 

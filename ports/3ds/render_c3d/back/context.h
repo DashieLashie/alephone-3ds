@@ -44,11 +44,20 @@ inline bool gx_op(F&& op)
 }
 
 // Gives the top screen back and shuts citro3d down; idempotent, returns at once when down.
+// Main thread only.
 void release_and_fini();
+// True on the thread that brought citro3d up (the main thread: presents come only from it).
+bool on_main_thread();
+// release_and_fini() from any thread. On the main thread: release_and_fini(), true. On
+// another thread: no citro3d call; asks the main thread to release at its next present and
+// sleeps until it has (true) or until a bounded wait runs out (false: citro3d still owns the
+// top screen). True at once when citro3d is down. `who` names the caller in the log.
+bool release_from_any_thread(const char* who);
 // present_screen() is about to return false; counted while citro3d is up.
 void note_false_return();
-// Called by __wrap_gfxExit before the real gfxExit(): logs the call, then release_and_fini().
-void gfx_exit_hook();
+// Called by __wrap_gfxExit before the real gfxExit(): logs the call, then
+// release_from_any_thread(). False: citro3d is still up; do not call the real gfxExit().
+bool gfx_exit_hook();
 
 // --- counters (logged in "[c3d] stats" and at release) ---
 void count_present();

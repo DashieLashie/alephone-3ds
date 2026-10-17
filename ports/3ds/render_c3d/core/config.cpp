@@ -24,6 +24,18 @@ bool parse_flag(const std::string& value, bool& out)
 	return false;
 }
 
+// An integer in [lo, hi], digits only.
+bool parse_int(const std::string& value, long lo, long hi, long& out)
+{
+	if (value.empty() || value.size() > 9 || value.find_first_not_of("0123456789") != std::string::npos)
+		return false;
+	const long v = std::stol(value);
+	if (v < lo || v > hi)
+		return false;
+	out = v;
+	return true;
+}
+
 } // namespace
 
 bool config_apply(Config& cfg, const std::string& key, const std::string& value)
@@ -42,7 +54,13 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 	if (key == "odd_surface")
 		return parse_flag(value, cfg.odd_surface);
 	if (key == "test_vhalt")
-		return parse_flag(value, cfg.test_vhalt);
+	{
+		long v = 0;
+		if (!parse_int(value, 0, 3, v))
+			return false;
+		cfg.test_vhalt = static_cast<int>(v);
+		return true;
+	}
 	return false;
 }
 

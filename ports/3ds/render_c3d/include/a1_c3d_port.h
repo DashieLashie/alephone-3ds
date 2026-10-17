@@ -22,7 +22,10 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 
 // Gives the top screen back: ends any open frame, retires the queue, detaches the
 // output and shuts citro3d down. Idempotent; returns at once when citro3d is not up.
-void a1_c3d_release_top();
+// Safe from any thread: off the main thread it makes no citro3d call but hands the release
+// to the main thread and waits for it, bounded. Returns true if citro3d no longer owns the
+// top screen, false if it still does (the hand-off timed out): keep off the top screen.
+bool a1_c3d_release_top();
 
 // present_screen() is about to return false: counted if citro3d is up (design 5.1).
 void a1_c3d_note_false_return();

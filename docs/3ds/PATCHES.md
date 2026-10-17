@@ -856,3 +856,9 @@ symbols).
     `scripts/3ds/run-azahar.sh` `--c3d FILE` (installs `debug-c3d`),
     `scripts/3ds/tests/perf-bench.sh` `C3D=FILE`, `scripts/3ds/tests/c3d-pixdiff.py`
     and `scripts/3ds/tests/c3d/p1-*.cfg` (tests).
+
+    **P1 follow-ups (2026-10-17, port files only, no `Source_Files/` change):**
+    critic minor 4: `a1_c3d_release_top()` now returns whether the top screen is
+    free and is safe from any thread (`render_c3d/back/context.cpp`
+    `release_from_any_thread()`, the `gfxExit` wrapper likewise); `error_screen()`
+    keeps off the top screen when it is not (`PERF.md` "P1 follow-ups").

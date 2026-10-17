@@ -952,8 +952,13 @@ void error_screen(const std::string& title, const std::string& body)
 
 #ifdef A1_RENDER_C3D
 	// citro3d owns the top screen once the GPU present is up: give it back before the
-	// console or SDL draw there (docs/3ds/CITRO3D_DESIGN.md, 1.3, 5.1). Idempotent.
-	a1_c3d_release_top();
+	// console or SDL draw there (docs/3ds/CITRO3D_DESIGN.md, 1.3, 5.1). Idempotent. This
+	// may run on a thread other than main (on_abort/on_terminate, alert_user): then the
+	// release is handed to the main thread, and if that does not happen in time citro3d
+	// keeps the top screen and this screen stays on the bottom one.
+	const bool top_free = a1_c3d_release_top();
+#else
+	const bool top_free = true;
 #endif
 
 	// Before SDL video is up nobody owns the screens yet. After it, SDL owns
@@ -962,7 +967,7 @@ void error_screen(const std::string& title, const std::string& body)
 	// window, e.g. a missing Map) the top would stay black, so use it too.
 	// Every caller exits afterwards, so taking the screen over is harmless.
 	const bool own_gfx = !SDL_WasInit(SDL_INIT_VIDEO);
-	const bool own_top = own_gfx || !SDL_GetKeyboardFocus();
+	const bool own_top = top_free && (own_gfx || !SDL_GetKeyboardFocus());
 	if (own_gfx)
 		gfxInitDefault();
 

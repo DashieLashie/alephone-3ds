@@ -12,7 +12,9 @@
 	                    (screen-c3d-cal-<n>-*.bmp) after presents 120-125, 600-605, 1200-1205, 1800-1805
 	  alt_load 0|1      every second present starts with a 20 ms busy wait (a heavy frame)
 	  odd_surface 0|1   once a second the present is handed a 300x200 RGB565 picture
-	  test_vhalt 0|1    vhalt() 20 s after the first present (the error-screen path)
+	  test_vhalt 0-3    20 s after the first present: 1 = vhalt() (the error-screen path);
+	                    2 = abort() on a second thread, 3 = vhalt() on a second thread (the
+	                    hand-off of a release requested off the main thread, critic P1 minor 4)
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -33,7 +35,7 @@ struct Config
 	bool calibrate = false;
 	bool alt_load = false;
 	bool odd_surface = false;
-	bool test_vhalt = false;
+	int test_vhalt = 0;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
