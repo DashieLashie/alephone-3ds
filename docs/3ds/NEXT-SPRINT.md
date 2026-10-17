@@ -243,7 +243,10 @@ Azahar) [PERF "Next candidates"]
     `die_with_message`). `test_vhalt 3` (`vhalt()` on a second thread): `SDL_Quit`
     runs there (`gfxExit` logged, `FATAL:` logged), then the process faults in a loop
     in libctru `hidScanInput` (HID shut down by `SDL_Quit` while the main thread still
-    scans input). An assertion on the audio thread would end the same way: the 3DS
+    scans input). Even the main-thread `vhalt()` (`test_vhalt 1`, `present cpu`) logs
+    ~8200 null reads in `hidScanInput` in `abort()`'s second error screen, after
+    `SDL_Quit` shut HID down (seen in P1 too: the log stops at "exit"). An assertion
+    on the audio thread would end the same way: the 3DS
     returns to the Homebrew Launcher, or hangs, with no message. The citro3d side is
     handled (critic P1 minor 4, `PERF.md` "P1 follow-ups"). A fix (e.g. hand the whole
     fatal path to the main thread, or stop the main thread before `shutdown_application()`)
@@ -352,7 +355,10 @@ renderer). Same driving as "How to drive the console"; kill leftover
    another thread`, `release #1`, `gfxExit: released by the main thread`, with no
    crash in citro3d. What happens after that (backlog item 14: in Azahar the process
    faults in `hidScanInput`, also without citro3d) is recorded, not judged here.
-   Then `p1-vhalt-thread.cfg` likewise (Azahar dies before the hand-off).
+   Then `p1-vhalt-thread-screen.cfg` (`error_screen()` on a second thread): the
+   same hand-off lines with `release_top`, then the error screen on the bottom screen;
+   press A (the input script cannot reach it). Then `p1-vhalt-thread.cfg` likewise
+   (Azahar dies before the hand-off).
    4c. (P1 minor 1) `p1-diff.cfg` as `debug-c3d`: menus, a dialog, then a game in
    HUD + Map and in Classic for a minute each, then HOME > Close. The log must show
    `present_diff: ... 0 of 96000 pixels differ in RGB` and `present_diff final: N

@@ -41,10 +41,11 @@ namespace {
 constexpr size_t kCmdBufBytes = 512 * 1024;
 
 // How long a thread other than main waits for the main thread to release citro3d
-// (release_from_any_thread). The main thread presents at least every 33 ms in menus and
-// in game; if it has not released after this long it is blocked (e.g. on a lock the
-// dying thread holds) and will not present again.
-constexpr int kHandoffWaitMs = 500;
+// (release_from_any_thread). The main thread presents every 33 ms in menus and in game;
+// whether it presents during a level load (3-4 s on the console) is not established, so the
+// wait covers a few seconds of not presenting: assumed, not measured. Past it the main thread
+// is taken to be blocked (e.g. on a lock the dying thread holds); the process is exiting.
+constexpr int kHandoffWaitMs = 2000;
 
 Config s_cfg;
 bool s_cfg_loaded = false;
@@ -55,6 +56,7 @@ std::atomic<bool> s_up{false};                  // set after a successful init, 
 std::atomic<bool> s_release_requested{false};   // another thread asked the main thread to release
 u32 s_main_thread_id = 0;                       // kernel thread id of the thread that brought citro3d up
 bool s_off = false;         // not in use for the rest of the run (cpu present, init failed, released)
+bool s_surrendered = false; // released for another thread: the top screen is left alone from then on
 bool s_in_frame = false;    // a C3D frame of ours is open
 GxQueue s_gx;
 
@@ -116,7 +118,11 @@ bool on_main_thread()
 bool release_from_any_thread(const char* who)
 {
 	if (!s_up)
+	{
+		// Not up (yet): make sure it never comes up after a fatal error elsewhere (ensure_up).
+		s_release_requested = true;
 		return true;
+	}
 	if (on_main_thread())
 	{
 		release_and_fini();
@@ -167,12 +173,19 @@ void release_and_fini()
 	present_detach();
 	C3D_Fini();
 	present_free();
-	s_up = false;
 	s_off = true;
 	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",
 	       kib(linearSpaceFree()), kib(vramSpaceFree()));
 	log_final_stats();
 	fflush(stdout);
+	// Last: a thread waiting in release_from_any_thread() goes on (and may take the console
+	// over) only when this thread is done, logging included.
+	s_up = false;
+}
+
+bool top_surrendered()
+{
+	return s_surrendered;
 }
 
 bool is_up()
@@ -192,12 +205,16 @@ bool ensure_up()
 	{
 		if (!s_release_requested)
 			return true;
-		// The other half of release_from_any_thread(): this is the main thread.
-		printf("[c3d] release requested by another thread: releasing on the main thread\n");
+		// The other half of release_from_any_thread(): this is the main thread. From now on
+		// the top screen is left alone (top_surrendered()): the requester goes on to the real
+		// gfxExit(), and a CPU present would write into framebuffers being freed.
+		printf("[c3d] release requested by another thread: releasing on the main thread; the top screen "
+		       "is left alone from now on\n");
+		s_surrendered = true;
 		release_and_fini();
 		return false;
 	}
-	if (s_off)
+	if (s_off || s_release_requested)
 		return false;
 	load_config();
 	if (!s_cfg.present_gpu)

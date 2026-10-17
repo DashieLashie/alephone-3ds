@@ -12,9 +12,10 @@
 	                    (screen-c3d-cal-<n>-*.bmp) after presents 120-125, 600-605, 1200-1205, 1800-1805
 	  alt_load 0|1      every second present starts with a 20 ms busy wait (a heavy frame)
 	  odd_surface 0|1   once a second the present is handed a 300x200 RGB565 picture
-	  test_vhalt 0-3    20 s after the first present: 1 = vhalt() (the error-screen path);
-	                    2 = abort() on a second thread, 3 = vhalt() on a second thread (the
-	                    hand-off of a release requested off the main thread, critic P1 minor 4)
+	  test_vhalt 0-4    20 s after the first present: 1 = vhalt() (the error-screen path);
+	                    2 = abort() on a second thread, 3 = vhalt() on a second thread, 4 =
+	                    error_screen() on a second thread (the hand-off of a release requested
+	                    off the main thread, critic P1 minor 4)
 	  present_diff N    0 = off (default); N > 0: every N-th present, the picture the CPU present
 	                    would show (video_3ds.cpp's own code, into a 240x400 buffer) is compared
 	                    with the framebuffer the GPU present wrote, at the next present; per-check

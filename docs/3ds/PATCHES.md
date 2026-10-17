@@ -861,7 +861,8 @@ symbols).
     critic minor 4: `a1_c3d_release_top()` now returns whether the top screen is
     free and is safe from any thread (`render_c3d/back/context.cpp`
     `release_from_any_thread()`, the `gfxExit` wrapper likewise); `error_screen()`
-    keeps off the top screen when it is not (`PERF.md` "P1 follow-ups").
+    keeps off the top screen when it is not, and does not re-init gfx then
+    (`PERF.md` "P1 follow-ups").
     Critic minor 5: `render_c3d/back/present.cpp` flushes the staging's written rows
     (`kStagingWrittenBytes`, 512x240, 480 KiB) instead of the whole 512 KiB.
     Critic minor 1: `debug-c3d` `present_diff N` (`render_c3d/core/config.*`,

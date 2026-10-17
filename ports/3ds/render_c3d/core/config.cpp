@@ -56,7 +56,7 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 	if (key == "test_vhalt")
 	{
 		long v = 0;
-		if (!parse_int(value, 0, 3, v))
+		if (!parse_int(value, 0, 4, v))
 			return false;
 		cfg.test_vhalt = static_cast<int>(v);
 		return true;

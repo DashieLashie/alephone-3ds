@@ -108,7 +108,9 @@ constexpr size_t kFbPixels = static_cast<size_t>(kScreenW) * kScreenH;
 u32* s_diff_ref = nullptr;            // malloc'd 240x400 RGBA8, the CPU present's picture
 const u32* s_diff_fb = nullptr;       // the checked present's framebuffer, compared at the next present
 unsigned s_diff_present = 0;          // the checked present's number
-unsigned s_diff_checks = 0, s_diff_bad = 0, s_diff_skipped = 0, s_diff_logged = 0;
+unsigned s_diff_checks = 0, s_diff_bad = 0, s_diff_logged = 0;
+unsigned s_diff_no_cpu = 0;           // not checkable: no CPU present for the surface
+unsigned s_diff_fb_size = 0;          // not checkable: unexpected framebuffer size
 unsigned s_diff_max[4] = {0, 0, 0, 0};   // R, G, B, A over every check
 
 // Odd-surface test state.
@@ -276,11 +278,19 @@ void diff_compare()
 	s_diff_fb = nullptr;
 }
 
-// test_vhalt 2 / 3: the fatal-error paths on a thread other than main.
+// test_vhalt 2 / 3 / 4: the fatal-error paths on a thread other than main.
 void test_vhalt_thread(void* arg)
 {
-	if (reinterpret_cast<intptr_t>(arg) == 2)
+	const intptr_t mode = reinterpret_cast<intptr_t>(arg);
+	if (mode == 2)
 		abort();   // on_abort -> error_screen -> a1_c3d_release_top
+	if (mode == 4)
+	{
+		// error_screen() itself, without die_with_message's stdio first (critic P1 review
+		// round 1, finding 6): a1_c3d_release_top() off the main thread and top_free.
+		a1_3ds::error_screen("debug-c3d test_vhalt 4", "error_screen() called on a second thread.");
+		_Exit(1);
+	}
 	vhalt("debug-c3d test_vhalt 3 (second thread)");   // SDL_Quit's gfxExit, then the error screen
 }
 
@@ -379,11 +389,11 @@ void present_free()
 	if (s_staging)
 		linearFree(s_staging);
 	s_staging = nullptr;
-	if (s_diff_checks || s_diff_skipped)
-		printf("[c3d] present_diff final: %u checks, %u with RGB differences, %u presents not checkable (no CPU "
-		       "path for the surface); max |diff| R %u G %u B %u A %u\n",
-		       s_diff_checks, s_diff_bad, s_diff_skipped, s_diff_max[0], s_diff_max[1], s_diff_max[2],
-		       s_diff_max[3]);
+	if (s_diff_checks || s_diff_no_cpu || s_diff_fb_size)
+		printf("[c3d] present_diff final: %u checks, %u with RGB differences; not checkable: %u (no CPU present "
+		       "for the surface), %u (framebuffer size); max |diff| R %u G %u B %u A %u\n",
+		       s_diff_checks, s_diff_bad, s_diff_no_cpu, s_diff_fb_size, s_diff_max[0], s_diff_max[1],
+		       s_diff_max[2], s_diff_max[3]);
 	free(s_diff_ref);
 	s_diff_ref = nullptr;
 	s_diff_fb = nullptr;
@@ -410,9 +420,9 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		static bool thread_started = false;
 		if (!thread_started && svcGetSystemTick() - first > 20 * kTicksPerSecond)
 		{
-			printf("[c3d] test_vhalt %d: calling %s (citro3d %s)\n", cfg.test_vhalt,
-			       cfg.test_vhalt == 1 ? "vhalt()" : cfg.test_vhalt == 2 ? "abort() on a second thread"
-			                                                             : "vhalt() on a second thread",
+			static const char* const what[] = {"", "vhalt()", "abort() on a second thread",
+			                                   "vhalt() on a second thread", "error_screen() on a second thread"};
+			printf("[c3d] test_vhalt %d: calling %s (citro3d %s)\n", cfg.test_vhalt, what[cfg.test_vhalt],
 			       is_up() ? "up" : "not in use");
 			fflush(stdout);
 			if (cfg.test_vhalt == 1)
@@ -422,12 +432,12 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 			// between frames, i.e. possibly between two C3D frames, and the main thread keeps
 			// presenting until it serves the release request.
 			thread_started = true;
-			if (!threadCreate(test_vhalt_thread, reinterpret_cast<void*>(cfg.test_vhalt), 32 * 1024, 0x3f, -2, true))
+			if (!threadCreate(test_vhalt_thread, reinterpret_cast<void*>(cfg.test_vhalt), 64 * 1024, 0x3f, -2, true))
 				printf("[c3d] test_vhalt: threadCreate failed\n");
 		}
 	}
 	if (!ensure_up())
-		return false;
+		return top_surrendered();   // true: the frame is "presented" by leaving the top screen alone
 	const unsigned n = ++s_present;
 	const uint64_t now = svcGetSystemTick();
 	count_present();
@@ -491,7 +501,7 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 	{
 		diff_ready = diff_prepare(src, src_pitch, src_w, src_h, src_fmt);
 		if (!diff_ready)
-			++s_diff_skipped;
+			++s_diff_no_cpu;
 	}
 
 	// 2. Staging, written only now that the previous transfer has read the old one.
@@ -565,7 +575,7 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 			s_diff_present = n;
 		}
 		else
-			++s_diff_skipped;
+			++s_diff_fb_size;
 	}
 	frame_end(1);
 

@@ -22,6 +22,9 @@ namespace back {
 // True while citro3d is up and may be used.
 bool ensure_up();
 bool is_up();
+// True once citro3d was released for another thread (release_from_any_thread): the present
+// then draws nothing, CPU or GPU, for the rest of the run.
+bool top_surrendered();
 const Config& config();
 
 // --- the frame, and the GX queue budget (design 2.4) ---

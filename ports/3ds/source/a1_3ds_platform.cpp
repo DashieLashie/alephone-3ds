@@ -966,7 +966,8 @@ void error_screen(const std::string& title, const std::string& body)
 	// on top if a window has shown one; until then (SDL_Init to the main
 	// window, e.g. a missing Map) the top would stay black, so use it too.
 	// Every caller exits afterwards, so taking the screen over is harmless.
-	const bool own_gfx = !SDL_WasInit(SDL_INIT_VIDEO);
+	// With citro3d still up (top_free false) gfx is necessarily initialised.
+	const bool own_gfx = top_free && !SDL_WasInit(SDL_INIT_VIDEO);
 	const bool own_top = top_free && (own_gfx || !SDL_GetKeyboardFocus());
 	if (own_gfx)
 		gfxInitDefault();
