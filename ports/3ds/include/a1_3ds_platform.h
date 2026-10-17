@@ -68,6 +68,16 @@ void main_menu_displayed();
 // system asks the application to close. Also writes it to the log.
 void error_screen(const std::string& title, const std::string& body);
 
+// --- Player name (docs/3ds/PATCHES.md 50) ------------------------------------
+
+// The user name of the console's profile (System Settings > Other Settings >
+// Profile), UTF-8, from the CFGU config block 0x000A0000. Empty if it cannot be
+// read, is empty or blank, or is not valid UTF-16 (the engine then keeps its
+// default "Bob User"). Read once; later calls return the same string. Main thread.
+// Debug: sdmc:/3ds/alephone/debug-player-name, hex UTF-16 code units separated
+// by spaces, replaces the block's contents (to test the fallbacks).
+const std::string& console_user_name();
+
 // --- Entropy (docs/3ds/STAGE5-PREREQS.md item 2) -----------------------------
 
 // devkitARM's std::random_device has no entropy source: it is mt19937 with

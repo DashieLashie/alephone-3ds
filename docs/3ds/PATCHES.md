@@ -826,3 +826,37 @@ volumes): `screen.cpp` (for `screen_shared.h`), `marathon2.cpp` and
 `SoundManager.cpp` byte-identical; `game_wad.cpp` (8 lines),
 `SoundFile.cpp` (2) and `preferences.cpp` (20) differ only in numbers:
 0 lines with numbers normalised. 0 diagnostics.
+
+## Backlog item 9: player name (50)
+
+Added 2026-10-17 on branch `3ds-port-player-name` (off `3ds-port`). Numbers
+45-48 are reserved and 49 is used by stage 10 (`stage10-c3d`), so this is 50:
+no collision when the branches meet.
+
+50. **`Misc/preferences.cpp`: the default player name from the console
+    profile.** `get_name_from_system()` (it seeds `player_preferences->name`
+    only when no preferences exist) gains an `#elif defined(A1_PLATFORM_3DS)`
+    branch: `utf8_to_mac_roman(a1_3ds::console_user_name())`, kept if any
+    character survives the conversion (a name made only of characters Mac
+    Roman lacks would be all `?`), else the existing `return "Bob User"`. The
+    field is Mac Roman (the name dialog's `enable_mac_roman_input()`, the prefs
+    XML's `put_attr_cstr`/`read_cstr` convert at the boundary); upstream's
+    Windows branch puts UTF-8 there. Plus a forward declaration next to patch
+    41's. The port side (`ports/3ds/source/a1_3ds_platform.cpp`,
+    `include/a1_3ds_platform.h`): `console_user_name()` reads config block
+    0x000A0000 with `CFGU_GetConfigInfoBlk2(0x1C, ...)` (`cfgu.h`:112; the block
+    is cited in `uds.h`:30: `u16 username[10]`), in a `cfguInit()`/`cfguExit()`
+    pair of its own (libctru reference-counts the session; nothing is left
+    open), once, cached; up to 10 UTF-16 units to the first NUL, checked with
+    `decode_utf16` (invalid or control characters: empty), converted with
+    `utf16_to_utf8` (`util/utf.h`:106), trimmed; logged as `[3ds] player name
+    from ...`. `sdmc:/3ds/alephone/debug-player-name` (hex UTF-16 units)
+    replaces the block for tests (`scripts/3ds/tests/input/18-player-name-default.txt`).
+    **Not patched:** `CSeries/cspaths_sdl.cpp`:108 ("Bob User" in
+    `_get_legacy_login_name()`) is in the `__WIN32__` branch; the 3DS compiles
+    its own `A1_PLATFORM_3DS` branch, where the legacy paths are `""`, so no
+    login name is used there.
+
+**Non-3DS check** (2026-10-17, `ppcheck.sh`, both volumes): `preferences.cpp`
+DIFFER (20 lines), 0 lines with numbers normalised (only `__LINE__` moved);
+`-fsyntax-only` 0 diagnostics.

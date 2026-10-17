@@ -1,0 +1,20 @@
+# Backlog item 9: the default player name from the console profile (CFGU,
+# docs/3ds/PATCHES.md 50). Run with --reset-prefs (the name only seeds new
+# preferences) and optionally sdmc:/3ds/alephone/debug-player-name (hex UTF-16
+# units) to fake a name. Preferences > Player is captured: its Name field shows
+# the profile name, or "Bob User" when there is none. The log says what was read
+# ("[3ds] player name from ...").
+wait 1000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 1500
+touch 160 76           # PLAYER
+wait 150
+untouch
+wait 1500
+screens player-default
+tap B
+wait 800
+tap B
+wait 800

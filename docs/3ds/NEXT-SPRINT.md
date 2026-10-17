@@ -123,7 +123,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | 6 | HOME > Close in the demo | **Measured**: 13.4 s, 12.5 s of it the scenario reload; the APT exit hook had not run | S | yes | With item 3's reload; check the exit hook |
 | 7 | C-Stick vertical look | **Done**: "feels right now" (2026-10-13) | none | no | Closed |
 | 8 | Prefs `rate="44100"` | **Done**: 32728 on the card (2026-10-13); `audio` 10.2-10.8 → 7.7-7.8 ms | none | no | Closed |
-| 9 | Player name from CFGU | Deferred (twice) | S | no | Skip unless asked |
+| 9 | Player name from CFGU | **Done in Azahar** (2026-10-17, `PATCHES.md` 50); console check pending | XS: check | yes | Catch-up runbook, run C |
 | 10 | 400x240 menu layouts | Deferred | L | yes | Its own stage |
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
 | 12 | Backup bundle | **Done** (refreshed after each session) | none | no | Closed |
@@ -209,8 +209,17 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    32728, which also tests whether item 4's long frame goes away. [STAGE6 item 5]
    **Done (2026-10-13):** the card's prefs say 32728; the `audio` zone fell from
    10.2-10.8 to 7.7-7.8 ms; item 4's frame stayed.
-9. Player name from the console profile (CFGU) instead of "Bob User". Cosmetic,
-   deferred twice by the user. **Deferred.** [STAGE3 stub 4; STAGE5 item 6]
+9. Player name from the console profile (CFGU) instead of "Bob User". **Done in
+   Azahar — non-authoritative (2026-10-17, branch `3ds-port-player-name`,
+   `PATCHES.md` 50); console check pending** (catch-up runbook, run C). New
+   preferences take the profile's name (config block 0x000A0000, UTF-16 ->
+   UTF-8 -> the field's Mac Roman); a saved name is kept. Azahar, script
+   `18-player-name-default.txt` with `--reset-prefs`: the profile's "AZAHAR" in
+   the log, the Player dialog and the saved prefs. Faked with
+   `debug-player-name`: empty, blank, a lone surrogate (D800) and a control
+   character fall back to "Bob User" with the reason logged; "Eléonore" kept
+   (Mac Roman has é); kana ("あいう", nothing Mac Roman can show) falls back;
+   14 units are cut to the field's 10. [STAGE3 stub 4; STAGE5 item 6]
 
 **Screens**
 10. Menus, chapter screens and dialogs are still the 640x480 logical screen halved into
@@ -289,7 +298,11 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
    pattern buffer (the "save_game_file: ..." marks split the 69 s), quit to
    the main menu ("environment: ..." marks split the 12 s), wait for the
    demo, HOME > Close (is there a "system asked the application to close"
-   line?). Fetch `log.txt` over ftpd.
+   line?). Fetch `log.txt` over ftpd. Player name (backlog item 9): the log's
+   `[3ds] player name from the console profile: "..."` line shows the console's
+   profile name (on a card with saved preferences the name in them is kept:
+   to see it in Preferences > Player, move `Marathon 2 Preferences` aside with
+   ftpd first and put it back afterwards).
 5. **Decide with the user** from the numbers: the slow save step (fix it, or a
    "Saving..." message as the user asked if it cannot be fixed); the next
    step of the scenario reload and boot (the dialog theme's 5.2 s too).
