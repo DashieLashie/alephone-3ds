@@ -36,6 +36,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef A1_RENDER_C3D
+#include "a1_c3d_port.h"
+#endif
+
 namespace a1_3ds {
 
 namespace {
@@ -139,7 +143,9 @@ bool present_native(const void* pixels, int pitch)
 
 } // namespace
 
-bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
+namespace {
+
+bool present_screen_cpu(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
 {
 	if (width == kScreenW && height == kScreenH && gfxGetScreenFormat(GFX_TOP) == GSP_RGBA8_OES &&
 	    (sdl_format == SDL_PIXELFORMAT_RGB888 || sdl_format == SDL_PIXELFORMAT_ARGB8888))
@@ -205,6 +211,24 @@ bool present_screen(const void* pixels, int pitch, int width, int height, uint32
 	GSPGPU_FlushDataCache(fb, kScreenW * kScreenH * sizeof(u32));
 	gfxScreenSwapBuffers(GFX_TOP, false);
 	return true;
+}
+
+} // namespace
+
+bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
+{
+#ifdef A1_RENDER_C3D
+	// The GPU present (docs/3ds/CITRO3D_DESIGN.md, 5.1): citro3d owns the top screen once it
+	// is up and takes every surface it is given. False only while it is not in use.
+	if (a1_c3d_present(pixels, pitch, width, height, sdl_format))
+		return true;
+#endif
+	const bool done = present_screen_cpu(pixels, pitch, width, height, sdl_format);
+#ifdef A1_RENDER_C3D
+	if (!done)
+		a1_c3d_note_false_return();
+#endif
+	return done;
 }
 
 bool present_bottom(const void* pixels, int pitch)

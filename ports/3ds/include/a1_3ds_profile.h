@@ -35,6 +35,9 @@ enum Zone
 	Bottom,     // the bottom screen in game: HUD/map, buttons, present (bottom_3ds.cpp)
 	Idle,       // in-game frame pacing sleep (shell.cpp)
 	Overlay,    // this profiler's overlay, once a second; not in the frame times
+#ifdef A1_RENDER_C3D
+	C3dWait,    // C3D_FrameBegin(0): waiting for the previous citro3d frame (inside Present)
+#endif
 	kZoneCount
 };
 

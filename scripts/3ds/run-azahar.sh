@@ -23,6 +23,9 @@
 #   --script FILE  run FILE as sdmc:/3ds/alephone/debug-input-script once the main menu is
 #                  up (scripted buttons, sticks, touches, HOME/sleep; see
 #                  ports/3ds/source/input_3ds.cpp and scripts/3ds/tests/input/)
+#   --c3d FILE     install FILE as sdmc:/3ds/alephone/debug-c3d for this run (settings of the
+#                  citro3d back end, a -DA1_RENDER_C3D=ON build: ports/3ds/render_c3d/core/config.h;
+#                  docs/3ds/CITRO3D_DESIGN.md section 7); without it the file is removed
 #   --reset-prefs  move the game's preferences aside first (to <file>.bak), so it starts
 #                  with the defaults
 #   --audio-debug  audio statistics on the bottom screen and in the log every 5 s, plus a
@@ -65,6 +68,7 @@ timeout=0
 screens=0
 input_debug=0
 script=
+c3d_cfg=
 reset_prefs=0
 audio_debug=0
 no_dspfirm=0
@@ -82,6 +86,7 @@ while [ $# -gt 0 ]; do
 		--screens) screens=1 ;;
 		--input-debug) input_debug=1 ;;
 		--script) shift; script=${1:?--script needs a file} ;;
+		--c3d) shift; c3d_cfg=${1:?--c3d needs a file} ;;
 		--reset-prefs) reset_prefs=1 ;;
 		--audio-debug) audio_debug=1 ;;
 		--no-dspfirm) no_dspfirm=1 ;;
@@ -203,6 +208,12 @@ if [ -n "$script" ]; then
 	cp "$script" "$userdir/debug-input-script"
 else
 	rm -f "$userdir/debug-input-script"
+fi
+if [ -n "$c3d_cfg" ]; then
+	[ -f "$c3d_cfg" ] || die "c3d config $c3d_cfg not found"
+	cp "$c3d_cfg" "$userdir/debug-c3d"
+else
+	rm -f "$userdir/debug-c3d"
 fi
 if [ "$reset_prefs" = 1 ]; then
 	for prefs in "$userdir"/*Preferences; do

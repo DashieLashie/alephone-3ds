@@ -18,7 +18,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
 36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 and an update to 19
-in the sprint after it (`NEXT-SPRINT.md`).
+in the sprint after it (`NEXT-SPRINT.md`), 49 in stage 10 (`CITRO3D_DESIGN.md`; 45-48 are
+reserved there for the engine hooks of M0, M2, M6 and M8).
 
 ## Summary
 
@@ -68,6 +69,7 @@ in the sprint after it (`NEXT-SPRINT.md`).
 | 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
 | 43 | `Source_Files/Sound/SoundFile.cpp` | a sound header, and a sound's samples, read with one read each and parsed from memory | none |
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
+| 49 | `ports/3ds/source/video_3ds.cpp`, `a1_3ds_platform.cpp`, `profile_3ds.cpp`, `include/a1_3ds_profile.h`, `CMakeLists.txt`, `render_c3d/` (new port files, no upstream edit; `A1_RENDER_C3D=ON` builds only) | stage 10 P1: citro3d owns the top screen, GPU present | none (the CPU present stays as `debug-c3d` `present cpu` and in the default build) |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -826,3 +828,31 @@ volumes): `screen.cpp` (for `screen_shared.h`), `marathon2.cpp` and
 `SoundManager.cpp` byte-identical; `game_wad.cpp` (8 lines),
 `SoundFile.cpp` (2) and `preferences.cpp` (20) differ only in numbers:
 0 lines with numbers normalised. 0 diagnostics.
+
+## Stage 10: citro3d (49)
+
+Added 2026-10-16 on branch `stage10-c3d` (`CITRO3D_DESIGN.md`). **No engine
+(`Source_Files/`) file changes in P1**, so there is no `ppcheck.sh` run: the
+host build does not compile `ports/3ds/`, and the diffstat against `3ds-port`
+lists no `Source_Files/` path. Everything is behind the `A1_RENDER_C3D` CMake
+option (OFF by default; `nm` on the OFF `alephone.elf`: no `C3D_`/citro3d
+symbols).
+
+49. **P1, the GPU present** (port files only). `ports/3ds/CMakeLists.txt`:
+    option `A1_RENDER_C3D` (defines `A1_RENDER_C3D`), the sources
+    `render_c3d/{core/config.cpp,back/context.cpp,back/present.cpp}`, the
+    shader `render_c3d/shaders/present.v.pica` (picasso via
+    `ctr_add_shader_library`, embedded with `dkp_add_embedded_binary_library`),
+    `citro3d ctru` linked, `-Wl,--wrap=gfxExit`.
+    `source/video_3ds.cpp`: `present_screen()` first calls
+    `a1_c3d_present()` (citro3d, lazily initialised at the first present, owns
+    the top screen from then on); the unchanged CPU code is now
+    `present_screen_cpu()`, used when `a1_c3d_present()` returns false
+    (`debug-c3d` `present cpu`, init failed, ownership given up), and
+    `a1_c3d_note_false_return()` counts a false return while citro3d is up.
+    `source/a1_3ds_platform.cpp` `error_screen()`: `a1_c3d_release_top()`
+    first. `include/a1_3ds_profile.h`, `source/profile_3ds.cpp`: the zone
+    `c3d_wait` (`C3D_FrameBegin(0)`, A1_RENDER_C3D builds only).
+    `scripts/3ds/run-azahar.sh` `--c3d FILE` (installs `debug-c3d`),
+    `scripts/3ds/tests/perf-bench.sh` `C3D=FILE`, `scripts/3ds/tests/c3d-pixdiff.py`
+    and `scripts/3ds/tests/c3d/p1-*.cfg` (tests).

@@ -54,6 +54,9 @@ namespace {
 const char kDebugPerfFile[] = "debug-perf";
 const char* const kZoneNames[kZoneCount] = {
 	"world", "render", "hud", "blit", "present", "bottom", "idle", "overlay"
+#ifdef A1_RENDER_C3D
+	, "c3d_wait"
+#endif
 };
 
 constexpr uint64_t kTicksPerSecond = SYSCLOCK_ARM11;

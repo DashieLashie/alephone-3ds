@@ -752,6 +752,61 @@ Logs in `build/perf/p0-*` (not in git). busy = frame − idle.
   console question (G0-b, design section 10).
 - Console runs of the four series: pending (design section 10, item 3).
 
+## Stage 10 P1: GPU present (Azahar — non-authoritative)
+
+Recorded 2026-10-16 on branch `stage10-c3d`. `-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`
+build, `debug-c3d` `present gpu`, the same four series as P0
+(`PREFS=... C3D=scripts/3ds/tests/c3d/p1-gpu.cfg RUNS=1 perf-bench.sh p1-<mode><fps>`),
+Azahar 2126.2, no DSP firmware. Logs in `build/perf/p1-*` (not in git).
+Design: `CITRO3D_DESIGN.md` 5.1; the code is `ports/3ds/render_c3d/`.
+
+| Series | fps L0 / L6 / L20 (P0 in brackets) | present, P0 -> P1 | idle L0 / L6 / L20, P0 -> P1 |
+| --- | --- | --- | --- |
+| HUD + Map @30 | 30.32 / 30.32 / 30.35 (30.31 / 30.32 / 30.36) | 1.41 -> **1.74** | 15.65 / 17.44 / 17.73 -> 14.84 / 17.10 / 17.42 |
+| HUD + Map @60 | 51.93 / 57.30 / 56.50 (52.62 / 58.07 / 57.09) | 1.47-1.49 -> **1.75-1.77** | 0.65 / 1.29 / 1.42 -> 0.57 / 1.21 / 1.34 |
+| Classic @30 | 30.36 / 30.34 / 30.36 (30.36 / 30.36 / 30.36) | 6.04-6.24 -> 6.14-6.25 | 11.39 / 13.49 / 13.63 -> 11.25 / 13.52 / 13.63 |
+| Classic @60 | 44.64 / 52.66 / 52.90 (47.40 / 52.91 / 52.74) | 4.59-4.62 -> 4.94-5.77 | 0.01 / 0.26 / 0.59 -> 0.01 / 0.01 / 0.03 |
+
+`c3d_wait` (`C3D_FrameBegin(0)`) is 0.00 in every run: Azahar finishes a GPU
+frame synchronously, so it says nothing about the console.
+
+**G0-a verdict: not met, on the `present` criterion.**
+
+| G0-a item | Result |
+| --- | --- |
+| scripts 07, 08, 13, 14 pass (13 and 14 in both Bottom Screen settings) | **pass**: run to the end, captures as before, 0 `present_screen()` false returns, HOME > Close logs release before `gfxExit` |
+| frame-indexed test @30 and @60 with `alt_load` | **pass**: 24 captures (6 each after presents 120 and 600, per rate), every one uniform and showing frame N (Azahar completes the GPU frame before `C3D_FrameEnd` returns, so N-1 and a mixed image cannot show; console only) |
+| captures <= 1/channel, Classic byte-identical | **mostly**: scripts 07 menus/dialog: top and bottom byte-identical to `present cpu` (3 captures x 2 runs). perf-bench end-of-run captures vs P0: 9 of 12 byte-identical (HUD + Map @30 L0/L6/L20, and L0/L6 of the other three series); 3 differ (L20 of HUD + Map @60, Classic @30, Classic @60): the differing pixels are all inside the animated liquid area of L20 (Classic @30: x 80-319, y 94-139, R identical, G/B up to 51) and `present cpu` of the same build matches P0 byte for byte, so the CPU path is deterministic and the GPU run differs. Not explained by the present (every non-water pixel is identical, the 640x480 halving is byte-identical elsewhere); probably the liquid's tick differs at the capture instant because the frame timing differs. **Open**: confirm with a capture at a fixed tick |
+| `present` zone drops >= 50% in HUD + Map | **FAIL: +23% (1.41 -> 1.74)**. Breakdown (temporary per-step timers, HUD + Map @30 L0, ms per present): staging fill 1.34, `C3D_FrameEnd` 0.31, flush 0.06, transfer + draw 0.02. The CPU present's rotate-copy costs 1.41 in total. Azahar counts instructions, not cache misses, so a row-major copy is no cheaper than the rotated one; the console saving (design 9.3: 4.33 -> ~1.2) comes from the rotated stores' cache behaviour, which Azahar does not model. The 2x2 UHADD8 halving (Classic) costs the same either way. The fill loop is unrolled by 8 (2.17 -> 1.34 ms); no further instruction-level saving is available while the CPU converts XRGB to RGBA |
+
+The criterion cannot be met by this design in Azahar; G0-b (console) is the real
+test. The user decides whether G0-a stands as failed or is waived for that reason.
+
+Other P1 measurements (Azahar, deterministic): `[c3d] init ok: command buffer 512 KiB;
+linear free 17800 -> 16775 KiB, VRAM free 0 -> 5257 KiB` (`vramSpaceFree()` is 0
+before the first VRAM allocation; 6144 - 5257 = 887 KiB as in 9.1); GX high-water
+3 queue entries per frame (limit 4), 0 refused; command buffer use 0.09%; after
+release: linear 17800 KiB, VRAM 6144 KiB free again. `odd_surface 1`: a 300x200
+RGB565 picture, converted and letterboxed by the GPU present, correct picture and
+orientation, 0 false returns. `test_vhalt 1`: one `[c3d] release` (from `SDL_Quit`'s
+`gfxExit`), `gfxExit` #1 (up, released) and #2 (down) logged in order, the error
+screen is reached and left; the error screen captures are black with and without
+citro3d (identical), so Azahar cannot show them.
+
+### Needs console verification (P1)
+
+1. citro3d + SDL N3DS + the bottom-screen console: HOME, sleep, HOME > Close, the
+   error screen, `C3D_Fini` before `gfxExit` (normal exit, `vhalt`, `abort`) (design 10, 1).
+2. No tearing and frame N or N-1 only (the frame-indexed test with `alt_load`) @30 and
+   @60; the VBlank guard before `C3D_FrameEnd`; ordering margin (design 10, 2).
+3. The four series on the console (design 10, 3); G0-b: `present` -2 ms in HUD + Map.
+4. Orientation and transfer flags (`FLIP_VERT(1)` upload, full 512x256 transfer,
+   `OUT_FORMAT(RGBA8)` target; design 10, 8): Azahar needed the whole-texture transfer
+   (a 512x240 transfer shifted the picture 16 rows).
+5. Linear heap and VRAM free on the console (the 512 KiB command buffer and 512 KiB
+   staging cost ~1 MiB of the linear heap; design 10, 12).
+6. Whether the L20 liquid difference above also shows there.
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

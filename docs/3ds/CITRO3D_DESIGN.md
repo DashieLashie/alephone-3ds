@@ -635,6 +635,21 @@ presented by C3D, counter still 0. (`main_surface` is always ARGB8888,
 [AUDIT.md](AUDIT.md):416; bit depth changes only `world_pixels`, so a
 bit-depth run does not exercise this.)
 
+**P1 calibration record (Azahar 2126.2, 2026-10-16; `render_c3d/back/present.cpp`).**
+The upload transfer must cover the **whole texture**: with the staging image and both
+transfer dimensions 512x240 into the 512x256 texture, the picture came out 16 rows
+too low (Azahar). Staging is therefore 512x256 (512 KiB; 9.2 said 480) and the
+transfer is `GX_BUFFER_DIM(512, 256)` on both sides. Flags:
+`GX_TRANSFER_FLIP_VERT(1) | OUT_TILED(1) | RAW_COPY(0) | IN/OUT_FORMAT(RGBA8) |
+SCALING(NO)`; without the flip the picture is upside down. The quad is
+`Mtx_OrthoTilt(0, 400, 240, 0, 0, 1, true)` (y down) with texcoord `(x/512, y/256)`,
+nearest filter, clamp; the linked target's flags are `simple_tri`'s with
+`OUT_FORMAT(RGBA8)`. With these the 400x240 and 640x480 captures are byte-identical
+to the CPU present. The orientation flags are the part most likely to differ on
+hardware (section 10, item 8). `vramSpaceFree()` reports 0 before the first VRAM
+allocation, so "VRAM free before" is only meaningful as 6 144 KiB (known total);
+after init it is 5 257 KiB = 6 144 - 887 (9.1).
+
 ### 5.2 Readback mode (M0-M5): downstream unchanged
 
 `render_frame()` opens its own C3D frame (view frame) and closes it before
@@ -931,12 +946,12 @@ hold in every mode with the default caps.
 | Item | KiB |
 | --- | ---: |
 | command buffer (one buffer, 0.3; 512 default, up to 1 024 by M1) | 512-1 024 |
-| present staging 512x240 RGBA8 | 480 |
+| present staging 512x256 RGBA8 (P1 calibration, 5.1) | 512 |
 | vertex ring 2 × 16 384 × 32 B (re-sized from M0) | 1 024 |
 | index ring 2 × 32 768 × 2 B | 128 |
 | readback staging 480x240 | 450 |
 | linear texture pool (cap; holds promotions pending) | 4 096 |
-| **total** | ≤ 7 202 |
+| **total** | ≤ 7 234 |
 
 No change to `__ctru_linear_heap_size` needed on the New 3DS
 (`a1_3ds_platform.cpp`:43-50 "revisit then": revisited). Azahar's split is

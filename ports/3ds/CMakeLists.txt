@@ -21,6 +21,8 @@
 #                            otherwise (default Marathon2)
 #   NETLOAD_IP               3DS address for the run-3dslink target (empty:
 #                            3dslink finds the console by broadcast)
+#   A1_RENDER_C3D            citro3d back end (GPU present of the top screen;
+#                            docs/3ds/CITRO3D_DESIGN.md); OFF by default
 #   A1_PROFILE               frame profiler: per-frame timings on the bottom
 #                            screen and the debug-perf benchmark (docs/3ds/PERF.md);
 #                            OFF by default
@@ -76,6 +78,7 @@ set(A1_3DS_SMDH_DESCRIPTION "Marathon engine" CACHE STRING "SMDH short descripti
 set(A1_3DS_SMDH_AUTHOR "Aleph One developers / 3DS port by DashieLashie" CACHE STRING "SMDH author")
 set(A1_3DS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.png" CACHE FILEPATH "48x48 SMDH icon")
 option(A1_PROFILE "Frame profiler and benchmark mode (docs/3ds/PERF.md)" OFF)
+option(A1_RENDER_C3D "citro3d renderer (docs/3ds/CITRO3D_DESIGN.md)" OFF)
 
 # --- Compiler flags ----------------------------------------------------------
 # The toolchain supplies -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -105,6 +108,9 @@ add_compile_options(
 add_compile_definitions(HAVE_CONFIG_H A1_PLATFORM_3DS)
 if(A1_PROFILE)
   add_compile_definitions(A1_PROFILE)
+endif()
+if(A1_RENDER_C3D)
+  add_compile_definitions(A1_RENDER_C3D)
 endif()
 if(NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "-D__3DS__")
   add_compile_definitions(__3DS__)   # normally already in the toolchain flags
@@ -324,6 +330,22 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/bottom_3ds.c
 # Frame profiler (A1_PROFILE builds; docs/3ds/PERF.md).
 if(A1_PROFILE)
   target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/profile_3ds.cpp")
+endif()
+# citro3d back end (docs/3ds/CITRO3D_DESIGN.md): P1 = the GPU present of the top screen.
+# Shaders are .v.pica sources assembled by picasso and embedded as binaries.
+if(A1_RENDER_C3D)
+  set(_a1_c3d_dir "${CMAKE_CURRENT_SOURCE_DIR}/render_c3d")
+  target_sources(alephone PRIVATE
+    "${_a1_c3d_dir}/core/config.cpp"
+    "${_a1_c3d_dir}/back/context.cpp"
+    "${_a1_c3d_dir}/back/present.cpp")
+  target_include_directories(alephone PRIVATE "${_a1_c3d_dir}/include")
+  ctr_add_shader_library(a1_c3d_shaders "${_a1_c3d_dir}/shaders/present.v.pica")
+  dkp_add_embedded_binary_library(a1_c3d_shbin a1_c3d_shaders)
+  target_link_libraries(alephone PRIVATE a1_c3d_shbin citro3d ctru)
+  # Every teardown path (SDL_Quit, vhalt, the error screen) reaches gfxExit(): shut
+  # citro3d down first (render_c3d/back/context.cpp).
+  target_link_options(alephone PRIVATE "LINKER:--wrap=gfxExit")
 endif()
 # Ogg Vorbis (Tremor) and MP3 (mpg123) decoders for Sound/Decoder.cpp.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/decoders_3ds.cpp")

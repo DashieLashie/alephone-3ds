@@ -9,6 +9,9 @@
 	(at your option) any later version.
 */
 #include "a1_3ds_platform.h"
+#ifdef A1_RENDER_C3D
+#include "a1_c3d_port.h"
+#endif
 
 #include <3ds.h>
 #include <SDL2/SDL.h>
@@ -946,6 +949,12 @@ void error_screen(const std::string& title, const std::string& body)
 	fprintf(stderr, "[3ds] ERROR: %s\n%s\n", title.c_str(), body.c_str());
 	fflush(stdout);
 	fflush(stderr);
+
+#ifdef A1_RENDER_C3D
+	// citro3d owns the top screen once the GPU present is up: give it back before the
+	// console or SDL draw there (docs/3ds/CITRO3D_DESIGN.md, 1.3, 5.1). Idempotent.
+	a1_c3d_release_top();
+#endif
 
 	// Before SDL video is up nobody owns the screens yet. After it, SDL owns
 	// the top screen and the bottom one is unused. Keep the game's last frame
