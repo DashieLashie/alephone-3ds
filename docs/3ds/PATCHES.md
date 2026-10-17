@@ -864,3 +864,8 @@ symbols).
     keeps off the top screen when it is not (`PERF.md` "P1 follow-ups").
     Critic minor 5: `render_c3d/back/present.cpp` flushes the staging's written rows
     (`kStagingWrittenBytes`, 512x240, 480 KiB) instead of the whole 512 KiB.
+    Critic minor 1: `debug-c3d` `present_diff N` (`render_c3d/core/config.*`,
+    `back/present.cpp`); `source/video_3ds.cpp`: the 640x480 loop of
+    `present_screen_cpu()` moved into `half_rotate()` (forced inline; OFF-build
+    `video_3ds.o` disassembly identical) and `present_reference()` (A1_RENDER_C3D only);
+    `scripts/3ds/tests/c3d/p1-diff.cfg`.

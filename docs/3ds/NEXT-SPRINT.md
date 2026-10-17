@@ -353,6 +353,13 @@ renderer). Same driving as "How to drive the console"; kill leftover
    crash in citro3d. What happens after that (backlog item 14: in Azahar the process
    faults in `hidScanInput`, also without citro3d) is recorded, not judged here.
    Then `p1-vhalt-thread.cfg` likewise (Azahar dies before the hand-off).
+   4c. (P1 minor 1) `p1-diff.cfg` as `debug-c3d`: menus, a dialog, then a game in
+   HUD + Map and in Classic for a minute each, then HOME > Close. The log must show
+   `present_diff: ... 0 of 96000 pixels differ in RGB` and `present_diff final: N
+   checks, 0 with RGB differences`. A mismatch line gives the first differing screen
+   pixel and both values: a whole-picture mismatch means wrong orientation or transfer
+   flags (`PERF.md` "Stage 10 P1" console item 4), a few pixels a rounding question;
+   fetch `log.txt` and stop there. Do not take benchmark figures with it on.
 5. **Look:** the L20 liquid (Azahar's capture differences there came from
    timing, critic P1 finding 1); orientation and colours of every screen
    (transfer flags `FLIP_VERT`, full 512x256).
@@ -364,7 +371,8 @@ renderer). Same driving as "How to drive the console"; kill leftover
    - [x] 4: `error_screen()` from a non-main thread must not call citro3d (done
      2026-10-17: hand-off to the main thread; console: step 4b);
    - [x] 5: flush 480 KiB, not 512 (done 2026-10-17; the cost is for step 2 to show);
-   - [ ] 1: a `present_diff` self-check mode;
+   - [x] 1: a `present_diff` self-check mode (done 2026-10-17, `p1-diff.cfg`;
+     console: step 4c);
 
    whether to try the zero-copy present (critic P1
    finding 3: one engine edit, the GPU reads `main_surface` from linear

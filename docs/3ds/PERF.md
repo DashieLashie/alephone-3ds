@@ -853,6 +853,33 @@ review; the summary is `NEXT-SPRINT.md` G0-b item 7. Azahar — non-authoritativ
   1/16 less flushed per present; **not measured** (Azahar does not model the cache; the
   P1 flush step was 0.06 ms there). Azahar: script 07 with `p1-gpu.cfg` (6 captures) and
   `p1-odd.cfg` (7 captures, the letterbox clear path) byte-identical to P1's.
+- **Minor 1: `present_diff N`, the GPU present checked against the CPU present.** As
+  the critic specified: every N-th present, `video_3ds.cpp`'s own code builds the
+  picture the CPU present would show into a malloc'd 240x400 buffer
+  (`a1_3ds::present_reference()`, A1_RENDER_C3D builds only; the 640x480 loop became
+  `half_rotate()`, forced inline, so `video_3ds.o` of the OFF build disassembles
+  identically to before); `gfxGetFramebuffer(GFX_TOP, GFX_LEFT)` is noted just before
+  `C3D_FrameEnd` (the transfer's destination, design 0.3); after the next
+  `C3D_FrameBegin(0)` (that frame, transfer included, has retired) the framebuffer is
+  invalidated (`GSPGPU_InvalidateDataCache`, `gspgpu.h`:246) and compared word for word.
+  Log: per check (every mismatch, the first 3 matches; 30 lines at most) the number of
+  pixels differing in RGB, those differing only in A, the per-channel maximum and the
+  first differing screen pixel; `present_diff final` at release. Surfaces the CPU
+  present does not take (odd_surface's RGB565) are counted as not checkable; ignored
+  with `calibrate`. Off: one test per present. `scripts/3ds/tests/c3d/p1-diff.cfg`
+  (N = 30). Results:
+  - script 07 (menus, dialog, HOME; the 640x480 path): every check 0 pixels differ.
+  - HUD + Map @30 L0 / L6 / L20 (`perf-bench.sh`, the 400x240 path): 32 / 32 / 31
+    checks, **0 with RGB differences**, max |diff| 0 on every channel.
+  - Negative control (a temporary build, not committed, setting B bit 0 of staging pixel
+    (7, 5)): `1 of 96000 pixels differ in RGB ... B 1 ... first at screen (7, 5): gpu
+    0x00000100 cpu 0x00000000` at every check, so the check, its coordinates and the
+    orientation are right. (A first attempt toggled the bit each present: every check,
+    at even presents, saw it cleared, i.e. the checked frame is frame N, not N-1.)
+  - The `present` zone with the check on (1.87-1.88 ms vs 1.74 in P1) includes the
+    checked presents' copy and compare: not a figure for the present itself.
+  On the console this settles item 4 above (orientation and transfer flags):
+  `NEXT-SPRINT.md` G0-b step 4c.
 
 ## Next candidates (not done)
 

@@ -61,6 +61,14 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		cfg.test_vhalt = static_cast<int>(v);
 		return true;
 	}
+	if (key == "present_diff")
+	{
+		long v = 0;
+		if (!parse_int(value, 0, 100000, v))
+			return false;
+		cfg.present_diff = static_cast<unsigned>(v);
+		return true;
+	}
 	return false;
 }
 

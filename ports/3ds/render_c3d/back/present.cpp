@@ -46,6 +46,9 @@ extern void vhalt(const char* message);
 namespace a1_3ds {
 // source/a1_3ds_platform.cpp: both screens to sdmc:/3ds/alephone/screen-<tag>-*.bmp
 void save_screens(const std::string& tag);
+// source/video_3ds.cpp: the picture the CPU present would put in the framebuffer, by its own
+// code, into a 240x400 rotated RGBA8 buffer; false for a surface the CPU present does not take
+bool present_reference(u32* fb, const void* pixels, int pitch, int width, int height, uint32_t sdl_format);
 }
 
 namespace a1_c3d {
@@ -96,6 +99,17 @@ u32* s_staging = nullptr;
 unsigned s_present = 0;       // present counter (0 = none yet), the frame index of calibrate
 int s_layout = -1;            // what the staging holds around the picture: 0 = 640x480 path, 1 = other
 bool s_logged_native = false, s_logged_half = false, s_logged_other = false;
+
+// present_diff self-check (critic P1 minor 1). Every N-th present the CPU present's picture
+// is built into s_diff_ref and the framebuffer citro3d will transfer to is noted at
+// C3D_FrameEnd (design 0.3: the destination is gfxGetFramebuffer() at C3D_FrameEnd); after the
+// next C3D_FrameBegin(0) that frame, transfer included, has retired and the two are compared.
+constexpr size_t kFbPixels = static_cast<size_t>(kScreenW) * kScreenH;
+u32* s_diff_ref = nullptr;            // malloc'd 240x400 RGBA8, the CPU present's picture
+const u32* s_diff_fb = nullptr;       // the checked present's framebuffer, compared at the next present
+unsigned s_diff_present = 0;          // the checked present's number
+unsigned s_diff_checks = 0, s_diff_bad = 0, s_diff_skipped = 0, s_diff_logged = 0;
+unsigned s_diff_max[4] = {0, 0, 0, 0};   // R, G, B, A over every check
 
 // Odd-surface test state.
 uint64_t s_odd_last = 0;
@@ -189,6 +203,77 @@ void busy_wait_ms(int ms)
 {
 	const uint64_t end = svcGetSystemTick() + static_cast<uint64_t>(ms) * (kTicksPerSecond / 1000);
 	while (svcGetSystemTick() < end) {}
+}
+
+// present_diff: the CPU present's picture for this present into s_diff_ref. False (the
+// present is not checked) for a surface the CPU present does not take or without memory.
+bool diff_prepare(const void* src, int pitch, int w, int h, uint32_t fmt)
+{
+	if (!s_diff_ref)
+	{
+		s_diff_ref = static_cast<u32*>(malloc(kFbPixels * sizeof(u32)));
+		if (!s_diff_ref)
+		{
+			printf("[c3d] present_diff: no memory for the %lu KiB reference\n",
+			       static_cast<unsigned long>(kFbPixels * sizeof(u32) / 1024));
+			return false;
+		}
+	}
+	return a1_3ds::present_reference(s_diff_ref, src, pitch, w, h, fmt);
+}
+
+// present_diff: s_diff_fb (what the GPU present put on screen) against s_diff_ref.
+void diff_compare()
+{
+	// The GPU wrote it: drop any stale cached copy before reading (gspgpu.h:246).
+	GSPGPU_InvalidateDataCache(s_diff_fb, kFbPixels * sizeof(u32));
+	unsigned differ = 0, alpha_only = 0, mx[4] = {0, 0, 0, 0};
+	size_t first = kFbPixels;
+	for (size_t i = 0; i < kFbPixels; ++i)
+	{
+		const u32 g = s_diff_fb[i], c = s_diff_ref[i];
+		if (g == c)
+			continue;
+		for (int ch = 0; ch < 4; ++ch)   // 0xRRGGBBAA
+		{
+			const int shift = 24 - 8 * ch;
+			const int a = (g >> shift) & 0xFF, b = (c >> shift) & 0xFF;
+			const unsigned d = static_cast<unsigned>(a > b ? a - b : b - a);
+			if (d > mx[ch])
+				mx[ch] = d;
+		}
+		if ((g ^ c) & 0xFFFFFF00u)
+		{
+			++differ;
+			if (first == kFbPixels)
+				first = i;
+		}
+		else
+			++alpha_only;
+	}
+	++s_diff_checks;
+	for (int ch = 0; ch < 4; ++ch)
+		if (mx[ch] > s_diff_max[ch])
+			s_diff_max[ch] = mx[ch];
+	if (differ)
+		++s_diff_bad;
+	// Every mismatch is logged (up to 30 lines in all), a match only for the first 3 checks.
+	if ((differ || s_diff_checks <= 3) && s_diff_logged < 30)
+	{
+		++s_diff_logged;
+		printf("[c3d] present_diff: present %u: %u of %lu pixels differ in RGB (%u in A only), max |diff| "
+		       "R %u G %u B %u A %u",
+		       s_diff_present, differ, static_cast<unsigned long>(kFbPixels), alpha_only, mx[0], mx[1], mx[2],
+		       mx[3]);
+		if (differ)
+			// framebuffer word i is screen pixel (i / 240, 239 - i % 240) (video_3ds.cpp)
+			printf("; first at screen (%lu, %lu): gpu 0x%08lx cpu 0x%08lx",
+			       static_cast<unsigned long>(first / kScreenH),
+			       static_cast<unsigned long>(kScreenH - 1 - first % kScreenH),
+			       static_cast<unsigned long>(s_diff_fb[first]), static_cast<unsigned long>(s_diff_ref[first]));
+		printf("\n");
+	}
+	s_diff_fb = nullptr;
 }
 
 // test_vhalt 2 / 3: the fatal-error paths on a thread other than main.
@@ -294,6 +379,14 @@ void present_free()
 	if (s_staging)
 		linearFree(s_staging);
 	s_staging = nullptr;
+	if (s_diff_checks || s_diff_skipped)
+		printf("[c3d] present_diff final: %u checks, %u with RGB differences, %u presents not checkable (no CPU "
+		       "path for the surface); max |diff| R %u G %u B %u A %u\n",
+		       s_diff_checks, s_diff_bad, s_diff_skipped, s_diff_max[0], s_diff_max[1], s_diff_max[2],
+		       s_diff_max[3]);
+	free(s_diff_ref);
+	s_diff_ref = nullptr;
+	s_diff_fb = nullptr;
 }
 
 uint32_t present_counter()
@@ -389,6 +482,18 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		return false;
 	}
 
+	// present_diff: the previous checked present has reached its framebuffer now.
+	if (s_diff_fb)
+		diff_compare();
+	const bool diff_now = cfg.present_diff && !cfg.calibrate && n % cfg.present_diff == 0;
+	bool diff_ready = false;
+	if (diff_now)
+	{
+		diff_ready = diff_prepare(src, src_pitch, src_w, src_h, src_fmt);
+		if (!diff_ready)
+			++s_diff_skipped;
+	}
+
 	// 2. Staging, written only now that the previous transfer has read the old one.
 	if (src_w == kSrcW && src_h == kSrcH)
 	{
@@ -448,6 +553,19 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		s_odd_capture_pending = false;
 		printf("[c3d] odd_surface: capturing the displayed odd picture (present %u)\n", n - 1);
 		a1_3ds::save_screens("c3d-odd" + std::to_string(++s_odd_captures));
+	}
+	if (diff_ready)
+	{
+		// The transfer's destination: taken by citro3d at the C3D_FrameEnd below.
+		u16 fb_w = 0, fb_h = 0;
+		const u32* fb = reinterpret_cast<const u32*>(gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fb_w, &fb_h));
+		if (fb_w == kScreenH && fb_h == kScreenW)
+		{
+			s_diff_fb = fb;
+			s_diff_present = n;
+		}
+		else
+			++s_diff_skipped;
 	}
 	frame_end(1);
 

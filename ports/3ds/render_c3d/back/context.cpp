@@ -76,9 +76,12 @@ void load_config()
 	text << in.rdbuf();
 	std::vector<std::string> problems;
 	config_parse(s_cfg, text.str(), problems);
-	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d\n",
+	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
+	       "present_diff %u\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
-	       s_cfg.test_vhalt);
+	       s_cfg.test_vhalt, s_cfg.present_diff);
+	if (s_cfg.present_diff && s_cfg.calibrate)
+		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
 	for (const std::string& p : problems)
 		printf("[c3d] debug-c3d: %s\n", p.c_str());
 }

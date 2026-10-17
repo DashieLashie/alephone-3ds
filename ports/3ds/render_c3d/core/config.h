@@ -15,6 +15,10 @@
 	  test_vhalt 0-3    20 s after the first present: 1 = vhalt() (the error-screen path);
 	                    2 = abort() on a second thread, 3 = vhalt() on a second thread (the
 	                    hand-off of a release requested off the main thread, critic P1 minor 4)
+	  present_diff N    0 = off (default); N > 0: every N-th present, the picture the CPU present
+	                    would show (video_3ds.cpp's own code, into a 240x400 buffer) is compared
+	                    with the framebuffer the GPU present wrote, at the next present; per-check
+	                    and final "[c3d] present_diff" log lines (critic P1 minor 1)
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -36,6 +40,7 @@ struct Config
 	bool alt_load = false;
 	bool odd_surface = false;
 	int test_vhalt = 0;
+	unsigned present_diff = 0;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
