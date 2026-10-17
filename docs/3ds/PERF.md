@@ -844,6 +844,15 @@ review; the summary is `NEXT-SPRINT.md` G0-b item 7. Azahar — non-authoritativ
     reached, so its citro3d hand-off is not exercised in Azahar.
   - Linear heap: 19912 -> 19908 KiB at boot in every run (the larger program image; the
     heap is what remains); free after release 17796 KiB, as at boot.
+- **Minor 5: the staging flush covers what is written.** `back/present.cpp`:
+  `kStagingWrittenBytes` = `kStagingPitchPx * kScreenH * 4` (512x240, 480 KiB) for the
+  per-present `GSPGPU_FlushDataCache` and for the two layout-change clears in
+  `fill_half`/`fill_other` (so every CPU write after init lies inside the flushed range).
+  Allocation, the init clear and its flush, and the 512x256 transfer stay whole-texture
+  (rows 240-255 are cleared once at init and read by every transfer). Expected effect:
+  1/16 less flushed per present; **not measured** (Azahar does not model the cache; the
+  P1 flush step was 0.06 ms there). Azahar: script 07 with `p1-gpu.cfg` (6 captures) and
+  `p1-odd.cfg` (7 captures, the letterbox clear path) byte-identical to P1's.
 
 ## Next candidates (not done)
 

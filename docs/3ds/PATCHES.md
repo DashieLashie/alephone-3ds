@@ -862,3 +862,5 @@ symbols).
     free and is safe from any thread (`render_c3d/back/context.cpp`
     `release_from_any_thread()`, the `gfxExit` wrapper likewise); `error_screen()`
     keeps off the top screen when it is not (`PERF.md` "P1 follow-ups").
+    Critic minor 5: `render_c3d/back/present.cpp` flushes the staging's written rows
+    (`kStagingWrittenBytes`, 512x240, 480 KiB) instead of the whole 512 KiB.

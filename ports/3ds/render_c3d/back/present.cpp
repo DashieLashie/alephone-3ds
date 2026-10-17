@@ -12,7 +12,7 @@
 	     (SDL_ConvertPixels) and centre-cropped / letterboxed;
 	  3. one display transfer (linear -> tiled) into a 512x256 RGBA8 texture in VRAM;
 	  4. one textured quad into the screen target;
-	  5. ranged flush of the staging, wait for the displayed buffer to be known (VBlank, if
+	  5. ranged flush of the staging's written rows, wait for the displayed buffer to be known (VBlank, if
 	     the previous swap is pending), C3D_FrameEnd(GX_CMDLIST_FLUSH). citro3d transfers
 	     the target to the framebuffer and swaps, asynchronously.
 
@@ -60,6 +60,11 @@ constexpr int kBarW = (kScreenW - kOutW) / 2;
 constexpr int kTexW = 512, kTexH = 256;               // present texture (design 9.1)
 constexpr int kStagingPitchPx = kTexW;
 constexpr size_t kStagingBytes = kStagingPitchPx * kTexH * sizeof(u32);   // 512x256: the whole texture
+// What a present writes: rows 0-239, all 512 columns of them (picture, bars, and the unused
+// columns 400-511 when a layout change clears them). Rows 240-255 are cleared and flushed once
+// at init and never written again; the transfer still reads the whole 512x256 texture (a
+// 512x240 transfer shifted the picture 16 rows in Azahar, PERF.md "Stage 10 P1"). 480 KiB.
+constexpr size_t kStagingWrittenBytes = kStagingPitchPx * kScreenH * sizeof(u32);
 
 // The screen target's framebuffer is RGBA8 (SDL_n3dsvideo.c: gfxInit(GSP_RGBA8_OES, ...));
 // the target is 240x400, the LCD's native rotated shape (simple_tri/source/main.c).
@@ -122,7 +127,7 @@ void fill_half(const u8* src, int pitch)
 {
 	if (s_layout != 0)
 	{
-		memset(s_staging, 0, kStagingBytes);
+		memset(s_staging, 0, kStagingWrittenBytes);
 		s_layout = 0;
 	}
 	for (int y = 0; y < kOutH; ++y)
@@ -141,7 +146,7 @@ void fill_other(const u8* src, int pitch, int w, int h)
 {
 	if (s_layout != 1 || w < kScreenW || h < kScreenH)
 	{
-		memset(s_staging, 0, kStagingBytes);
+		memset(s_staging, 0, kStagingWrittenBytes);
 		s_layout = 1;
 	}
 	const int cw = w < kScreenW ? w : kScreenW, ch = h < kScreenH ? h : kScreenH;
@@ -433,7 +438,7 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 	// 5. The transfer's destination is taken at C3D_FrameEnd, and the previous queue (with
 	// its swap request) finished in step 1: if that swap has not taken effect yet (next
 	// VBlank), the buffer gfxGetFramebuffer() would return is still on screen. Wait.
-	GSPGPU_FlushDataCache(s_staging, kStagingBytes);
+	GSPGPU_FlushDataCache(s_staging, kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
 	if (gspIsPresentPending(GSP_SCREEN_TOP))
 		gspWaitForVBlank();
 	if (s_odd_capture_pending)

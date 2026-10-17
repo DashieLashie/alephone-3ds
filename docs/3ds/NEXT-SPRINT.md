@@ -363,7 +363,7 @@ renderer). Same driving as "How to drive the console"; kill leftover
    P1 minors (`PERF.md` "P1 follow-ups"):
    - [x] 4: `error_screen()` from a non-main thread must not call citro3d (done
      2026-10-17: hand-off to the main thread; console: step 4b);
-   - [ ] 5: flush 480 KiB, not 512;
+   - [x] 5: flush 480 KiB, not 512 (done 2026-10-17; the cost is for step 2 to show);
    - [ ] 1: a `present_diff` self-check mode;
 
    whether to try the zero-copy present (critic P1
