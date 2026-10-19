@@ -975,6 +975,11 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
 1. citro3d + SDL N3DS + the bottom-screen console coexisting: HOME, sleep,
    HOME > Close, error screen, `C3D_Fini` before `gfxExit` (normal exit and
    `vhalt`).
+   **Console 2026-10-19 (`PERF.md` "Console G0-b", both sessions):** HOME and back,
+   sleep, HOME > Close in a dialog, release before `gfxExit` (normal exit, `vhalt`
+   on main and on a second thread): pass. **HOME > Close in a game hangs** when a
+   present runs after the suspend (`release()` never returns): open. The error
+   screen shows from the main thread, not from a second thread.
 2. No tearing with the corrected VBlank guard (5.1 step 5) @30 and @60.
    Ordering margin: `gxCmdQueueInterrupt` updates the completion counter
    before running the callback, so the binary does not prove that
@@ -982,8 +987,11 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    `gxCmdQueueWait` (inside `C3D_FrameBegin(0)`) returns (per critic); the
    ≥ 1 ms CPU staging copy in step 2 between `C3D_FrameBegin` and the guard
    makes it safe in practice. The console run confirms it.
+   **Console 2026-10-19:** pass @30 and @60 (`alt_load`; every capture frame N).
 3. Every gate b-half (G0-b … G3-b) and P0/P1 series @30/@60 in both Bottom
    Screen settings.
+   **Console 2026-10-19:** G0-b and the P1 series done (all four); P0 SW figures
+   taken with the same-commit OFF build. G1-b ... G3-b: not reached.
 4. Real GPU time, readback wait, and M6 frame overlap (`C3D_GetDrawingTime`).
 5. VRAM vs linear sampling speed (linear textures before promotion); VRAM
    bank placement.
@@ -991,11 +999,15 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    3dslink; M7 SSAA).
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
+   **Console 2026-10-19:** the P1 present target's orientation and flags are right
+   (`present_diff`: 153 checks, 0 differences). Readback (M0+): not reached.
 9. `C3D_FrameEnd(GX_CMDLIST_FLUSH)` + ranged flushes vs the whole-heap flush.
 10. Level-start hitch with the promotion cap (TextureCopy throughput, PPF
     latency); whether pre-warming is needed.
 11. citro3d per-draw CPU cost at 804 MHz with L2.
 12. Linear heap free at `main loop ended` with citro3d on.
+    **Console 2026-10-19 (P1):** 16 767 KiB of 19 904 KiB free (profile build);
+    17 792-17 812 KiB after the release.
 13. Stereo comfort/ghosting; SSAA look.
 
 ## 11. Open questions

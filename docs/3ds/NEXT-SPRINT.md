@@ -277,7 +277,26 @@ Azahar) [PERF "Next candidates"]
     returns to the Homebrew Launcher, or hangs, with no message. The citro3d side is
     handled (critic P1 minor 4, `PERF.md` "P1 follow-ups"). A fix (e.g. hand the whole
     fatal path to the main thread, or stop the main thread before `shutdown_application()`)
-    is a design choice for the user, and the console behaviour is unknown.
+    is a design choice for the user.
+    **Console, 2026-10-19 (New 3DS, `PERF.md` "Console G0-b, second session"): worse
+    than in Azahar.** The null reads are data aborts there: Luma's "An exception
+    occurred" screen, then a power-off. Main-thread `vhalt()`: the error screen shows
+    and is readable, leaving it faults in `hidScanInput` (`hid.c:185`, address `0x10`).
+    `vhalt()` on a second thread: the main thread faults in `hidScanInput` from
+    `N3DS_PumpEvents`. `abort()` on a second thread: the main thread faults in newlib
+    `_lseek_r` (address `0x18`) in a resource-file `fseek`. `error_screen()` on a second
+    thread: nothing drawn (bottom framebuffer all black), then the app exits and the
+    next program (probably the Homebrew Launcher) panics in `svcBreak`. So any fatal
+    error ends in a forced power-off, not a return to the launcher.
+15. **The 3dslink log mirror can freeze the game.** `tee_write()`
+    (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
+    the SD log, then `send()`s it on a blocking socket while holding the log lock; its
+    comment says "stop mirroring rather than block", but a stalled Wi-Fi link blocks
+    the `send()`, and every thread that logs then waits on the lock. Seen once on the
+    console (2026-10-19, `build-3ds/hw/g0b/cl30-gpu-L0.stall1.txt`): the mirror fell
+    behind at +50 s and the game loop froze for ~100 s after a BENCH line. Only with
+    3dslink (a launcher start has no socket). A send timeout (`SO_SNDTIMEO`) or a
+    non-blocking socket would let it drop the mirror instead; not tried.
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
@@ -360,62 +379,51 @@ Stage 10 is **paused at G0** (user's decision, 2026-10-16; `CITRO3D_DESIGN.md`
 decides G1 (build the 3D renderer). Same driving as "How to drive the console";
 kill leftover 3dslink first.
 
-**Done in the first session (2026-10-19, `PERF.md` "Console G0-b, first
-session"):** step 2 except Classic @30 (HUD + Map @30 and @60, Classic @60 incl.
-L0 three times each way), step 3 (no tearing, every capture frame N), step 4's
-first run with 4c (menus, HUD + Map, Classic, HOME, sleep and wake, a save,
-`present_diff` 153 checks with 0 differences), 4d's HOME > Close in a dialog and
-its "Saving..." box (the user: fine on both screens, GPU and software builds),
-and step 5 (the user: the L20 water in the GPU runs looked indistinguishable
-from the software runs). Results in short: `present` −2.24 to −2.30 ms @30 but −1.54 to −1.89 @60, with
-+0.3-1.0 ms moving into `bottom`; the software build already runs HUD + Map @60
-at ~60 fps.
+**All console steps are done** (2026-10-19, two sessions: `PERF.md` "Console
+G0-b, first session" and "second session"). In short:
 
-**Before starting.** The card was left with `debug-c3d` = `p1-diff.cfg` (it skews
-benchmarks: replace or delete it), probably `debug-perf`, and the prefs at
-Classic, Framerate Target 30. The helpers are in `build-3ds/hw/` (not in git):
-`g0b/run.sh BUILD TAG` (sends `<stage10-c3d>/BUILD/alephone.3dsx`, transcript in
-`g0b/TAG.txt`; the console IP is written in it, 192.168.100.72: update it if it
-changed) and `sprint8/setprefs.sh IP MODE FPS` (sets Bottom Screen and
-Framerate Target in the card's prefs). Use the same builds as the first session
-(the `stage10-c3d` build dirs, from the `e1ef6a2` tree): rebuild only if code
-changed, and then re-run a HUD + Map @30 pair to check the figures still match.
+- `present`, GPU against software: HUD + Map −2.24 to −2.30 ms @30, −1.54 to −1.89
+  @60 (+0.3-1.0 ms moves into `bottom`); Classic −2.21 to −2.43 @30, −1.26 to −1.28
+  @60. The worst frame (`max`) is up to 22 ms longer. The software build already
+  runs HUD + Map @60 at ~60 fps.
+- Pass: no tearing (every capture frame N), `present_diff` 0 differences, the odd
+  surface (pixel-exact), the L20 water and the "Saving..." box (by eye), HOME and
+  back, sleep and wake, HOME > Close in a dialog, the citro3d release before
+  `gfxExit` on every error path, the off-main-thread hand-off, no crash in citro3d.
+- **Blocker: HOME > Close in a game hangs** (2 of 2 tries in the second session):
+  a present runs after the suspend, then `release()` never returns ("Closing
+  software..." for good, power button only). Not seen in the software build.
+- Not citro3d, but found on the way: every fatal error ends in a Luma exception and
+  a power-off (backlog item 14, now console-confirmed); `error_screen()` on a second
+  thread draws nothing; the 3dslink mirror can freeze the game (backlog item 15).
 
-The remaining steps keep their original numbers:
+The card is clean (`debug-*` deleted) and the prefs are the user's (HUD + Map,
+Framerate Target 60). The helpers stay in `build-3ds/hw/` (not in git):
+`g0b/run.sh BUILD TAG` (console IP 192.168.100.72 written in it) and
+`sprint8/setprefs.sh IP MODE FPS`.
 
-2. **Classic @30 benchmarks:** `setprefs.sh IP 2 30`, `debug-perf` L0/L6/L20,
-   once with `build-3ds-prof`, once with `build-3ds-c3d-prof` and
-   `scripts/3ds/tests/c3d/p1-gpu.cfg` as `/3ds/alephone/debug-c3d`
-   (`sd-ftp.sh IP put`). Compare `present`, busy, fps and `max`.
-4. **Functional, the error paths** (`build-3ds-c3d`):
-   - `p1-vhalt.cfg`: the error screen must appear (in Azahar it is black either
-     way), log one release and two `gfxExit` calls. Then `p1-odd.cfg`: a
-     letterboxed 300x200 test picture once a second.
-   - 4b. (P1 minor 4) `p1-vhalt-thread-sdl.cfg` with
-     `scripts/3ds/tests/input/17-c3d-vhalt.txt` copied as `debug-input-script`:
-     the log must show `gfxExit on a thread other than main`, `release requested by
-     another thread`, `release #1`, `gfxExit: released by the main thread`, with no
-     crash in citro3d. What happens after that (backlog item 14: in Azahar the
-     process faults in `hidScanInput`, also without citro3d) is recorded, not judged
-     here. Then `p1-vhalt-thread-screen.cfg` (`error_screen()` on a second thread):
-     the same hand-off lines with `release_top`, then the error screen on the bottom
-     screen; press A (the input script cannot reach it). Then `p1-vhalt-thread.cfg`
-     likewise (Azahar dies before the hand-off).
-   - 4d, the rest: list `/luma/dumps/arm11/` (ftpd): no dump from the first
-     session's HOME > Close (2026-10-19 ~02:30) or from these runs.
-6. **Record:** `PERF.md` "Console G0-b, first session" (the Classic @30 row and the
-   rest), `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
-   `debug-c3d` and `debug-perf` from the card; set the prefs back to the user's
-   Bottom Screen and Framerate Target (the originals were not saved:
-   `sprint8/prefs-g0b/current` is overwritten by each `setprefs.sh`).
-7. **Decide with the user:**
-   - G0-b, keep or drop the GPU present: the criterion is met @30, not @60, and the
-     worst frame (`max`) is 7-22 ms longer with it.
+What is left:
+
+1. **Decide with the user** (G0-b, G1):
+   - Keep or drop the GPU present. Keeping it needs the hang fixed first (item 2);
+     dropping it costs nothing (`A1_RENDER_C3D=OFF` is the default build).
    - G1, build the 3D renderer at all: the target (HUD + Map @60 ≥ 55 fps) was set
      on Azahar figures; on the console the software renderer already meets it (busy
      14.8-15.3 ms, idle 1.4-1.8 ms per frame). What M0-M9 would still buy is headroom,
      not the target.
-   - whether to try the zero-copy present (critic P1 finding 3: one engine edit, the
+   - Whether to try the zero-copy present (critic P1 finding 3: one engine edit, the
      GPU reads `main_surface` from linear memory, TEV reorders the channels).
-   - The critic's P1 minors 4, 5 and 1 are done (2026-10-17, `PERF.md` "P1
-     follow-ups"); their console checks are steps 4b, 2 and 4c.
+   - Backlog item 14 (fatal errors): now a power-off on the console, in every build.
+2. **Only if the GPU present is kept: fix the HOME > Close hang.** A design note
+   first (`c3d-architect`, then `c3d-critic`): skip the GPU present while suspended
+   (`s_in_home` / `s_asleep` in `input_3ds.cpp`) and do not wait on the GPU queue in
+   `release()` after a frame submitted while suspended; first log a line between the
+   steps of `release()` (`back/context.cpp`:170-178) to find which wait blocks. Then
+   console: HOME > Close in a game, three times, with `p1-gpu.cfg`; HOME and back
+   in a game; sleep in a game. Also `error_screen()` on a second thread (step 4b's
+   `p1-vhalt-thread-screen.cfg`) draws nothing: part of the same review.
+3. `CITRO3D_DESIGN.md` section 10: items 1-3, 8, 12 are annotated with the console
+   results (2026-10-19).
+
+The critic's P1 minors 4, 5 and 1 are done (2026-10-17, `PERF.md` "P1 follow-ups")
+and were checked on the console in this runbook (4b, 2, 4c).

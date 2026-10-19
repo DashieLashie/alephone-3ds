@@ -768,9 +768,9 @@ Logs in `build/perf/p0-*` (not in git). busy = frame − idle.
   GPU present (P1) removes `present` work, so in Azahar it can show at most
   ~1.4 ms per frame in HUD + Map; whether it reaches the target is a
   console question (G0-b, design section 10).
-- Console runs (design section 10, item 3): three of the four series done
-  2026-10-19, Classic @30 pending ("Console G0-b, first session" below). On the
-  console the software build runs HUD + Map @60 at 59.97 / 60.30 / 59.97.
+- Console runs (design section 10, item 3): all four series done 2026-10-19
+  ("Console G0-b, first session" and "second session" below). On the console the
+  software build runs HUD + Map @60 at 59.97 / 60.30 / 59.97.
 
 ## Stage 10 P1: GPU present (Azahar — non-authoritative)
 
@@ -815,18 +815,22 @@ citro3d (identical), so Azahar cannot show them.
 
 ### Needs console verification (P1)
 
-Status after the first console session (2026-10-19, "Console G0-b, first session"
-below) in brackets.
+Status after the two console sessions (2026-10-19, "Console G0-b, first session"
+and "second session" below) in brackets.
 
 1. citro3d + SDL N3DS + the bottom-screen console: HOME, sleep, HOME > Close, the
    error screen, `C3D_Fini` before `gfxExit` (normal exit, `vhalt`, `abort`) (design 10, 1).
-   [HOME, sleep, HOME > Close, release before `gfxExit`: pass. Error screen,
-   `vhalt`, `abort`: not run.]
+   [HOME and back, sleep, HOME > Close in a dialog: pass. **HOME > Close in a game:
+   hangs** when a present runs after the suspend (2 of 2 in the second session; the
+   release never returns). Release before `gfxExit` on `vhalt` (main thread and
+   second thread): pass; the error screen shows on the main thread, not from a
+   second thread; leaving it faults in `hidScanInput` (backlog item 14).]
 2. No tearing and frame N or N-1 only (the frame-indexed test with `alt_load`) @30 and
    @60; the VBlank guard before `C3D_FrameEnd`; ordering margin (design 10, 2).
    [Pass @30 and @60: every capture frame N.]
 3. The four series on the console (design 10, 3); G0-b: `present` -2 ms in HUD + Map.
-   [Three series done, Classic @30 not run; −2.24 to −2.30 ms @30, −1.54 to −1.89 @60.]
+   [All four done. HUD + Map: −2.24 to −2.30 ms @30, −1.54 to −1.89 @60. Classic:
+   −2.21 to −2.43 @30, −1.26 to −1.28 @60.]
 4. Orientation and transfer flags (`FLIP_VERT(1)` upload, full 512x256 transfer,
    `OUT_FORMAT(RGBA8)` target; design 10, 8): Azahar needed the whole-texture transfer
    (a 512x240 transfer shifted the picture 16 rows).
@@ -1035,8 +1039,80 @@ visible difference on the console.
 
 Not run in this session (`NEXT-SPRINT.md` G0-b runbook, the remaining steps):
 the Classic @30 series; `p1-vhalt`, `p1-odd` and the three off-main-thread
-configs (4b); the Luma dump check (4d). The G0-b
-verdict and G1 are the user's (step 7).
+configs (4b); the Luma dump check (4d). All of them ran in the second session
+(below). The G0-b verdict and G1 are the user's (step 7).
+
+### Console G0-b, second session (2026-10-19, New 3DS)
+
+The rest of the G0-b runbook, run 2026-10-19 10:07-11:20 on the New 3DS, same
+builds as the first session, same tools. Transcripts in `build-3ds/hw/g0b/`
+(`cl30-*`, `vhalt*`, `odd`, `home-close-1`), each run's card logs in
+`g0b/<run>-sd/`, the Luma dumps in `g0b/luma/` and `g0b/<run>-sd/` (not in git).
+Resolved with `arm-none-eabi-addr2line` against `build-3ds-c3d/alephone.elf`;
+every dump's code bytes were checked against that build first.
+
+**Classic @30 (step 2), SW -> GPU**, one run per level, `gaps=0` in every run:
+
+| Level | fps | busy (Δ) | `present` (Δ) | `max` | `c3d_wait` |
+| --- | --- | --- | --- | --- | --- |
+| L0 | 30.80 -> 30.84 | 18.07 -> 16.32 (**−1.75**) | 8.56 -> 6.35 (**−2.21**) | 57.6 -> 62.5 | 0.38 |
+| L6 | 30.83 -> 30.86 | 17.72 -> 15.67 (**−2.05**) | 8.65 -> 6.22 (**−2.43**) | 57.5 -> 54.8 | 0.36 |
+| L20 | 30.83 -> 30.82 | 17.63 -> 15.71 (**−1.92**) | 8.66 -> 6.31 (**−2.35**) | 58.1 -> 63.0 | 0.40 |
+
+The SW figures match the earlier console Classic @30 L0 (busy 18.24, `present`
+8.67-8.78; design 0.4). The first GPU L0 attempt is kept as `cl30-gpu-L0.stall1.txt`:
+its 3dslink mirror stalled at +50 s and the game loop froze for ~100 s after the
+BENCH line (no log line at all in that time, then a normal `finish_game`); its
+figures equal the rerun's (`present` 6.36) but it logged `gaps=1`, so the rerun is
+the figure. Cause: `tee_write()` (`a1_3ds_platform.cpp`) writes each line to the SD
+log, then `send()`s it to the host on a blocking socket while holding the log lock,
+so a Wi-Fi stall blocks every thread that logs (`NEXT-SPRINT.md` backlog item 15).
+
+**Crash dumps (4d): no dump from the GPU present.** `/luma/dumps/arm11/` held
+dumps 0-2 before this session: 0 is the stage 3 one, 1 and 2 (byte-identical) are
+the HOME > Close-in-a-dialog crash fixed on 2026-10-18 (`STAGE5.md`: PC
+`syncArbitrateAddress`, SP `0x0814b7c8`). None from the first session. Dumps 3-6
+are this session's error-path runs, below.
+
+**Error paths (4, 4b), `build-3ds-c3d`:**
+
+| Run | citro3d part | What the console showed | How it ended |
+| --- | --- | --- | --- |
+| `p1-vhalt` (`vhalt()` on main) | **pass**: `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done` (linear 17800 KiB, VRAM 6144 KiB), then the error | the error screen, readable ("Aleph One stopped" on top, the message on the bottom) | leaving it: dump 3, data abort reading `0x10` in libctru `hidScanInput` (`hid.c:185`) via `__wrap_hidScanInput` from `a1_3ds::error_screen`: HID already shut down. Luma's exception screen, then power-off. No `gfxExit call #2` logged |
+| `p1-odd` | **pass**: `present: 300x200 SDL_PIXELFORMAT_RGB565 converted and letterboxed into 400x240`, 0 false returns, `odd_surface` +1 per second | the picture once a second (the menu and the picture alternate: by design) | the two captures (`screen-c3d-odd{1,2}-top.bmp`) equal the generator's picture in all 60 000 pixels within 1 level, at (50, 20), diagonal top-left to bottom-right, letterbox black. The HOME > Close at the end **hung** (below) |
+| `p1-vhalt-thread-sdl` (`vhalt()` on a second thread) | **pass**: `gfxExit on a thread other than main (thread 291, main 280)`, `release requested by another thread`, `release #1`, `release done` | Luma's exception screen | dump 4, the same `hidScanInput` null read, **on the main thread** (`main_event_loop` -> `SDL_WaitEventTimeout` -> `N3DS_PumpEvents`): the second thread's `SDL_Quit` shut HID down under it. `gfxExit: released by the main thread` not logged (the process died first) |
+| `p1-vhalt-thread-screen` (`error_screen()` on a second thread) | **pass**: `release_top on a thread other than main (thread 294, main 283)`, `release requested ...`, `release #1`, `release done`, `release_top: released by the main thread` | **no error screen**: the top screen kept the dimmed main menu (the top is left alone, as designed), the bottom screen stayed black | the error screen's own captures: bottom framebuffer **0 of 76 800 pixels lit**, so the text never reached it (the Azahar captures were black for the same reason: `PERF.md` "Merge of 3ds-port" put them down to Azahar; they are real). Aleph One then exited (3dslink saw the close); dump 5 is **not Aleph One** (its code is not in the build; PC on `svc 0x3c`, `svcBreak`, SP `0x0fffffc8`): the next program, probably the Homebrew Launcher, panicked on start |
+| `p1-vhalt-thread` (`abort()` on a second thread) | not reached: the log ends at `test_vhalt 2: calling abort() on a second thread` | Luma's exception screen | dump 6, data abort reading `0x18` in newlib `_lseek_r`, on the main thread, in a resource-file `fseek` (`update_interface_display` -> `draw_full_screen_pict_resource_from_images`): the second thread's `abort()` had torn down stdio under it |
+
+The `hidScanInput` and `_lseek_r` faults are backlog item 14, now confirmed on the
+console: in Azahar they were logged null reads; on the console a data abort, Luma's
+exception screen and a power-off. They occur with any fatal error, citro3d or not.
+
+**HOME > Close in a game hangs with the GPU present: a G0-b blocker.** Twice in two
+tries (`odd`, then `home-close-1` with plain `p1-gpu.cfg`, both Classic @30): HOME,
+then Close, and the HOME menu stays on "Closing software..." for good; only holding
+the power button turns the console off.
+
+| | first session (2 closes, fine) | second session (2 closes, hung) |
+| --- | --- | --- |
+| a present after `suspended (HOME menu or applet)` | none | **yes** (a `[c3d] stats` line, printed from inside a present, ≥ 1 s after the previous one) |
+| `exit without shutdown_application ... SDL_Quit` -> `gfxExit call #1` -> `release #1` | yes | `home-close-1`: yes, 10.9 s after the suspend; `odd`: nothing after the stats line |
+| `release done: C3D_Fini returned` | yes | **never** |
+
+So the hang is inside `release()` (`back/context.cpp`:170-178): one of
+`C3D_FrameEnd(0)`, the empty `C3D_FrameBegin(0)`/`C3D_FrameEnd(0)` that retires the
+queue, or `C3D_Fini()` waits for GPU work that never completes. Which one is
+**UNVERIFIED** (needs a log line between them). The trigger is a present while the
+app is suspended: the GPU present queues work for the GPU while the HOME menu owns
+it, and every later wait on that queue blocks. The software present writes the
+framebuffer with the CPU, so it has nothing to wait for. A likely fix is to skip
+the GPU present while suspended (the port tracks it: `s_in_home` / `s_asleep`,
+`input_3ds.cpp`) and not to wait on the queue in `release()` after such a frame;
+**UNVERIFIED** until built and tried. The `odd` run's log ends before the exit line,
+so there the wait may have been in the present itself.
+
+Card after the session: `debug-c3d`, `debug-perf` and `debug-input-script` deleted;
+prefs set to the user's HUD + Map, Framerate Target 60.
 
 ## Next candidates (not done)
 
