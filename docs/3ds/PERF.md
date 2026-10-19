@@ -768,7 +768,9 @@ Logs in `build/perf/p0-*` (not in git). busy = frame − idle.
   GPU present (P1) removes `present` work, so in Azahar it can show at most
   ~1.4 ms per frame in HUD + Map; whether it reaches the target is a
   console question (G0-b, design section 10).
-- Console runs of the four series: pending (design section 10, item 3).
+- Console runs (design section 10, item 3): three of the four series done
+  2026-10-19, Classic @30 pending ("Console G0-b, first session" below). On the
+  console the software build runs HUD + Map @60 at 59.97 / 60.30 / 59.97.
 
 ## Stage 10 P1: GPU present (Azahar — non-authoritative)
 
@@ -813,17 +815,26 @@ citro3d (identical), so Azahar cannot show them.
 
 ### Needs console verification (P1)
 
+Status after the first console session (2026-10-19, "Console G0-b, first session"
+below) in brackets.
+
 1. citro3d + SDL N3DS + the bottom-screen console: HOME, sleep, HOME > Close, the
    error screen, `C3D_Fini` before `gfxExit` (normal exit, `vhalt`, `abort`) (design 10, 1).
+   [HOME, sleep, HOME > Close, release before `gfxExit`: pass. Error screen,
+   `vhalt`, `abort`: not run.]
 2. No tearing and frame N or N-1 only (the frame-indexed test with `alt_load`) @30 and
    @60; the VBlank guard before `C3D_FrameEnd`; ordering margin (design 10, 2).
+   [Pass @30 and @60: every capture frame N.]
 3. The four series on the console (design 10, 3); G0-b: `present` -2 ms in HUD + Map.
+   [Three series done, Classic @30 not run; −2.24 to −2.30 ms @30, −1.54 to −1.89 @60.]
 4. Orientation and transfer flags (`FLIP_VERT(1)` upload, full 512x256 transfer,
    `OUT_FORMAT(RGBA8)` target; design 10, 8): Azahar needed the whole-texture transfer
    (a 512x240 transfer shifted the picture 16 rows).
+   [Pass: `present_diff` 153 checks, 0 with RGB differences.]
 5. Linear heap and VRAM free on the console (the 512 KiB command buffer and 512 KiB
    staging cost ~1 MiB of the linear heap; design 10, 12).
-6. Whether the L20 liquid difference above also shows there.
+   [As in Azahar: linear 17800 -> 16775 KiB, VRAM 0 -> 5257 KiB free; all back after release.]
+6. Whether the L20 liquid difference above also shows there. [Not looked at.]
 
 ### P1 follow-ups (critic P1 minors 4, 5, 1; 2026-10-17)
 
@@ -943,6 +954,83 @@ and 2.50 ON at L0 with `p1-gpu.cfg`; with `p1-diff.cfg` it reads 2.93-3.28, the
 check's copy and compare landing in that zone (another reason not to benchmark
 with it). The P0 tables predate patch 53 (on the console `bottom` +0.3 ms per
 frame), so G0-b compares the ON build with the OFF build of the same commit.
+
+### Console G0-b, first session (2026-10-19, New 3DS)
+
+`NEXT-SPRINT.md` "Stage 10 G0-b runbook" steps 2, 3, 4, 4c and most of 4d, run
+2026-10-19 01:09-02:33 on the New 3DS over 3dslink (24 launches). Builds from
+2026-10-18 23:33-23:36, the merge tree committed as `e1ef6a2` at 23:37 (`a5593c0`
+after it is docs only): `build-3ds-prof` (OFF, "SW" below) and
+`build-3ds-c3d-prof` (ON, `p1-gpu.cfg` as `debug-c3d`, "GPU") for the
+benchmarks, `build-3ds-c3d` for the functional run. Series set with
+`build-3ds/hw/sprint8/setprefs.sh IP MODE FPS`, one `debug-perf` run per level,
+Classic @60 L0 three times each way (averaged below: SW fps 53.01 x3, GPU 52.92 /
+53.16 / 53.14). Transcripts in `build-3ds/hw/g0b/` (`run.sh BUILD TAG`), the
+GPU end-of-run captures in `build-3ds/hw/sprint8/g0b-*` (not in git). `gaps=0`
+in every benchmark run. busy = frame − idle; deltas are GPU − SW.
+
+| Series | fps L0 / L6 / L20, SW -> GPU | busy, SW -> GPU (Δ) | `present`, SW -> GPU (Δ) | `bottom`, SW -> GPU |
+| --- | --- | --- | --- | --- |
+| HUD + Map @30 | 30.66 / 30.61 / 30.63 -> 30.62 / 30.65 / 30.64 | 14.02 / 13.59 / 13.72 -> 12.65 / 11.91 / 12.00 (**−1.37 / −1.68 / −1.72**) | 4.33 / 4.29 / 4.27 -> 2.03 / 2.03 / 2.03 (**−2.30 / −2.26 / −2.24**) | 1.96 / 2.31 / 2.44 -> 2.93 / 2.89 / 2.95 |
+| HUD + Map @60 | **59.97 / 60.30 / 59.97** -> 60.41 / 60.20 / 60.33 | 15.27 / 14.82 / 14.91 -> 13.82 / 13.80 / 13.57 (**−1.45 / −1.02 / −1.34**) | 4.64 / 4.97 / 4.99 -> 2.75 / 3.43 / 3.27 (**−1.89 / −1.54 / −1.72**) | 1.94 / 1.83 / 2.06 -> 2.37 / 2.33 / 2.40 |
+| Classic @30 | not run | | | |
+| Classic @60 | 53.01 / 53.02 / 52.94 -> 53.07 / 53.11 / 53.24 | 17.82 / 17.77 / 17.68 -> 17.12 / 17.01 / 16.92 (−0.70 / −0.76 / −0.76) | 7.21 / 7.48 / 7.65 -> 5.93 / 6.22 / 6.37 (−1.28 / −1.26 / −1.28) | — |
+
+- **G0-b `present` criterion (−2 ms in HUD + Map): met @30, not @60.** @30
+  `present` drops 2.24-2.30 ms to a flat 2.03 (the P1 prediction, design 9.3,
+  was ~1.2). @60 it drops 1.54-1.89 ms, to 2.75-3.43: the GPU present costs more
+  per frame at 60 than at 30. Not explained; a guess, not measured, is that at
+  60 the staging fill meets the previous frame's transfer still reading it.
+- **Part of the saving moves into `bottom`:** +0.51-0.97 ms @30, +0.34-0.50 @60.
+  `render`, `hud` and `blit` are unchanged (within 0.1 ms), so the real saving
+  is the busy delta, about `present` + `bottom`: 1.33-1.73 ms @30, 1.02-1.46 @60.
+  Not explained either; `bottom` runs after the top present, so the bottom
+  screen's CPU copy may now meet the GPU's transfer in memory (unverified).
+- **The worst frame is longer with the GPU present:** `max` 39.9-42.1 -> 49.7-61.9
+  ms (HUD + Map @30), 23.5-25.8 -> 33.8-35.3 (@60), 33.8-38.6 -> 38.6-46.6
+  (Classic @60). `c3d_wait` is 0.00 in HUD + Map and 0.23 in Classic; `world` and
+  `other` are 0.2-0.3 ms higher in Classic @60 with the GPU present.
+- **The stage 10 target is already met by the software renderer on the
+  console:** HUD + Map @60 runs 59.97 / 60.30 / 59.97 fps (busy 14.8-15.3 ms;
+  the target is ≥ 55 fps, busy ≤ 18 ms, design 0.5 and 11.1). The P0 data point
+  (52.62 / 58.07 / 57.09) is Azahar, where `render` reads ~2x the console's
+  (11.20 against 5.84 at L0). The spare time at 60 is small: idle 1.41-1.76 ms
+  per frame (SW), 2.73-3.01 (GPU). Classic @60 stays at ~53 fps both ways
+  (not worse than 53.16, as the target asks).
+- The HUD + Map @30 SW `present` (4.33 at L0) equals `STAGE7.md`'s console
+  figure (`STAGE7.md`:220), so the console figures repeat across sessions.
+- The first HUD + Map @60 SW L0 attempt stopped without a BENCH line (kept as
+  `hm60-sw-L0.cut1.txt`); the figure is the rerun.
+
+**Frame-indexed test (step 3): pass.** `p1-calibrate-altload.cfg`, HUD + Map,
+@30 and @60: 18 and 13 captures (6 after presents 120 and 600, 6 after 1200 @30,
+1 @60, where the benchmark ended), checked with
+`c3d-pixdiff.py cal`: every capture is 400x240 of one colour, and every colour
+is that capture's own frame (N; none N−1, none mixed). The heavy frames
+(20 ms busy wait) make these runs' fps (29.06, 36.37) and `max` (255-260 ms)
+meaningless as benchmarks; @30 logged `gaps=1`.
+
+**Functional run (steps 4, 4c, 4d): pass, as far as the log goes.**
+`build-3ds-c3d`, `p1-diff.cfg` (`present gpu`, `present_diff 30`), 271 s. The
+3dslink connection dropped at the lid (146 s); the timeline is from the SD
+card's `log.txt` (`build-3ds/hw/g0b/fn/fn-main-log.txt`):
+
+| Check | Result |
+| --- | --- |
+| menus, dialogs (640x480 path) | `present: 640x480 -> 320x240 (UHADD8 box, << 8) centred, GPU upload`; main menu at 24.6 s |
+| a game in HUD + Map (400x240 path) | `present: 400x240 -> staging 1:1, GPU upload` |
+| HOME and back | suspended 117.3 s, resumed after 3.9 s |
+| sleep (lid) and wake | suspended 146.3 s, resumed after 0.9 s |
+| save | `save: begin` 159.0 s to `surplus saves checked` 163.4 s (game wad 1.64 s, preview wad 2.60 s written). Whether the "Saving..." box showed on both screens: not recorded |
+| Classic | the prefs went from HUD + Map @30 (set before the run) to Classic @30 (`fn/prefs-after`), so Classic was chosen in Preferences; three games ended (`finish_game` at 174, 221, 252 s) |
+| HOME > Close in a dialog (4d) | `exit without shutdown_application (a dialog's exit): SDL_Quit`, `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done`, `exit`. Luma dumps: not checked |
+| `present_diff` (4c) | `present_diff final: 153 checks, 0 with RGB differences; not checkable: 0 ... 0`, max \|diff\| 0 on every channel: the GPU picture equals the CPU present's word for word on both paths, so orientation and transfer flags are right (design 10.8, "Needs console verification (P1)" item 4) |
+| citro3d state | `init ok: command buffer 512 KiB; linear free 17800 -> 16775 KiB, VRAM free 0 -> 5257 KiB` (the same as Azahar); after release linear 17812 KiB, VRAM 6144 KiB; linear heap at boot 19912 KiB; 4620 presents, GX high-water 3, 0 refused, 0 `present_screen()` false returns, command buffer use 0.09% |
+
+Not run in this session (`NEXT-SPRINT.md` G0-b runbook, the remaining steps):
+the Classic @30 series; `p1-vhalt`, `p1-odd` and the three off-main-thread
+configs (4b); the Luma dump check and the "Saving..." look (4d); the look
+checks (5: L20 liquid). The G0-b verdict and G1 are the user's (step 7).
 
 ## Next candidates (not done)
 

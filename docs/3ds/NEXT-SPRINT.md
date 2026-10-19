@@ -355,79 +355,71 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
 ## Stage 10 G0-b runbook (the citro3d GPU present on the console)
 
 Stage 10 is **paused at G0** (user's decision, 2026-10-16; `CITRO3D_DESIGN.md`
-0.5): P1 (`386b7d4`, tag `port-stage10-P1`, branch `stage10-c3d`) passed
-review, but its Azahar gate (G0-a, `present` −50%) cannot be judged in an
-emulator that charges instructions, not cache misses (`PERF.md` "Stage 10
-P1"). G0-b decides it: **keep the GPU present if HUD + Map `present` drops
-≥ 2 ms with no visible change**. Then the user decides G1 (build the 3D
-renderer). Same driving as "How to drive the console"; kill leftover
-3dslink first.
+0.5). G0-b decides whether to keep the GPU present (P1, tag `port-stage10-P1`):
+**HUD + Map `present` drops ≥ 2 ms with no visible change**. Then the user
+decides G1 (build the 3D renderer). Same driving as "How to drive the console";
+kill leftover 3dslink first.
 
-Since 2026-10-19 `stage10-c3d` includes `3ds-port` up to `42932d7` (merge
-`e1ef6a2`: patches 50-53 and the `atexit` `SDL_Quit`), checked in Azahar
-(`PERF.md` "Merge of 3ds-port"). Step 4d covers what the merge adds.
+**Done in the first session (2026-10-19, `PERF.md` "Console G0-b, first
+session"):** step 2 except Classic @30 (HUD + Map @30 and @60, Classic @60 incl.
+L0 three times each way), step 3 (no tearing, every capture frame N), step 4's
+first run with 4c (menus, HUD + Map, Classic, HOME, sleep and wake, a save,
+`present_diff` 153 checks with 0 differences) and 4d's HOME > Close in a dialog.
+Results in short: `present` −2.24 to −2.30 ms @30 but −1.54 to −1.89 @60, with
++0.3-1.0 ms moving into `bottom`; the software build already runs HUD + Map @60
+at ~60 fps.
 
-1. **Build** (in the `stage10-c3d` checkout): `build-3ds-prof` (OFF, the
-   reference: the P0 tables predate patch 53, which adds ~0.3 ms of `bottom`,
-   so compare with this build, not with them) and `build-3ds-c3d-prof`
-   (`-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`), plus `build-3ds-c3d` (ON, normal)
-   for the functional runs.
-2. **Benchmarks:** the four P0 series on the console (Bottom Screen 0 and 2,
-   Framerate Target 30 and 60, `debug-perf` L0/L6/L20), once with
-   `build-3ds-prof`, once with `build-3ds-c3d-prof` and
-   `scripts/3ds/tests/c3d/p1-gpu.cfg` put on the card as
-   `/3ds/alephone/debug-c3d` (`sd-ftp.sh IP put`). Run **Classic @60 L0 three
-   times** each way (Azahar showed 47.40 → 44.64 fps on one run). Compare
-   `present`, busy and fps; HUD + Map @60 against the target (≥ 55 fps,
-   design 0.5).
-3. **Frame-indexed test** (no tearing, design 5.1): `p1-calibrate-altload.cfg`
-   as `debug-c3d`, @30 and @60; fetch `screen-c3d-cal-*-top.bmp`, check with
-   `python3 -I scripts/3ds/tests/c3d-pixdiff.py cal <files>`: every capture
-   uniform and frame N or N−1. Watch the top screen for tears.
-4. **Functional** (`build-3ds-c3d`, `p1-gpu.cfg`): menus, a dialog in HUD +
-   Map, Classic, HOME and back, sleep (lid) and wake, HOME > Close (log:
-   `gfxExit call #1 (citro3d up: release first)`, `release #1`). Then
-   `p1-vhalt.cfg`: the error screen must appear (in Azahar it is black either
-   way), log one release and two `gfxExit` calls. Then `p1-odd.cfg`: a
-   letterboxed 300x200 test picture once a second.
-   4b. (P1 minor 4) `p1-vhalt-thread-sdl.cfg` with
-   `scripts/3ds/tests/input/17-c3d-vhalt.txt` copied as `debug-input-script`:
-   the log must show `gfxExit on a thread other than main`, `release requested by
-   another thread`, `release #1`, `gfxExit: released by the main thread`, with no
-   crash in citro3d. What happens after that (backlog item 14: in Azahar the process
-   faults in `hidScanInput`, also without citro3d) is recorded, not judged here.
-   Then `p1-vhalt-thread-screen.cfg` (`error_screen()` on a second thread): the
-   same hand-off lines with `release_top`, then the error screen on the bottom screen;
-   press A (the input script cannot reach it). Then `p1-vhalt-thread.cfg` likewise
-   (Azahar dies before the hand-off).
-   4c. (P1 minor 1) `p1-diff.cfg` as `debug-c3d`: menus, a dialog, then a game in
-   HUD + Map and in Classic for a minute each, then HOME > Close. The log must show
-   `present_diff: ... 0 of 96000 pixels differ in RGB` and `present_diff final: N
-   checks, 0 with RGB differences`. A mismatch line gives the first differing screen
-   pixel and both values: a whole-picture mismatch means wrong orientation or transfer
-   flags (`PERF.md` "Stage 10 P1" console item 4), a few pixels a rounding question;
-   fetch `log.txt` and stop there. Do not take benchmark figures with it on.
-   4d. (from the `3ds-port` merge; `build-3ds-c3d`, `p1-gpu.cfg`) HOME > Close
-   inside Preferences: the log shows `exit without shutdown_application (a
-   dialog's exit): SDL_Quit`, `gfxExit call #1 (citro3d up: release first)`,
-   `release #1`, then `exit`, and no new Luma dump in `/luma/dumps/arm11/`.
-   A save at level 1's pattern buffer: the "Saving..." box shows on both screens
-   (the top one now through the GPU present) and the next frame replaces it.
-5. **Look:** the L20 liquid (Azahar's capture differences there came from
-   timing, critic P1 finding 1); orientation and colours of every screen
-   (transfer flags `FLIP_VERT`, full 512x256).
-6. **Record:** `PERF.md` "Stage 10 P1" (console columns, G0-b verdict),
-   `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
-   `debug-c3d` and `debug-perf` from the card.
-7. **Decide with the user:** keep or drop the GPU present (G0-b); the critic's
-   P1 minors (`PERF.md` "P1 follow-ups"):
-   - [x] 4: `error_screen()` from a non-main thread must not call citro3d (done
-     2026-10-17: hand-off to the main thread; console: step 4b);
-   - [x] 5: flush 480 KiB, not 512 (done 2026-10-17; the cost is for step 2 to show);
-   - [x] 1: a `present_diff` self-check mode (done 2026-10-17, `p1-diff.cfg`;
-     console: step 4c);
+**Before starting.** The card was left with `debug-c3d` = `p1-diff.cfg` (it skews
+benchmarks: replace or delete it), probably `debug-perf`, and the prefs at
+Classic, Framerate Target 30. The helpers are in `build-3ds/hw/` (not in git):
+`g0b/run.sh BUILD TAG` (sends `<stage10-c3d>/BUILD/alephone.3dsx`, transcript in
+`g0b/TAG.txt`; the console IP is written in it, 192.168.100.72: update it if it
+changed) and `sprint8/setprefs.sh IP MODE FPS` (sets Bottom Screen and
+Framerate Target in the card's prefs). Use the same builds as the first session
+(the `stage10-c3d` build dirs, from the `e1ef6a2` tree): rebuild only if code
+changed, and then re-run a HUD + Map @30 pair to check the figures still match.
 
-   whether to try the zero-copy present (critic P1
-   finding 3: one engine edit, the GPU reads `main_surface` from linear
-   memory, TEV reorders the channels); G1.
+The remaining steps keep their original numbers:
 
+2. **Classic @30 benchmarks:** `setprefs.sh IP 2 30`, `debug-perf` L0/L6/L20,
+   once with `build-3ds-prof`, once with `build-3ds-c3d-prof` and
+   `scripts/3ds/tests/c3d/p1-gpu.cfg` as `/3ds/alephone/debug-c3d`
+   (`sd-ftp.sh IP put`). Compare `present`, busy, fps and `max`.
+4. **Functional, the error paths** (`build-3ds-c3d`):
+   - `p1-vhalt.cfg`: the error screen must appear (in Azahar it is black either
+     way), log one release and two `gfxExit` calls. Then `p1-odd.cfg`: a
+     letterboxed 300x200 test picture once a second.
+   - 4b. (P1 minor 4) `p1-vhalt-thread-sdl.cfg` with
+     `scripts/3ds/tests/input/17-c3d-vhalt.txt` copied as `debug-input-script`:
+     the log must show `gfxExit on a thread other than main`, `release requested by
+     another thread`, `release #1`, `gfxExit: released by the main thread`, with no
+     crash in citro3d. What happens after that (backlog item 14: in Azahar the
+     process faults in `hidScanInput`, also without citro3d) is recorded, not judged
+     here. Then `p1-vhalt-thread-screen.cfg` (`error_screen()` on a second thread):
+     the same hand-off lines with `release_top`, then the error screen on the bottom
+     screen; press A (the input script cannot reach it). Then `p1-vhalt-thread.cfg`
+     likewise (Azahar dies before the hand-off).
+   - 4d, the rest: list `/luma/dumps/arm11/` (ftpd): no dump from the first
+     session's HOME > Close (2026-10-19 ~02:30) or from these runs. Ask the user
+     whether the "Saving..." box showed on both screens in the first session's save
+     (the top one through the GPU present) and the next frame replaced it; if they
+     don't remember, save once at level 1's pattern buffer with `p1-gpu.cfg`.
+5. **Look:** the L20 liquid in HUD + Map and Classic with the GPU present
+   (Azahar's capture differences there came from timing, critic P1 finding 1).
+   Orientation and colours are settled by 4c's `present_diff`.
+6. **Record:** `PERF.md` "Console G0-b, first session" (the Classic @30 row and the
+   rest), `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
+   `debug-c3d` and `debug-perf` from the card; set the prefs back to the user's
+   Bottom Screen and Framerate Target (the originals were not saved:
+   `sprint8/prefs-g0b/current` is overwritten by each `setprefs.sh`).
+7. **Decide with the user:**
+   - G0-b, keep or drop the GPU present: the criterion is met @30, not @60, and the
+     worst frame (`max`) is 7-22 ms longer with it.
+   - G1, build the 3D renderer at all: the target (HUD + Map @60 ≥ 55 fps) was set
+     on Azahar figures; on the console the software renderer already meets it (busy
+     14.8-15.3 ms, idle 1.4-1.8 ms per frame). What M0-M9 would still buy is headroom,
+     not the target.
+   - whether to try the zero-copy present (critic P1 finding 3: one engine edit, the
+     GPU reads `main_surface` from linear memory, TEV reorders the channels).
+   - The critic's P1 minors 4, 5 and 1 are done (2026-10-17, `PERF.md` "P1
+     follow-ups"); their console checks are steps 4b, 2 and 4c.
