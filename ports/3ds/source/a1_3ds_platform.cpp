@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <malloc.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -192,6 +193,25 @@ devoptab_t s_tee_devoptab;
 // SD file's offset: one overwrote the other's line and the offset still
 // advanced twice, leaving never-written gaps (stale card data) in log.txt.
 LightLock s_tee_lock;
+// How long one write may wait for room in the socket's send buffer. A blocking
+// send() on a stalled Wi-Fi link held s_tee_lock for ~100 s on the console, and
+// every thread that logged waited behind it (NEXT-SPRINT.md backlog item 15).
+// libctru has no SO_SNDTIMEO (sys/socket.h), so: MSG_DONTWAIT, and poll() for
+// POLLOUT while the buffer is full.
+const int kLinkStallMs = 500;
+
+// Host went away or stalled: stop mirroring; the SD log goes on.
+void drop_link(const char* why)
+{
+	close(s_link_fd);
+	s_link_fd = -1;
+	if (s_log_fd >= 0)
+	{
+		char line[96];
+		const int n = snprintf(line, sizeof line, "[3ds] 3dslink mirror stopped (%s); the SD log goes on\n", why);
+		write(s_log_fd, line, n);
+	}
+}
 
 ssize_t tee_write(struct _reent*, void*, const char* ptr, size_t len)
 {
@@ -201,17 +221,25 @@ ssize_t tee_write(struct _reent*, void*, const char* ptr, size_t len)
 	if (s_link_fd >= 0)
 	{
 		size_t sent = 0;
+		int waited_ms = 0;
 		while (sent < len)
 		{
-			ssize_t n = send(s_link_fd, ptr + sent, len - sent, 0);
-			if (n <= 0)
+			ssize_t n = send(s_link_fd, ptr + sent, len - sent, MSG_DONTWAIT);
+			if (n > 0)
 			{
-				// Host went away: stop mirroring rather than block or retry.
-				close(s_link_fd);
-				s_link_fd = -1;
-				break;
+				sent += n;
+				continue;
 			}
-			sent += n;
+			if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && waited_ms < kLinkStallMs)
+			{
+				const int step = std::min(100, kLinkStallMs - waited_ms);
+				pollfd p = {s_link_fd, POLLOUT, 0};
+				poll(&p, 1, step);
+				waited_ms += step;
+				continue;
+			}
+			drop_link(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? "stalled" : "host went away");
+			break;
 		}
 	}
 	LightLock_Unlock(&s_tee_lock);

@@ -259,6 +259,48 @@ Azahar) [PERF "Next candidates"]
     bug). If it is ever filed: run the reproducer (`scripts/3ds/tests/exidx-repro/`) on
     the console first (only verified in Azahar), check that `devkitarm-crtls` `master`
     has not fixed it since 2026-10-11, and the user posts it. [STAGE5-PREREQS item 9]
+14. **A fatal error on a thread other than main never reaches the error screen**
+    (Azahar — non-authoritative, 2026-10-17, branch `stage10-c3d`, `debug-c3d`
+    `present cpu` so citro3d plays no part). `test_vhalt 2` (`abort()` on a second
+    thread): nothing is logged after the call, the error screen does not appear;
+    Azahar logs one null read in newlib's `_write_r` (the first stdio call of
+    `die_with_message`). `test_vhalt 3` (`vhalt()` on a second thread): `SDL_Quit`
+    runs there (`gfxExit` logged, `FATAL:` logged), then the process faults in a loop
+    in libctru `hidScanInput` (HID shut down by `SDL_Quit` while the main thread still
+    scans input). Even the main-thread `vhalt()` (`test_vhalt 1`, `present cpu`) logs
+    ~8200 null reads in `hidScanInput` in `abort()`'s second error screen, after
+    `SDL_Quit` shut HID down (seen in P1 too: the log stops at "exit"). An assertion
+    on the audio thread would end the same way: the 3DS
+    returns to the Homebrew Launcher, or hangs, with no message. The citro3d side is
+    handled (critic P1 minor 4, `PERF.md` "P1 follow-ups"). A fix (e.g. hand the whole
+    fatal path to the main thread, or stop the main thread before `shutdown_application()`)
+    is a design choice for the user.
+    **Console, 2026-10-19 (New 3DS, `PERF.md` "Console G0-b, second session"): worse
+    than in Azahar.** The null reads are data aborts there: Luma's "An exception
+    occurred" screen, then a power-off. Main-thread `vhalt()`: the error screen shows
+    and is readable, leaving it faults in `hidScanInput` (`hid.c:185`, address `0x10`).
+    `vhalt()` on a second thread: the main thread faults in `hidScanInput` from
+    `N3DS_PumpEvents`. `abort()` on a second thread: the main thread faults in newlib
+    `_lseek_r` (address `0x18`) in a resource-file `fseek`. `error_screen()` on a second
+    thread: nothing drawn (bottom framebuffer all black), then the app exits and the
+    next program (probably the Homebrew Launcher) panics in `svcBreak`. So any fatal
+    error ends in a forced power-off, not a return to the launcher.
+15. **The 3dslink log mirror can freeze the game.** `tee_write()`
+    (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
+    the SD log, then `send()`s it on a blocking socket while holding the log lock; its
+    comment says "stop mirroring rather than block", but a stalled Wi-Fi link blocks
+    the `send()`, and every thread that logs then waits on the lock. Seen once on the
+    console (2026-10-19, `build-3ds/hw/g0b/cl30-gpu-L0.stall1.txt`): the mirror fell
+    behind at +50 s and the game loop froze for ~100 s after a BENCH line. Only with
+    3dslink (a launcher start has no socket). A send timeout (`SO_SNDTIMEO`) or a
+    non-blocking socket would let it drop the mirror instead; not tried.
+    **Fixed on `3ds-port` 2026-10-19 (console check pending):** `tee_write()` sends
+    with `MSG_DONTWAIT` (`sys/socket.h`:22; libctru has no `SO_SNDTIMEO`) and, while the
+    send buffer is full, waits for room with `poll(POLLOUT)` (`poll.h`) in 100 ms steps,
+    500 ms per write at most; past that it closes the socket and writes `[3ds] 3dslink
+    mirror stopped (stalled); the SD log goes on` to the SD log. Console check: during a
+    3dslink run, `kill -STOP` the host's 3dslink process for ~10 s: the game must keep
+    running, the SD log must show that line, and the transcript stops there.
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
