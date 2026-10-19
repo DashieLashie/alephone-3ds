@@ -918,7 +918,12 @@ Added 2026-10-18 on branch `3ds-port-player-name`.
     two walks, top map closed, then open): differing map pixels against the
     complete picture (top map open) **2 659 (before) -> 370 (53) -> 0 (53 and
     the height)**; with the top map open the old and new builds are identical
-    (0), as are the first frames (0). Console check pending.
+    (0), as are the first frames (0). **Console, New 3DS (2026-10-18): walking
+    through large rooms with the top map closed, the bottom map stays complete
+    (user: "map looking good").** Cost, profile build, level 0, last 12 windows
+    (`s3-L0` before, `s5-L0-bottomfix` after): `bottom` 2.34 -> 2.64 ms per
+    frame (about 0.9 ms per redraw, every third frame), idle 18.4 -> 18.5 ms,
+    frame 32.7 -> 32.6 ms.
 
 **Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `OverheadMapRenderer.cpp`
 IDENTICAL; `-fsyntax-only` 0 diagnostics.

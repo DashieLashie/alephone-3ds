@@ -281,14 +281,26 @@ HOME > Close (`NEXT-SPRINT.md` B6).
 **The user's decisions** (2026-10-13): the map zoom is **not** remembered
 across sessions and gets **no indicator**; the zoom moves from taps to
 the D-Pad's map zoom keys, so a touch only ever looks (done after this
-session, "Map zoom" above; passes in Azahar; **console re-check pending**,
-`NEXT-SPRINT.md` "Catch-up runbook").
+session, "Map zoom" above; passes in Azahar; console re-check done
+2026-10-18, below).
 
 Also found in this session, outside stage 7 (`NEXT-SPRINT.md`, `PERF.md`
 "Load times"): a save took **69 s** in "save: file written" (an SD write
 test writes the same 2.98 MB in 0.66 s, so not the card); every return to
 the main menu spends **12 s** reloading the scenario files; hitches in the
 first seconds of each level.
+
+**Console re-check (2026-10-18).** The D-Pad zoom works on the console: Down/Up
+zoom the bottom map; with the main map open on the top screen (SELECT) the
+D-Pad zooms that one and not the bottom one, which the user found odd but
+**chose to keep** ("keep the D-Pad as is"). The re-check found a real bug in
+the bottom map, unrelated to the zoom: areas blacked out as the player moved
+away from them (a room larger than the 320x160 map rectangle with no corner in
+it was never drawn) and the top map hid it by setting the same flags. Fixed in
+`PATCHES.md` 53 (a polygon is drawn if its bounding box meets the rectangle;
+the rectangle also reaches the bottom of the surface): the map stays complete
+on the console, `bottom` +0.3 ms per frame. The save took 69 s; fixed too
+(`PATCHES.md` 51-52, 4.4 s, "Saving..." box on both screens).
 
 ## Testing (Azahar 2126.2)
 
