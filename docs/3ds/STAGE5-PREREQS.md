@@ -40,6 +40,14 @@ a public fork, skipping again (stage 3 declined it). Copying the file to
 iCloud or an external drive is up to the user. The bundle is refreshed after
 each approved commit.
 
+**Update (2026-10-18):** the user made a fork of upstream after this was
+written (`github.com/DashieLashie/alephone-3ds`, remote `alephone-3ds`) and
+pushed `3ds-port` (at `f8f9ddf`), `stage10-c3d` (5 commits behind the local
+branch at that date) and the tag `port-stage10-P1` to it. The fork is now a
+second copy next to the bundles; the bundles are still refreshed after
+approved commits. Pushes go to the fork only, when the user asks (`CLAUDE.md`
+"Git").
+
 **Command:**
 
 ```sh

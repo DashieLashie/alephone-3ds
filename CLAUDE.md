@@ -21,9 +21,14 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
 
 ## Git
 
-- The only remote (`origin`) is **upstream Aleph One**. Never push; never open PRs against it. Backups are local git
-  bundles in `~/Documents/Aleph_3ds-backups/` (`fc4c274..3ds-port`, refreshed and restore-tested after approved
-  commits; recipe in `docs/3ds/STAGE5-PREREQS.md` section 8).
+- Two remotes. `origin` is **upstream Aleph One** (`Aleph-One-Marathon/alephone`): read-only for us, never push to it and
+  never open PRs against it. `alephone-3ds` is **the user's fork** (`github.com/DashieLashie/alephone-3ds`), where the
+  port is published: it already holds `3ds-port`, `stage10-c3d` and the tag `port-stage10-P1` (the user pushed them).
+  Pushing to the fork is allowed, but it is outward-facing: do it only when the user asks (or has said to, for the
+  task at hand), push the branch you worked on, never force-push, and never push to `origin`. The clone is shallow
+  (boundary `fc4c274`); the fork accepts pushes as is.
+- Backups: the fork is one copy; local git bundles in `~/Documents/Aleph_3ds-backups/` (`fc4c274..<branch>`,
+  refreshed and restore-tested after approved commits; recipe in `docs/3ds/STAGE5-PREREQS.md` section 8) are the other.
 - Commit subjects: `3DS port: <summary>` on `3ds-port`, `stage10: <id> <summary>` on `stage10-c3d` (one commit and a
   `port-stage10-<id>` tag per milestone). One commit per finished piece.
 - Run git from the checkout's own directory with literal arguments. In a worktree session a compound
@@ -78,7 +83,7 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
    `/opt/devkitpro/examples/3ds/graphics/gpu/`; cite them. `CITRO3D_DESIGN.md` marks unverified claims **UNVERIFIED**.
 8. When the user is away ("working overnight"): do only work that needs neither the console nor a decision (Azahar runs,
    code, docs, measurements, commits). Write console sessions and choices up as a runbook for their return, as
-   `NEXT-SPRINT.md` does. Ask nothing mid-run; outward-facing actions (reports, pushes) wait.
+   `NEXT-SPRINT.md` does. Ask nothing mid-run; outward-facing actions (reports, pushes, even to the fork) wait.
 
 ## Platform traps (all cost a debugging session once)
 
