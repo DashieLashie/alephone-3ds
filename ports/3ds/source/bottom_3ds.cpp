@@ -131,7 +131,10 @@ void draw_map(bool allowed)
 	d.origin.y = world_view->origin.y;
 	d.origin_polygon_index = world_view->origin_polygon_index;
 	d.width = kW;
-	d.height = kMapH;
+	// The renderer's visibility rectangle is top .. top + height: top is -kMapNameSkip
+	// (the level name falls off the surface), so without the skip the last 32 rows
+	// of the surface were outside it and only drawn if a vertex fell inside.
+	d.height = kMapH + kMapNameSkip;
 	d.half_width = kW / 2;
 	d.half_height = kMapH / 2 + kMapNameSkip;   // the player stays in the middle
 	d.top = -kMapNameSkip;

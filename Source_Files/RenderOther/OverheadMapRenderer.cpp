@@ -432,6 +432,27 @@ void OverheadMapClass::transform_endpoints_for_overhead_map(
 				break;
 			}
 		}
+#ifdef A1_PLATFORM_3DS
+		/* The bottom screen's map is a small rectangle: a polygon larger than it, with no
+			vertex inside it, was never drawn (a room goes black as the player walks away
+			from its corners). The polygon's bounding box against the rectangle is a
+			superset of the test above; what lies outside the surface is clipped. */
+		if (polygon->vertex_count > 0)
+		{
+			int min_x= INT_MAX, max_x= INT_MIN, min_y= INT_MAX, max_y= INT_MIN;
+			for (j=0;j<polygon->vertex_count;++j)
+			{
+				struct endpoint_data *endpoint= get_endpoint_data(polygon->endpoint_indexes[j]);
+				if (endpoint->transformed.x < min_x) min_x= endpoint->transformed.x;
+				if (endpoint->transformed.x > max_x) max_x= endpoint->transformed.x;
+				if (endpoint->transformed.y < min_y) min_y= endpoint->transformed.y;
+				if (endpoint->transformed.y > max_y) max_y= endpoint->transformed.y;
+			}
+			if (max_x >= Control.left && min_x <= Control.left + Control.width &&
+				max_y >= Control.top && min_y <= Control.top + Control.height)
+				SET_STATE_FLAG(i, _polygon_on_automap, true);
+		}
+#endif
 	}
 }
 

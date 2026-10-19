@@ -890,3 +890,35 @@ Added 2026-10-18 on branch `3ds-port-player-name`. Console numbers: `PERF.md`
 **Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `QuickSave.cpp`
 DIFFER (2 lines), 0 lines with numbers normalised (only `__LINE__` moved);
 `-fsyntax-only` 0 diagnostics.
+
+## The bottom map's missing areas (53)
+
+Added 2026-10-18 on branch `3ds-port-player-name`.
+
+53. **`RenderOther/OverheadMapRenderer.cpp`: a polygon is drawn if its bounding
+    box meets the map's rectangle, not only if a vertex does.** Console report
+    (2026-10-18, HUD + Map): the bottom screen's map blacked out areas as the
+    player moved away from them and showed them again on approach; opening the
+    top map made both maps right. `transform_endpoints_for_overhead_map()` flags
+    an endpoint when it falls inside the rectangle, then a polygon when one of
+    its endpoints is flagged, so a polygon larger than the rectangle with no
+    vertex inside is skipped. The bottom map's rectangle is 320x160, small enough
+    for rooms to exceed it. The top map "fixed" it because its larger render sets
+    the same flags in `render_flags[]` (`render.h`:149), which only the 3D
+    view's frame clears, and that view is off while the top map is open. The
+    3DS branch adds a test after the original: the min/max of the polygon's
+    transformed endpoints against `left..left+width`, `top..top+height`. It is a
+    strict superset of the original test (a vertex inside implies the box meets
+    the rectangle), so nothing drawn before disappears; what lies outside the
+    surface is clipped. **Port side** (`bottom_3ds.cpp`, `draw_map()`):
+    `d.height` was `kMapH` with `d.top = -kMapNameSkip`, which ended the
+    rectangle 32 rows above the surface's bottom; it is now
+    `kMapH + kMapNameSkip`. Azahar, script
+    `scripts/3ds/tests/input/21-bottom-map-big-polygons.txt` (bottom map at zoom 3,
+    two walks, top map closed, then open): differing map pixels against the
+    complete picture (top map open) **2 659 (before) -> 370 (53) -> 0 (53 and
+    the height)**; with the top map open the old and new builds are identical
+    (0), as are the first frames (0). Console check pending.
+
+**Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `OverheadMapRenderer.cpp`
+IDENTICAL; `-fsyntax-only` 0 diagnostics.

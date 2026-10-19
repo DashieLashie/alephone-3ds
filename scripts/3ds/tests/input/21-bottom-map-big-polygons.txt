@@ -1,0 +1,39 @@
+# Console report (2026-10-18): the bottom screen's map blacks out areas as the
+# player moves away from them and shows them again on approach; opening the top
+# map makes both right. Theory: the map renderer draws a polygon only if one of
+# its vertices is inside the drawing rectangle (OverheadMapRenderer.cpp,
+# transform_endpoints_for_overhead_map), so a room larger than the small
+# bottom rectangle, with no corner in it, is missed; the top map's render sets
+# the flags (render_flags[], not cleared while the 3D view is off) for it.
+# Captures the bottom screen at the most zoomed-in scale (3) with the top map
+# closed, then with it open.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+log --- D-Pad Up x2: bottom map zoom 3 ---
+tap UP
+wait 300
+tap UP
+wait 1000
+screens b21-start-z3
+log --- walk forward ---
+circle 0 150
+wait 4000
+circle 0 0
+wait 500
+screens b21-walk1-z3
+circle 0 150
+wait 4000
+circle 0 0
+wait 500
+screens b21-walk2-z3
+log --- SELECT: top map open; the bottom map should now be complete ---
+tap SELECT
+wait 1500
+screens b21-walk2-z3-topopen
+log --- SELECT: close ---
+tap SELECT
+wait 1500
+screens b21-walk2-z3-closed
