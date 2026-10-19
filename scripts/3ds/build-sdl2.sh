@@ -10,6 +10,10 @@
 #   SDL2_TTF_TAG   likewise for SDL_ttf
 #   WORK_DIR       clone/build directory (default: <repo>/build/3ds-deps)
 #
+# Patches in scripts/3ds/patches/SDL2/ are applied after the clone (SDL2:
+# 0001, the N3DS joystick driver releases HID once; made against
+# release-2.32.10).
+#
 # Installing into portlibs needs root when it is owned by root; the script
 # calls `sudo` for the install step only.
 set -euo pipefail
@@ -47,6 +51,18 @@ build() {
   if [[ ! -d "$src" ]]; then
     git clone --depth 1 --branch "$tag" "$url" "$src"
   fi
+  # Port patches (scripts/3ds/patches/<name>/*.patch, made against the tag in
+  # their header comment); skip the ones already applied.
+  local patch
+  for patch in "$REPO_ROOT/scripts/3ds/patches/$name"/*.patch; do
+    [[ -f "$patch" ]] || continue
+    if git -C "$src" apply --reverse --check "$patch" 2>/dev/null; then
+      echo "    patch already applied: $(basename "$patch")"
+    else
+      git -C "$src" apply "$patch" || fail "$(basename "$patch") does not apply to $name $tag"
+      echo "    patch applied: $(basename "$patch")"
+    fi
+  done
 
   cmake -S "$src" -B "$bld" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
