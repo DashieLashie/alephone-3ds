@@ -402,28 +402,31 @@ Framerate Target 60). The helpers stay in `build-3ds/hw/` (not in git):
 `g0b/run.sh BUILD TAG` (console IP 192.168.100.72 written in it) and
 `sprint8/setprefs.sh IP MODE FPS`.
 
-What is left:
+**Decided (user, 2026-10-19; `CITRO3D_DESIGN.md` 0.5, open questions 3 and 9):**
+keep the GPU present, build the 3D renderer aiming at M7 (2x2 supersampling) and
+M9 (stereo 3D, HUD + Map only), try the zero-copy present, and fix what the console
+found. The plan, in order (each piece: Azahar first, then a console check; stage 10
+pieces go through `c3d-architect` / `c3d-critic` / `c3d-implementer` as in
+`CLAUDE.md`):
 
-1. **Decide with the user** (G0-b, G1):
-   - Keep or drop the GPU present. Keeping it needs the hang fixed first (item 2);
-     dropping it costs nothing (`A1_RENDER_C3D=OFF` is the default build).
-   - G1, build the 3D renderer at all: the target (HUD + Map @60 ≥ 55 fps) was set
-     on Azahar figures; on the console the software renderer already meets it (busy
-     14.8-15.3 ms, idle 1.4-1.8 ms per frame). What M0-M9 would still buy is headroom,
-     not the target.
-   - Whether to try the zero-copy present (critic P1 finding 3: one engine edit, the
-     GPU reads `main_surface` from linear memory, TEV reorders the channels).
-   - Backlog item 14 (fatal errors): now a power-off on the console, in every build.
-2. **Only if the GPU present is kept: fix the HOME > Close hang.** A design note
-   first (`c3d-architect`, then `c3d-critic`): skip the GPU present while suspended
-   (`s_in_home` / `s_asleep` in `input_3ds.cpp`) and do not wait on the GPU queue in
-   `release()` after a frame submitted while suspended; first log a line between the
-   steps of `release()` (`back/context.cpp`:170-178) to find which wait blocks. Then
-   console: HOME > Close in a game, three times, with `p1-gpu.cfg`; HOME and back
-   in a game; sleep in a game. Also `error_screen()` on a second thread (step 4b's
-   `p1-vhalt-thread-screen.cfg`) draws nothing: part of the same review.
-3. `CITRO3D_DESIGN.md` section 10: items 1-3, 8, 12 are annotated with the console
-   results (2026-10-19).
-
-The critic's P1 minors 4, 5 and 1 are done (2026-10-17, `PERF.md` "P1 follow-ups")
-and were checked on the console in this runbook (4b, 2, 4c).
+A. **Fixes** (before anything builds on P1):
+   1. **HOME > Close in a game hangs** (stage 10). First a log line between the
+      steps of `release()` (`back/context.cpp`:170-178) to find which wait blocks;
+      then skip the GPU present while suspended (`s_in_home` / `s_asleep` in
+      `input_3ds.cpp`) and do not wait on the GPU queue in `release()` after a frame
+      submitted while suspended. Design note, critic, implementation. Console: HOME >
+      Close in a game three times with `p1-gpu.cfg`; HOME and back; sleep in a game.
+   2. **`error_screen()` on a second thread draws nothing** (stage 10, P1 minor 4
+      path; `p1-vhalt-thread-screen.cfg`): the bottom framebuffer stays black.
+   3. **Backlog item 14, fatal errors end in a power-off** (`3ds-port`, every
+      build): a design choice (hand the fatal path to the main thread, or stop the
+      main thread before `shutdown_application()`; keep HID usable for the error
+      screen's own input), then merge `3ds-port` into `stage10-c3d`.
+   4. **Backlog item 15, the 3dslink mirror can freeze the game** (`3ds-port`):
+      a send timeout or a non-blocking socket in `tee_write()`.
+B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
+   read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 54+).
+   Measured on the console against the current GPU present.
+C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
+   Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
+   is optional; open questions 4-8, 10-12 are asked when their milestone comes up.

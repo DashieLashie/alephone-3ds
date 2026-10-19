@@ -13,10 +13,10 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   HUD + Map on the bottom screen, 30 fps cap), plus a performance stage and a load-time sprint (`NEXT-SPRINT.md`).
 - **Stage 10** (optional citro3d GPU renderer behind `A1_RENDER_C3D`) lives on branch **`stage10-c3d`**, in the worktree
   `.claude/worktrees/stage10-c3d`. P0 (software baseline) and P1 (GPU present, tag `port-stage10-P1`) are done.
-  **It is paused at gate G0**: the console runs of the "Stage 10 G0-b runbook" (end of `docs/3ds/NEXT-SPRINT.md`)
-  were all done on 2026-10-19 (`PERF.md` "Console G0-b", two sessions). Open: HOME > Close in a game hangs
-  with the GPU present (a blocker if it is kept), and the user's G0-b and G1 decisions.
-  Do not start M0+ (the 3D renderer) without the user's G1 decision.
+  The G0-b console runs were all done on 2026-10-19 (`PERF.md` "Console G0-b", two sessions). **User decisions
+  (2026-10-19):** keep the GPU present, G1 = build the renderer aiming at M7 (supersampling) and M9 (stereo),
+  try the zero-copy present. The plan is the end of `docs/3ds/NEXT-SPRINT.md`: fixes first (HOME > Close in a
+  game hangs with the GPU present; backlog items 14 and 15), then zero-copy, then M0-M6, M7, M9.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
 - Hardware: one **New 3DS / New 2DS**. Every Old 3DS figure comes from Azahar's Old 3DS mode and is unverified.

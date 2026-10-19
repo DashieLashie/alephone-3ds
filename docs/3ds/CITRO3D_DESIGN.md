@@ -107,6 +107,16 @@ session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
 renderer?) is decided by the user after G0-b. The current session implements
 **P0 and P1 only**.
 
+**User decisions (2026-10-19, after the G0-b console sessions, `PERF.md`
+"Console G0-b"):** **G0-b: keep the GPU present**, once the console findings are
+fixed (HOME > Close in a game hangs; `error_screen()` on a second thread draws
+nothing; and, outside citro3d, `NEXT-SPRINT.md` backlog items 14 and 15). **G1:
+build the 3D renderer**, aiming at **M7 (2x2 supersampling) and M9 (stereo 3D)**:
+they are wanted as features, not for speed (the software renderer already meets
+the target on the console). **Try the zero-copy present** (critic P1 finding 3).
+Order: the fixes, then the zero-copy present, then M0-M6, M7, M9 (open questions
+3 and 9).
+
 ## 1. Frame flow and the seam
 
 ### 1.1 Software path per frame (reference)
@@ -1020,14 +1030,15 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    **Answered (user, 2026-10-16):** pause at G0 until a console session
    confirms G0-b; do not proceed on G0-a alone. This session implements P0
    and P1 only.
-3. G1: build the 3D renderer at all after P1? (Open; the user decides after
-   G0-b.)
+3. ~~G1: build the 3D renderer at all after P1?~~ **Answered (user,
+   2026-10-19):** yes, aiming at M7 and M9 (0.5).
 4. Direct mode for Classic, or readback + P1 there?
 5. Runtime switch: debug file only, or the M8 preference?
 6. SSAA default on or off?
 7. Support `software_alpha_blending` (see-through liquids) later?
 8. Mipmaps/linear filtering as an option (not SW-faithful)?
-9. Stereo wanted?
+9. ~~Stereo wanted?~~ **Answered (user, 2026-10-19):** yes (M9; direct mode,
+   so HUD + Map only, section 6).
 10. 800 px wide mode (`gfx.h`:101) instead of SSAA?
 11. Texture conversion on another thread (core 1 runs audio)?
 12. GPU-drawn crosshair to keep direct frames overlay-free?
