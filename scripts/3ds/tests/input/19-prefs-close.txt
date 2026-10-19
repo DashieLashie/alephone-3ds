@@ -1,0 +1,15 @@
+# HOME > Close while a modal dialog (Preferences) is open. Upstream ends the
+# process with exit(0) there (sdl_dialogs.cpp, SDL_QUIT), which skipped
+# SDL_Quit and crashed on the console: Luma dump, PC syncArbitrateAddress,
+# LR gspEventThreadMain. The log must show "exit without shutdown_application
+# ...: SDL_Quit" and then "exit". Azahar may not reproduce the original fault;
+# the console decides.
+wait 1000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+log --- HOME for 2 s, then Close, with Preferences open ---
+home 2000
+quit
+wait 10000

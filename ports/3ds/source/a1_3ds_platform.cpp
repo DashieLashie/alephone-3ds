@@ -294,6 +294,24 @@ void close_outputs()
 	}
 }
 
+// Upstream ends the process with a bare exit(0) when the system asks to close
+// while a modal dialog is open (sdl_dialogs.cpp: SDL_QUIT), skipping
+// shutdown_application(). Without SDL_Quit() the n3ds video driver never
+// releases GSP: libctru frees the heap while its GSP event thread (whose stack
+// is in that heap) is alive, and the thread faults (HOME > Close in
+// Preferences: Luma dump, PC syncArbitrateAddress, LR gspEventThreadMain).
+// Runs before close_outputs (atexit is last in, first out). A normal
+// shutdown has already run SDL_Quit(), so SDL_WasInit(0) is 0 and this is a no-op.
+void quit_sdl_at_exit()
+{
+	if (SDL_WasInit(0) == 0)
+		return;
+	printf("[3ds] +%.1f ms: exit without shutdown_application (a dialog's exit): SDL_Quit\n",
+	       ms_since_boot());
+	fflush(stdout);
+	SDL_Quit();
+}
+
 // --- helpers ---------------------------------------------------------------
 
 double ms_since_boot()
@@ -894,6 +912,7 @@ bool boot_begin(int& argc, char**& argv)
 	open_3dslink();
 	install_tee();
 	atexit(close_outputs);
+	atexit(quit_sdl_at_exit);
 	std::set_terminate(on_terminate);
 	signal(SIGABRT, on_abort);
 	try

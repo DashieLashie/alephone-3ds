@@ -123,7 +123,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | 6 | HOME > Close in the demo | **Measured**: 13.4 s, 12.5 s of it the scenario reload; the APT exit hook had not run | S | yes | With item 3's reload; check the exit hook |
 | 7 | C-Stick vertical look | **Done**: "feels right now" (2026-10-13) | none | no | Closed |
 | 8 | Prefs `rate="44100"` | **Done**: 32728 on the card (2026-10-13); `audio` 10.2-10.8 → 7.7-7.8 ms | none | no | Closed |
-| 9 | Player name from CFGU | **Done in Azahar** (2026-10-17, `PATCHES.md` 50); console check pending | XS: check | yes | Catch-up runbook, run C |
+| 9 | Player name from CFGU | **Done** (2026-10-17, `PATCHES.md` 50); **console confirmed 2026-10-18** ("Dashie" from the profile) | none | no | Closed |
 | 10 | 400x240 menu layouts | Deferred | L | yes | Its own stage |
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
 | 12 | Backup bundle | **Done** (refreshed after each session) | none | no | Closed |
@@ -211,7 +211,11 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    10.2-10.8 to 7.7-7.8 ms; item 4's frame stayed.
 9. Player name from the console profile (CFGU) instead of "Bob User". **Done in
    Azahar — non-authoritative (2026-10-17, branch `3ds-port-player-name`,
-   `PATCHES.md` 50); console check pending** (catch-up runbook, run C). New
+   `PATCHES.md` 50). Console, New 3DS (2026-10-18): the log line and Preferences >
+   Player show the profile's name ("Dashie") on fresh prefs; the card's own prefs
+   were restored afterwards.** Found on the way: HOME > Close with a dialog open
+   crashed (`STAGE5.md` "HOME > Close inside a modal dialog"), fixed with an
+   `atexit` `SDL_Quit()` and confirmed on the console. New
    preferences take the profile's name (config block 0x000A0000, UTF-16 ->
    UTF-8 -> the field's Mac Roman); a saved name is kept. Azahar, script
    `18-player-name-default.txt` with `--reset-prefs`: the profile's "AZAHAR" in
@@ -302,7 +306,8 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
    `[3ds] player name from the console profile: "..."` line shows the console's
    profile name (on a card with saved preferences the name in them is kept:
    to see it in Preferences > Player, move `Marathon 2 Preferences` aside with
-   ftpd first and put it back afterwards).
+   ftpd first and put it back afterwards). **The player-name part of run C is
+   done (2026-10-18).**
 5. **Decide with the user** from the numbers: the slow save step (fix it, or a
    "Saving..." message as the user asked if it cannot be fixed); the next
    step of the scenario reload and boot (the dialog theme's 5.2 s too).
