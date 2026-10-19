@@ -364,8 +364,9 @@ kill leftover 3dslink first.
 session"):** step 2 except Classic @30 (HUD + Map @30 and @60, Classic @60 incl.
 L0 three times each way), step 3 (no tearing, every capture frame N), step 4's
 first run with 4c (menus, HUD + Map, Classic, HOME, sleep and wake, a save,
-`present_diff` 153 checks with 0 differences) and 4d's HOME > Close in a dialog.
-Results in short: `present` −2.24 to −2.30 ms @30 but −1.54 to −1.89 @60, with
+`present_diff` 153 checks with 0 differences), 4d's HOME > Close in a dialog,
+and step 5 (the user: the L20 water in the GPU runs looked indistinguishable
+from the software runs). Results in short: `present` −2.24 to −2.30 ms @30 but −1.54 to −1.89 @60, with
 +0.3-1.0 ms moving into `bottom`; the software build already runs HUD + Map @60
 at ~60 fps.
 
@@ -404,9 +405,6 @@ The remaining steps keep their original numbers:
      whether the "Saving..." box showed on both screens in the first session's save
      (the top one through the GPU present) and the next frame replaced it; if they
      don't remember, save once at level 1's pattern buffer with `p1-gpu.cfg`.
-5. **Look:** the L20 liquid in HUD + Map and Classic with the GPU present
-   (Azahar's capture differences there came from timing, critic P1 finding 1).
-   Orientation and colours are settled by 4c's `present_diff`.
 6. **Record:** `PERF.md` "Console G0-b, first session" (the Classic @30 row and the
    rest), `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
    `debug-c3d` and `debug-perf` from the card; set the prefs back to the user's

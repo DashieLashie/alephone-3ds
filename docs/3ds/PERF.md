@@ -834,7 +834,8 @@ below) in brackets.
 5. Linear heap and VRAM free on the console (the 512 KiB command buffer and 512 KiB
    staging cost ~1 MiB of the linear heap; design 10, 12).
    [As in Azahar: linear 17800 -> 16775 KiB, VRAM 0 -> 5257 KiB free; all back after release.]
-6. Whether the L20 liquid difference above also shows there. [Not looked at.]
+6. Whether the L20 liquid difference above also shows there. [No: by eye the GPU
+   runs' L20 water was indistinguishable from the software runs'.]
 
 ### P1 follow-ups (critic P1 minors 4, 5, 1; 2026-10-17)
 
@@ -1027,10 +1028,15 @@ card's `log.txt` (`build-3ds/hw/g0b/fn/fn-main-log.txt`):
 | `present_diff` (4c) | `present_diff final: 153 checks, 0 with RGB differences; not checkable: 0 ... 0`, max \|diff\| 0 on every channel: the GPU picture equals the CPU present's word for word on both paths, so orientation and transfer flags are right (design 10.8, "Needs console verification (P1)" item 4) |
 | citro3d state | `init ok: command buffer 512 KiB; linear free 17800 -> 16775 KiB, VRAM free 0 -> 5257 KiB` (the same as Azahar); after release linear 17812 KiB, VRAM 6144 KiB; linear heap at boot 19912 KiB; 4620 presents, GX high-water 3, 0 refused, 0 `present_screen()` false returns, command buffer use 0.09% |
 
+**Look (step 5): pass, by eye.** The user, after the session: the L20 water in
+the GPU runs looked indistinguishable from the software runs. So the Azahar
+capture differences in the liquid area (P1, G0-a table) do not show as a
+visible difference on the console.
+
 Not run in this session (`NEXT-SPRINT.md` G0-b runbook, the remaining steps):
 the Classic @30 series; `p1-vhalt`, `p1-odd` and the three off-main-thread
-configs (4b); the Luma dump check and the "Saving..." look (4d); the look
-checks (5: L20 liquid). The G0-b verdict and G1 are the user's (step 7).
+configs (4b); the Luma dump check and the "Saving..." look (4d). The G0-b
+verdict and G1 are the user's (step 7).
 
 ## Next candidates (not done)
 
