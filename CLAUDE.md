@@ -15,8 +15,8 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   `.claude/worktrees/stage10-c3d`. P0 (software baseline) and P1 (GPU present, tag `port-stage10-P1`) are done.
   **It is paused at gate G0** until the user runs the console session "Stage 10 G0-b runbook" (end of
   `docs/3ds/NEXT-SPRINT.md`). Do not start M0+ (the 3D renderer) without the user's G1 decision.
-- Pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (console re-check of load/save timing).
-  Its "stage 3" is a sprint stage, not port stage 3.
+- Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
+  stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
 - Hardware: one **New 3DS / New 2DS**. Every Old 3DS figure comes from Azahar's Old 3DS mode and is unverified.
 
 ## Git
@@ -71,7 +71,7 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
    if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45-48 are reserved by
-   stage 10 for M0/M2/M6/M8; 49 is used; take 50+ for anything else.
+   stage 10 for M0/M2/M6/M8; 49-53 are used; take 54+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

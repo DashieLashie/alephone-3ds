@@ -291,6 +291,9 @@ no keyboard for the Lua console. [STAGE3 "Stubs", STAGE6, ENVIRONMENT, STAGE5]
 
 ## Catch-up runbook (stage 3: the console re-check, when the user is back)
 
+**Done (2026-10-18):** runs A-C on the console; results in backlog items 1-3, 6
+and 9, `PERF.md` "Load times", `PATCHES.md` 50-53. Kept for the record.
+
 Everything below needs the console; nothing else is waiting. The builds at
 `30f3b72` have the D-Pad zoom, the sound reads (`PATCHES.md` 43) and the new
 marks. The card is ready: prefs `rate="32728"`, `bottom_screen="0"`, no
