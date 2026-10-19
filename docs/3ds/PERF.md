@@ -915,6 +915,35 @@ review; the summary is `NEXT-SPRINT.md` G0-b item 7. Azahar — non-authoritativ
   On the console this settles item 4 above (orientation and transfer flags):
   `NEXT-SPRINT.md` G0-b step 4c.
 
+### Merge of 3ds-port (2026-10-19)
+
+`stage10-c3d` merged `3ds-port` up to `42932d7` (merge `e1ef6a2`): `PATCHES.md`
+50-53 (player name, 256x144 save preview, "Saving..." box, bottom map polygons)
+and the `atexit` `SDL_Quit()` for a dialog's `exit(0)` (`STAGE5.md` "HOME > Close
+inside a modal dialog"). Conflicts were in docs only. The four builds (OFF,
+OFF-prof, ON, ON-prof) build with 0 warnings; `nm` on both OFF `alephone.elf`:
+no `C3D_`/citro3d symbols. The one code interaction is the new route into
+`gfxExit()` (`atexit` -> `SDL_Quit()` -> SDL's video quit), which the
+`--wrap=gfxExit` hook covers without a change. Azahar — non-authoritative, every
+run with `debug-c3d` and the ON build unless noted:
+
+| Check | Result |
+| --- | --- |
+| script 07 (menus, dialog, HOME, sleep), `p1-diff.cfg` | **pass**: every check 0 of 96000 pixels differ, 0 false returns; captures correct |
+| script 19 (HOME > Close in Preferences), `p1-gpu.cfg` | **pass**: `exit without shutdown_application (a dialog's exit): SDL_Quit`, `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done` (linear 17792 KiB, VRAM 6144 KiB: as at boot), `exit`; no guest fault in `azahar_log.txt` |
+| script 15 + `--load-test` (two saves, a level change), `p1-diff.cfg` | **pass**: both saves log every `save:`/`save_game_file:` mark (about 130 ms each in Azahar); `present_diff final: 65 checks, 0 with RGB differences`. The "Saving..." box is presented through `MainScreenUpdateRect` like every frame; it is up for too short a time in Azahar to capture: console |
+| script 17, `p1-vhalt.cfg` | as in P1: release, `gfxExit` #1 (up) and #2 (down), error screen. The `atexit` hook stays silent (`SDL_Quit` has already run). ~8150 null reads in `hidScanInput` after the second error screen: backlog item 14, as before |
+| script 17, `p1-vhalt-thread-sdl.cfg` / `-screen.cfg` | as in the P1 follow-ups (hand-off to the main thread, `release #1`, then item 14's `hidScanInput` faults for `test_vhalt 3`; none for `test_vhalt 4`). The `test_vhalt 4` error-screen captures are black; the pre-merge build (`615902f`, same script) gives byte-identical captures, so this is Azahar, not the merge |
+| HUD + Map @30 L0/L6/L20, `p1-diff.cfg` (ON-prof) | `present_diff final` 32 / 32 / 31 checks, **0 with RGB differences** |
+| the same, OFF-prof against ON-prof | end-of-run captures **byte-identical on all six** (top and bottom, L0/L6/L20; L20's liquid matched this time) |
+
+Profile figures (one run each, not a benchmark series): OFF `present` 1.41 ms,
+ON 1.73 (P1: 1.41 -> 1.74, unchanged by the merge). `bottom` is 2.42-2.77 OFF
+and 2.50 ON at L0 with `p1-gpu.cfg`; with `p1-diff.cfg` it reads 2.93-3.28, the
+check's copy and compare landing in that zone (another reason not to benchmark
+with it). The P0 tables predate patch 53 (on the console `bottom` +0.3 ms per
+frame), so G0-b compares the ON build with the OFF build of the same commit.
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

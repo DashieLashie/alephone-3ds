@@ -310,6 +310,9 @@ no keyboard for the Lua console. [STAGE3 "Stubs", STAGE6, ENVIRONMENT, STAGE5]
 
 ## Catch-up runbook (stage 3: the console re-check, when the user is back)
 
+**Done (2026-10-18):** runs A-C on the console; results in backlog items 1-3, 6
+and 9, `PERF.md` "Load times", `PATCHES.md` 50-53. Kept for the record.
+
 Everything below needs the console; nothing else is waiting. The builds at
 `30f3b72` have the D-Pad zoom, the sound reads (`PATCHES.md` 43) and the new
 marks. The card is ready: prefs `rate="32728"`, `bottom_screen="0"`, no
@@ -360,9 +363,15 @@ P1"). G0-b decides it: **keep the GPU present if HUD + Map `present` drops
 renderer). Same driving as "How to drive the console"; kill leftover
 3dslink first.
 
-1. **Build** (in the `stage10-c3d` checkout): `build-3ds-prof` (OFF, the P0
-   reference) and `build-3ds-c3d-prof` (`-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`),
-   plus `build-3ds-c3d` (ON, normal) for the functional runs.
+Since 2026-10-19 `stage10-c3d` includes `3ds-port` up to `42932d7` (merge
+`e1ef6a2`: patches 50-53 and the `atexit` `SDL_Quit`), checked in Azahar
+(`PERF.md` "Merge of 3ds-port"). Step 4d covers what the merge adds.
+
+1. **Build** (in the `stage10-c3d` checkout): `build-3ds-prof` (OFF, the
+   reference: the P0 tables predate patch 53, which adds ~0.3 ms of `bottom`,
+   so compare with this build, not with them) and `build-3ds-c3d-prof`
+   (`-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`), plus `build-3ds-c3d` (ON, normal)
+   for the functional runs.
 2. **Benchmarks:** the four P0 series on the console (Bottom Screen 0 and 2,
    Framerate Target 30 and 60, `debug-perf` L0/L6/L20), once with
    `build-3ds-prof`, once with `build-3ds-c3d-prof` and
@@ -398,6 +407,12 @@ renderer). Same driving as "How to drive the console"; kill leftover
    pixel and both values: a whole-picture mismatch means wrong orientation or transfer
    flags (`PERF.md` "Stage 10 P1" console item 4), a few pixels a rounding question;
    fetch `log.txt` and stop there. Do not take benchmark figures with it on.
+   4d. (from the `3ds-port` merge; `build-3ds-c3d`, `p1-gpu.cfg`) HOME > Close
+   inside Preferences: the log shows `exit without shutdown_application (a
+   dialog's exit): SDL_Quit`, `gfxExit call #1 (citro3d up: release first)`,
+   `release #1`, then `exit`, and no new Luma dump in `/luma/dumps/arm11/`.
+   A save at level 1's pattern buffer: the "Saving..." box shows on both screens
+   (the top one now through the GPU present) and the next frame replaces it.
 5. **Look:** the L20 liquid (Azahar's capture differences there came from
    timing, critic P1 finding 1); orientation and colours of every screen
    (transfer flags `FLIP_VERT`, full 512x256).
