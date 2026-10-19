@@ -285,6 +285,29 @@ Azahar) [PERF "Next candidates"]
     thread: nothing drawn (bottom framebuffer all black), then the app exits and the
     next program (probably the Homebrew Launcher) panics in `svcBreak`. So any fatal
     error ends in a forced power-off, not a return to the launcher.
+    **Investigated 2026-10-19 (Azahar, a scratch build with `hidInit`/`hidExit`
+    wrapped at link time to log each caller; no repo change): `SDL_Quit()` shuts HID
+    down for good.** HID is reference-counted in libctru (`hidInit`/`hidExit`
+    disassembly: `ldrex`/`strex` on a counter; `hidExit` unmaps the shared memory and
+    nulls its pointer only at 0). Count at boot: 3 (libctru's `__appInit`,
+    `N3DS_VideoInit`, `N3DS_JoystickInit`). `vhalt()` -> `shutdown_application()` ->
+    `SDL_Quit()` releases 3: `SDL_JoystickQuit` **twice**, then `N3DS_VideoQuit`, so the
+    count reaches 0 before the error screen polls input. Cause, SDL2 2.32.10 `SDL.c`
+    `SDL_QuitSubSystem`: inside `SDL_Quit` (`SDL_bInMainQuit`) the game-controller
+    branch quits `SDL_INIT_JOYSTICK` ("game controller implies joystick"), then the
+    joystick branch quits it again (refcount still 1, and `SDL_bInMainQuit` forces it);
+    `N3DS_JoystickQuit` calls `hidExit()` each time. The engine starts both
+    (`shell.cpp`:244: `SDL_INIT_JOYSTICK|SDL_INIT_GAMECONTROLLER`). This explains dump 3
+    (main-thread `vhalt`: the error screen's `hidScanInput` reads the null shared
+    memory, address `0x10`, `hidScanInput+0x28` `ldr r1, [r3, #16]`) and dump 4
+    (`vhalt` on a second thread: the main thread's next `hidScanInput`). A normal exit
+    is unaffected (nothing polls HID after `SDL_Quit`). The `abort()`-on-a-second-thread
+    case (dump 6, `_lseek_r`) is a different mechanism, not traced yet. Fix options
+    (the user decides): the error screen takes its own HID reference (`hidInit()` before
+    its loop, `hidExit()` after; port code only); and/or make `N3DS_JoystickQuit`
+    idempotent in our SDL build (`build-sdl2.sh`; an upstream SDL report would be
+    outward-facing); and, for errors on other threads, hand the whole fatal path to the
+    main thread so `SDL_Quit` never runs under a live main loop.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
