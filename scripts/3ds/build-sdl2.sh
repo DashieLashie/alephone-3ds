@@ -10,9 +10,10 @@
 #   SDL2_TTF_TAG   likewise for SDL_ttf
 #   WORK_DIR       clone/build directory (default: <repo>/build/3ds-deps)
 #
-# Patches in scripts/3ds/patches/SDL2/ are applied after the clone (SDL2:
-# 0001, the N3DS joystick driver releases HID once; made against
-# release-2.32.10).
+# Patches in scripts/3ds/patches/<name>-<tag>/ (as for OpenAL) are applied
+# after the clone; SDL2-release-2.32.10/0001: the N3DS joystick driver
+# releases HID once (backlog item 14). Another tag gets no patches: port
+# them first.
 #
 # Installing into portlibs needs root when it is owned by root; the script
 # calls `sudo` for the install step only.
@@ -51,10 +52,9 @@ build() {
   if [[ ! -d "$src" ]]; then
     git clone --depth 1 --branch "$tag" "$url" "$src"
   fi
-  # Port patches (scripts/3ds/patches/<name>/*.patch, made against the tag in
-  # their header comment); skip the ones already applied.
+  # Port patches for this name and tag; skip the ones already applied.
   local patch
-  for patch in "$REPO_ROOT/scripts/3ds/patches/$name"/*.patch; do
+  for patch in "$REPO_ROOT/scripts/3ds/patches/$name-$tag"/*.patch; do
     [[ -f "$patch" ]] || continue
     if git -C "$src" apply --reverse --check "$patch" 2>/dev/null; then
       echo "    patch already applied: $(basename "$patch")"
