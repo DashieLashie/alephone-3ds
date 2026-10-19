@@ -57,6 +57,10 @@ void boot_mark(const char* what);
 // measurements in docs/3ds/NEXT-SPRINT.md (B1, B3, B6).
 void time_mark(const char* what);
 
+// "Saving..." on both screens, drawn once before a save that blocks for
+// seconds (QuickSave.cpp, docs/3ds/PATCHES.md 52). The next frame replaces it.
+void show_saving();
+
 // Called each time the main menu is displayed; the first call logs time to
 // menu, memory and the video setup.
 void main_menu_displayed();

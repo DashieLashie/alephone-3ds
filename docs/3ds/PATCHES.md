@@ -860,3 +860,33 @@ no collision when the branches meet.
 **Non-3DS check** (2026-10-17, `ppcheck.sh`, both volumes): `preferences.cpp`
 DIFFER (20 lines), 0 lines with numbers normalised (only `__LINE__` moved);
 `-fsyntax-only` 0 diagnostics.
+
+## Save time: the preview and a "Saving..." message (51, 52)
+
+Added 2026-10-18 on branch `3ds-port-player-name`. Console numbers: `PERF.md`
+"Load times" is for loads; the save marks are in `NEXT-SPRINT.md` backlog item 1.
+
+51. **`XML/QuickSave.cpp`: a 256x144 save preview.** The preview was rendered at
+    `RENDER_WIDTH x RENDER_HEIGHT` = 1280x720 and written with
+    `SDL_SaveBMP_RW` (no SDL_image/PNG on the 3DS: `HAVE_PNG` is off), an
+    uncompressed 24-bit BMP of about 2.8 MB. On the console its
+    `write_wad` took **74.0 s and 66.8 s** (Run C, 2026-10-18, "preview wad
+    written"), against 1.7-2.9 s for the whole game wad (about 215 KB); the
+    render itself is 78 ms. The load dialog shows the preview at 128x72
+    (`PREVIEW_WIDTH/HEIGHT`). On the 3DS the constants are 256x144 (2x the
+    displayed size, about 110 KB) with `RENDER_SCALE` two steps lower, each
+    step halving the pixels per world unit, so the thumbnail shows 80% of the
+    area the old one did. Other platforms keep 1280x720.
+52. **`XML/QuickSave.cpp`: `a1_3ds::show_saving()` at the top of
+    `create_quick_save()`.** A save blocks the main thread for seconds and
+    nothing draws meanwhile. The port function (`ports/3ds/source/bottom_3ds.cpp`,
+    declared in `include/a1_3ds_platform.h`) draws a framed "Saving..." box on
+    the engine's main screen surface (`MainScreenSurface()`) and presents it
+    (`MainScreenUpdateRect`), and on the bottom screen's map area in HUD + Map
+    mode (`present_bottom`; `s_full` makes the next frame redraw it). The next
+    rendered frame replaces both. `QuickSave.cpp` carries its own declaration,
+    next to patch 41's `time_mark`.
+
+**Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `QuickSave.cpp`
+DIFFER (2 lines), 0 lines with numbers normalised (only `__LINE__` moved);
+`-fsyntax-only` 0 diagnostics.

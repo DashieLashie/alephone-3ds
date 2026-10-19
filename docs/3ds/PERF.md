@@ -673,8 +673,26 @@ each header and each sound is one read. Azahar, load test, before → after:
 The headers and sounds are byte-identical (a temporary CRC log of every
 header and load: the same 975 headers in order, the same 107 sounds,
 3.3 MB). Benchmark captures and every zone but `bottom` (the map's content
-at that moment) are unchanged. **Console: to be measured** (`NEXT-SPRINT.md`
-"Catch-up runbook").
+at that moment) are unchanged.
+
+**Console, New 3DS (2026-10-18, catch-up runs A and B, profile build,
+`3dslink`, HUD + Map @30):** against the 2026-10-13 runs (`hm-L0`, `hm-L20`):
+
+| Step / measure | 2026-10-13 | 2026-10-18 |
+| --- | --- | --- |
+| boot: environment (scenario files), game state | 12 137 ms | **139 ms** (sounds file opened: 1 004-1 023 ms) |
+| time to main menu (from `main()`) | 41.8 s (L0), 44.5 s (L20) | **25.0 s, 21.9 s** |
+| level load: sounds (`entering_map`) | 3 965 ms (L0), 4 610 ms (L20) | **750 / 790 ms** ("monster sounds" now; one read per sound) |
+| windows with a frame over 60 ms (27-28 per run) | L0: 4 (112, 81, 92, 105 ms); L20: 1 (314 ms) | **L0: 1 (134 ms, the first window); L20: 0** |
+| steady state (L0 / L20 last window): frame, render, idle | 32.6, 5.8, ~18.7 / 32.76, -, 19.06 | 32.7, 5.8, ~18.3 / 32.88, -, 19.34 |
+
+The early-level hitches are gone (the user also noticed none playing), the
+reload that dominated boot and every quit to the menu is 0.14 s at boot and
+**3.2 s** on a quit (map 0.5, shapes 1.7, sounds 1.1 s; was ~12 s), and the
+steady state did not move. A normal-build run (Run C): quit to the menu 3.2 s,
+HOME > Close during the menu's demo ~4.8 s from the request (the APT exit hook
+still does not run, so the reload is not skipped; was 13.4 s). The save is a
+separate story: `NEXT-SPRINT.md` backlog item 1, `PATCHES.md` 51-52.
 
 ## Menus and dialogs
 

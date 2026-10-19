@@ -115,7 +115,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | # | Item | Status | Cost left | Console? | Recommendation |
 | --- | --- | --- | --- | --- | --- |
 | A | Stage 7 revision on the console | **Done** (`758f2f8`): busy 14.02 / 13.50 / 13.54 ms, 4.0-4.3 below Classic; D-Pad zoom done in Azahar | S: re-check | yes | Catch-up runbook, run C |
-| 1 | Level loads; slow saves | Loads **done** (console 2.9-6.2 s, "fine"); sounds fix (43) to measure; **save 69 s open**, split by new marks | S-M | yes | Catch-up runbook; then fix the save step, or "Saving..." |
+| 1 | Level loads; slow saves | Loads **done** (console 2.9-6.2 s before 43; 0.8 s after, Run A/B 2026-10-18); **save 69 s: cause found (the 2.8 MB preview write), 256x144 preview + "Saving..." box tried (51-52), console check pending** | S | yes | Console: one save, read the marks |
 | 2 | Hitches entering new areas | **Measured**: 72-314 ms frames in `world` in the first ~10 s; 43 is the likely fix | S: measure | yes | Catch-up runbook, runs A-B |
 | 3 | Boot 41.8 s | **Measured**: scenario files 12.1 s, sound 9.4 s, dialog theme 5.2 s; 43 cuts part of the first two (Azahar) | S-M | yes | Measure 43; then the rest of the 12 s, the theme |
 | 4 | Level 0's max frame | **Not the sound rate** (105 ms at 32728 Hz); same as item 2 | none | with 2 | Closed into item 2 |
@@ -147,12 +147,24 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    **Stage 2 (2026-10-13):** a level loads in **2.9-6.2 s** on the console (shapes
    0.49 s; the **sounds 1.4-4.6 s** lead); level 1 → 2 took 3.0 s and looked
    **fine** (no progress screen). A save took **69 s** in "save: file written",
-   but an SD write test writes the same 2.98 MB in 0.66 s, so a smaller preview
-   would not fix it; `save_game_file()` now has marks per step. The sounds were
+   but an SD write test writes the same 2.98 MB in 0.66 s, which at the time was
+   read as "a smaller preview would not fix it"; `save_game_file()` now has
+   marks per step. The sounds were
    read 4 KB at a time: one read per sound now (`PATCHES.md` 43; Azahar 0.96 →
-   0.50 s). **Left:** measure both on the console (catch-up run C); then fix
-   the slow save step, or, if it cannot be fixed, a small "Saving..." message
-   (the user's fallback).
+   0.50 s). **Run C on the console (2026-10-18):** the marks put the whole save in
+   one step, writing the *preview* wad: **74.0 s and 66.8 s**, against 1.7-2.9 s
+   for the game wad (about 215 KB). The preview was a 1280x720 BMP (2.8 MB: no
+   PNG on the 3DS). So the slow part is the engine's write path (neither the
+   card, 0.66 s for 2.98 MB, nor the render, 78 ms): both writes run at 40-100
+   KB/s, which looks like many small flushed writes (libctru's SD driver
+   flushes per write call; stdio passes small chunks) and not like card speed.
+   **Fix tried, console check pending (2026-10-18, `PATCHES.md` 51-52):** a
+   256x144 preview (about 110 KB, 1/25 of the bytes) and a "Saving..." box on
+   both screens before the save (the user asked for both). Azahar: 325 KB file,
+   marks fine; Azahar's SD writes are not slow, so the console decides. **If
+   the console save is still slow:** the chunking theory stands, and the next
+   step is bigger writes (a large stdio buffer or one `fwrite` per wad) in the
+   port's file layer.
 2. **Short hitches when entering areas not seen before.** Never measured. [STAGE5 item 7]
    **Stage 2:** the `debug-perf-L*` files in `sprint8/` have `log 1`; play into new
    areas and read `max` per window.

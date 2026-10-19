@@ -144,6 +144,24 @@ void draw_map(bool allowed)
 	SDL_BlitSurface(s_map, nullptr, s_surface, &dst);
 }
 
+// A framed "Saving..." box, centred on `s` (or on the rows y0..y0+h0 of it).
+void draw_saving_box(SDL_Surface* s, int y0, int h0)
+{
+	const font_info* font = GetInterfaceFont(_interface_font);
+	if (!s || !font)
+		return;
+	const int bw = s->w * 9 / 20, bh = s->h * 3 / 20;   // 180x36 on 400x240, 288x72 on 640x480
+	SDL_Rect frame = {(s->w - bw) / 2, y0 + (h0 - bh) / 2, bw, bh};
+	SDL_FillRect(s, &frame, SDL_MapRGB(s->format, 0, 150, 0));
+	SDL_Rect inner = {frame.x + 2, frame.y + 2, bw - 4, bh - 4};
+	SDL_FillRect(s, &inner, SDL_MapRGB(s->format, 0, 0, 0));
+	const char* text = "Saving...";
+	const int tw = text_width(text, font, styleNormal);
+	const int base = inner.y + (inner.h + font->get_ascent() - font->get_descent()) / 2;
+	draw_text(s, text, inner.x + (inner.w - tw) / 2, base, SDL_MapRGB(s->format, 230, 230, 230), font,
+	          styleNormal);
+}
+
 } // namespace
 
 // --- Used by input_3ds.cpp ---------------------------------------------------
@@ -154,6 +172,25 @@ void bottom_force_redraw()
 }
 
 // --- Public ----------------------------------------------------------------------
+
+// A save blocks the main thread for seconds (the SD card), and nothing draws
+// meanwhile: say so on both screens, before it starts. The top screen's box
+// goes on the engine's own screen surface, which the next rendered frame
+// replaces; the bottom one on the map area, and the next frame redraws it.
+void show_saving()
+{
+	if (SDL_Surface* top = MainScreenSurface())
+	{
+		draw_saving_box(top, 0, top->h);
+		MainScreenUpdateRect(0, 0, 0, 0);
+	}
+	if (bottom_is_game() && s_surface)
+	{
+		draw_saving_box(s_surface, kMapY, kMapH);
+		present_bottom(s_surface->pixels, s_surface->pitch);
+		s_full = true;
+	}
+}
 
 int bottom_map_zoom(int step)
 {

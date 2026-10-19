@@ -54,14 +54,28 @@
 #include "InfoTree.h"
 
 #ifdef A1_PLATFORM_3DS
-namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+namespace a1_3ds {
+void time_mark(const char* what);	// timed log (docs/3ds/NEXT-SPRINT.md)
+void show_saving();	// "Saving..." on the screens (docs/3ds/PATCHES.md 52)
+}
 #endif
 
 namespace algo = boost::algorithm;
 
+#ifdef A1_PLATFORM_3DS
+// The preview is saved as an uncompressed BMP here (no SDL_image/PNG), so a
+// 1280x720 one is 2.8 MB and its write took 67-74 s on the console; the load
+// dialog shows it at 128x72. 256x144 is 2x that, at 1/25 of the bytes. Two
+// scale steps down (each halves the pixels per world unit) show 80% of the
+// area the 1280x720 one did.
+const int RENDER_WIDTH = 256;
+const int RENDER_HEIGHT = 144;
+const int RENDER_SCALE = OVERHEAD_MAP_MAXIMUM_SCALE - 2;
+#else
 const int RENDER_WIDTH = 1280;
 const int RENDER_HEIGHT = 720;
 const int RENDER_SCALE = OVERHEAD_MAP_MAXIMUM_SCALE;
+#endif
 
 const int PREVIEW_WIDTH = 128;
 const int PREVIEW_HEIGHT = 72;
@@ -660,6 +674,7 @@ bool create_quick_save(void)
     QuickSave save;
 #ifdef A1_PLATFORM_3DS
     a1_3ds::time_mark("save: begin");
+    a1_3ds::show_saving();   // the write below blocks the screens for seconds
 #endif
 
     time(&(save.save_time));
