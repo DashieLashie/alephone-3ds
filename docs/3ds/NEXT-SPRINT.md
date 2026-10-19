@@ -364,7 +364,8 @@ kill leftover 3dslink first.
 session"):** step 2 except Classic @30 (HUD + Map @30 and @60, Classic @60 incl.
 L0 three times each way), step 3 (no tearing, every capture frame N), step 4's
 first run with 4c (menus, HUD + Map, Classic, HOME, sleep and wake, a save,
-`present_diff` 153 checks with 0 differences), 4d's HOME > Close in a dialog,
+`present_diff` 153 checks with 0 differences), 4d's HOME > Close in a dialog and
+its "Saving..." box (the user: fine on both screens, GPU and software builds),
 and step 5 (the user: the L20 water in the GPU runs looked indistinguishable
 from the software runs). Results in short: `present` −2.24 to −2.30 ms @30 but −1.54 to −1.89 @60, with
 +0.3-1.0 ms moving into `bottom`; the software build already runs HUD + Map @60
@@ -401,10 +402,7 @@ The remaining steps keep their original numbers:
      screen; press A (the input script cannot reach it). Then `p1-vhalt-thread.cfg`
      likewise (Azahar dies before the hand-off).
    - 4d, the rest: list `/luma/dumps/arm11/` (ftpd): no dump from the first
-     session's HOME > Close (2026-10-19 ~02:30) or from these runs. Ask the user
-     whether the "Saving..." box showed on both screens in the first session's save
-     (the top one through the GPU present) and the next frame replaced it; if they
-     don't remember, save once at level 1's pattern buffer with `p1-gpu.cfg`.
+     session's HOME > Close (2026-10-19 ~02:30) or from these runs.
 6. **Record:** `PERF.md` "Console G0-b, first session" (the Classic @30 row and the
    rest), `CITRO3D_DESIGN.md` section 10 items 1-3, 8, 12 ticked; delete
    `debug-c3d` and `debug-perf` from the card; set the prefs back to the user's

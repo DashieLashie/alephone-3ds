@@ -1022,7 +1022,7 @@ card's `log.txt` (`build-3ds/hw/g0b/fn/fn-main-log.txt`):
 | a game in HUD + Map (400x240 path) | `present: 400x240 -> staging 1:1, GPU upload` |
 | HOME and back | suspended 117.3 s, resumed after 3.9 s |
 | sleep (lid) and wake | suspended 146.3 s, resumed after 0.9 s |
-| save | `save: begin` 159.0 s to `surplus saves checked` 163.4 s (game wad 1.64 s, preview wad 2.60 s written). Whether the "Saving..." box showed on both screens: not recorded |
+| save | `save: begin` 159.0 s to `surplus saves checked` 163.4 s (game wad 1.64 s, preview wad 2.60 s written). The "Saving..." box: by eye (the user), shown fine on both screens, with the GPU present and with the software build |
 | Classic | the prefs went from HUD + Map @30 (set before the run) to Classic @30 (`fn/prefs-after`), so Classic was chosen in Preferences; three games ended (`finish_game` at 174, 221, 252 s) |
 | HOME > Close in a dialog (4d) | `exit without shutdown_application (a dialog's exit): SDL_Quit`, `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done`, `exit`. Luma dumps: not checked |
 | `present_diff` (4c) | `present_diff final: 153 checks, 0 with RGB differences; not checkable: 0 ... 0`, max \|diff\| 0 on every channel: the GPU picture equals the CPU present's word for word on both paths, so orientation and transfer flags are right (design 10.8, "Needs console verification (P1)" item 4) |
@@ -1035,7 +1035,7 @@ visible difference on the console.
 
 Not run in this session (`NEXT-SPRINT.md` G0-b runbook, the remaining steps):
 the Classic @30 series; `p1-vhalt`, `p1-odd` and the three off-main-thread
-configs (4b); the Luma dump check and the "Saving..." look (4d). The G0-b
+configs (4b); the Luma dump check (4d). The G0-b
 verdict and G1 are the user's (step 7).
 
 ## Next candidates (not done)
