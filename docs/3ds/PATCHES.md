@@ -870,3 +870,104 @@ symbols).
     `present_screen_cpu()` moved into `half_rotate()` (forced inline; OFF-build
     `video_3ds.o` disassembly identical) and `present_reference()` (A1_RENDER_C3D only);
     `scripts/3ds/tests/c3d/p1-diff.cfg`.
+
+## Backlog item 9: player name (50)
+
+Added 2026-10-17 on branch `3ds-port-player-name` (off `3ds-port`). Numbers
+45-48 are reserved and 49 is used by stage 10 (`stage10-c3d`), so this is 50:
+no collision when the branches meet.
+
+50. **`Misc/preferences.cpp`: the default player name from the console
+    profile.** `get_name_from_system()` (it seeds `player_preferences->name`
+    only when no preferences exist) gains an `#elif defined(A1_PLATFORM_3DS)`
+    branch: `utf8_to_mac_roman(a1_3ds::console_user_name())`, kept if any
+    character survives the conversion (a name made only of characters Mac
+    Roman lacks would be all `?`), else the existing `return "Bob User"`. The
+    field is Mac Roman (the name dialog's `enable_mac_roman_input()`, the prefs
+    XML's `put_attr_cstr`/`read_cstr` convert at the boundary); upstream's
+    Windows branch puts UTF-8 there. Plus a forward declaration next to patch
+    41's. The port side (`ports/3ds/source/a1_3ds_platform.cpp`,
+    `include/a1_3ds_platform.h`): `console_user_name()` reads config block
+    0x000A0000 with `CFGU_GetConfigInfoBlk2(0x1C, ...)` (`cfgu.h`:112; the block
+    is cited in `uds.h`:30: `u16 username[10]`), in a `cfguInit()`/`cfguExit()`
+    pair of its own (libctru reference-counts the session; nothing is left
+    open), once, cached; up to 10 UTF-16 units to the first NUL, checked with
+    `decode_utf16` (invalid or control characters: empty), converted with
+    `utf16_to_utf8` (`util/utf.h`:106), trimmed; logged as `[3ds] player name
+    from ...`. `sdmc:/3ds/alephone/debug-player-name` (hex UTF-16 units)
+    replaces the block for tests (`scripts/3ds/tests/input/18-player-name-default.txt`).
+    **Not patched:** `CSeries/cspaths_sdl.cpp`:108 ("Bob User" in
+    `_get_legacy_login_name()`) is in the `__WIN32__` branch; the 3DS compiles
+    its own `A1_PLATFORM_3DS` branch, where the legacy paths are `""`, so no
+    login name is used there.
+
+**Non-3DS check** (2026-10-17, `ppcheck.sh`, both volumes): `preferences.cpp`
+DIFFER (20 lines), 0 lines with numbers normalised (only `__LINE__` moved);
+`-fsyntax-only` 0 diagnostics.
+
+## Save time: the preview and a "Saving..." message (51, 52)
+
+Added 2026-10-18 on branch `3ds-port-player-name`. Console numbers: `PERF.md`
+"Load times" is for loads; the save marks are in `NEXT-SPRINT.md` backlog item 1.
+
+51. **`XML/QuickSave.cpp`: a 256x144 save preview.** The preview was rendered at
+    `RENDER_WIDTH x RENDER_HEIGHT` = 1280x720 and written with
+    `SDL_SaveBMP_RW` (no SDL_image/PNG on the 3DS: `HAVE_PNG` is off), an
+    uncompressed 24-bit BMP of about 2.8 MB. On the console its
+    `write_wad` took **74.0 s and 66.8 s** (Run C, 2026-10-18, "preview wad
+    written"), against 1.7-2.9 s for the whole game wad (about 215 KB); the
+    render itself is 78 ms. The load dialog shows the preview at 128x72
+    (`PREVIEW_WIDTH/HEIGHT`). On the 3DS the constants are 256x144 (2x the
+    displayed size, about 110 KB) with `RENDER_SCALE` two steps lower, each
+    step halving the pixels per world unit, so the thumbnail shows 80% of the
+    area the old one did. Other platforms keep 1280x720.
+52. **`XML/QuickSave.cpp`: `a1_3ds::show_saving()` at the top of
+    `create_quick_save()`.** A save blocks the main thread for seconds and
+    nothing draws meanwhile. The port function (`ports/3ds/source/bottom_3ds.cpp`,
+    declared in `include/a1_3ds_platform.h`) draws a framed "Saving..." box on
+    the engine's main screen surface (`MainScreenSurface()`) and presents it
+    (`MainScreenUpdateRect`), and on the bottom screen's map area in HUD + Map
+    mode (`present_bottom`; `s_full` makes the next frame redraw it). The next
+    rendered frame replaces both. `QuickSave.cpp` carries its own declaration,
+    next to patch 41's `time_mark`.
+
+**Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `QuickSave.cpp`
+DIFFER (2 lines), 0 lines with numbers normalised (only `__LINE__` moved);
+`-fsyntax-only` 0 diagnostics.
+
+## The bottom map's missing areas (53)
+
+Added 2026-10-18 on branch `3ds-port-player-name`.
+
+53. **`RenderOther/OverheadMapRenderer.cpp`: a polygon is drawn if its bounding
+    box meets the map's rectangle, not only if a vertex does.** Console report
+    (2026-10-18, HUD + Map): the bottom screen's map blacked out areas as the
+    player moved away from them and showed them again on approach; opening the
+    top map made both maps right. `transform_endpoints_for_overhead_map()` flags
+    an endpoint when it falls inside the rectangle, then a polygon when one of
+    its endpoints is flagged, so a polygon larger than the rectangle with no
+    vertex inside is skipped. The bottom map's rectangle is 320x160, small enough
+    for rooms to exceed it. The top map "fixed" it because its larger render sets
+    the same flags in `render_flags[]` (`render.h`:149), which only the 3D
+    view's frame clears, and that view is off while the top map is open. The
+    3DS branch adds a test after the original: the min/max of the polygon's
+    transformed endpoints against `left..left+width`, `top..top+height`. It is a
+    strict superset of the original test (a vertex inside implies the box meets
+    the rectangle), so nothing drawn before disappears; what lies outside the
+    surface is clipped. **Port side** (`bottom_3ds.cpp`, `draw_map()`):
+    `d.height` was `kMapH` with `d.top = -kMapNameSkip`, which ended the
+    rectangle 32 rows above the surface's bottom; it is now
+    `kMapH + kMapNameSkip`. Azahar, script
+    `scripts/3ds/tests/input/21-bottom-map-big-polygons.txt` (bottom map at zoom 3,
+    two walks, top map closed, then open): differing map pixels against the
+    complete picture (top map open) **2 659 (before) -> 370 (53) -> 0 (53 and
+    the height)**; with the top map open the old and new builds are identical
+    (0), as are the first frames (0). **Console, New 3DS (2026-10-18): walking
+    through large rooms with the top map closed, the bottom map stays complete
+    (user: "map looking good").** Cost, profile build, level 0, last 12 windows
+    (`s3-L0` before, `s5-L0-bottomfix` after): `bottom` 2.34 -> 2.64 ms per
+    frame (about 0.9 ms per redraw, every third frame), idle 18.4 -> 18.5 ms,
+    frame 32.7 -> 32.6 ms.
+
+**Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `OverheadMapRenderer.cpp`
+IDENTICAL; `-fsyntax-only` 0 diagnostics.

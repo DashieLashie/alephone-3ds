@@ -297,6 +297,24 @@ void close_outputs()
 	}
 }
 
+// Upstream ends the process with a bare exit(0) when the system asks to close
+// while a modal dialog is open (sdl_dialogs.cpp: SDL_QUIT), skipping
+// shutdown_application(). Without SDL_Quit() the n3ds video driver never
+// releases GSP: libctru frees the heap while its GSP event thread (whose stack
+// is in that heap) is alive, and the thread faults (HOME > Close in
+// Preferences: Luma dump, PC syncArbitrateAddress, LR gspEventThreadMain).
+// Runs before close_outputs (atexit is last in, first out). A normal
+// shutdown has already run SDL_Quit(), so SDL_WasInit(0) is 0 and this is a no-op.
+void quit_sdl_at_exit()
+{
+	if (SDL_WasInit(0) == 0)
+		return;
+	printf("[3ds] +%.1f ms: exit without shutdown_application (a dialog's exit): SDL_Quit\n",
+	       ms_since_boot());
+	fflush(stdout);
+	SDL_Quit();
+}
+
 // --- helpers ---------------------------------------------------------------
 
 double ms_since_boot()
@@ -700,6 +718,115 @@ void random_bytes(void* out, size_t len)
 	fallback_bytes(out, len);
 }
 
+// --- player name -------------------------------------------------------------
+
+namespace {
+
+// Config block 0x000A0000 (cited in libctru's uds.h:30, udsNodeInfo): the user name,
+// u16 username[10] (UTF-16, NUL-terminated when shorter), then flags; 0x1C bytes
+// (3dbrew "Config Savegame"). Read with CFGU_GetConfigInfoBlk2 (cfgu.h:112).
+constexpr u32 kUserBlockId = 0x000A0000;
+constexpr u32 kUserBlockSize = 0x1C;
+constexpr size_t kUserNameUnits = 10;
+
+// The name units (up to the first NUL, at most kUserNameUnits) as UTF-8; empty
+// with `why` set if there is no usable name.
+std::string user_name_to_utf8(const u16* block_units, size_t count, std::string& why)
+{
+	u16 name[kUserNameUnits + 1] = {};
+	size_t n = 0;
+	while (n < count && n < kUserNameUnits && block_units[n])
+	{
+		name[n] = block_units[n];
+		++n;
+	}
+	if (n == 0)
+	{
+		why = "empty";
+		return "";
+	}
+	for (size_t i = 0; i < n;)   // valid UTF-16, no control characters
+	{
+		uint32_t cp = 0;
+		const ssize_t used = decode_utf16(&cp, name + i);   // util/utf.h
+		if (used <= 0 || i + used > n)
+		{
+			why = "not valid UTF-16";
+			return "";
+		}
+		if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0))
+		{
+			why = "contains a control character";
+			return "";
+		}
+		i += used;
+	}
+	uint8_t utf8[4 * kUserNameUnits + 1] = {};   // at most 3 bytes per unit, 4 per surrogate pair
+	const ssize_t len = utf16_to_utf8(utf8, name, sizeof utf8 - 1);   // util/utf.h:106
+	if (len <= 0)
+	{
+		why = "not valid UTF-16";
+		return "";
+	}
+	std::string s(reinterpret_cast<const char*>(utf8), static_cast<size_t>(len));
+	s = trim(s);
+	if (s.empty())
+		why = "blank";
+	return s;
+}
+
+// debug-player-name: hex code units instead of the block. False if the file is absent.
+bool fake_user_block(std::vector<u16>& units)
+{
+	std::ifstream in(user_dir() + "/debug-player-name");
+	if (!in)
+		return false;
+	std::string word;
+	while (in >> word && units.size() < kUserBlockSize / 2)
+		units.push_back(static_cast<u16>(strtoul(word.c_str(), nullptr, 16)));
+	return true;
+}
+
+} // namespace
+
+const std::string& console_user_name()
+{
+	static const std::string name = [] {
+		std::vector<u16> units;
+		const char* from = "debug-player-name";
+		if (!fake_user_block(units))
+		{
+			from = "the console profile";
+			// cfgu is reference counted (libctru): a session of our own, closed again here.
+			const Result init = cfguInit();
+			if (R_FAILED(init))
+			{
+				printf("[3ds] player name: cfguInit failed (0x%08lX); keeping the default\n",
+				       static_cast<unsigned long>(init));
+				return std::string();
+			}
+			units.assign(kUserBlockSize / 2, 0);
+			const Result rc = CFGU_GetConfigInfoBlk2(kUserBlockSize, kUserBlockId, units.data());
+			cfguExit();
+			if (R_FAILED(rc))
+			{
+				printf("[3ds] player name: CFGU_GetConfigInfoBlk2(0x%lX, 0x%08lX) failed (0x%08lX); "
+				       "keeping the default\n", static_cast<unsigned long>(kUserBlockSize),
+				       static_cast<unsigned long>(kUserBlockId), static_cast<unsigned long>(rc));
+				return std::string();
+			}
+		}
+		std::string why;
+		std::string s = user_name_to_utf8(units.data(), units.size(), why);
+		if (s.empty())
+			printf("[3ds] player name from %s: %s; keeping the default\n", from, why.c_str());
+		else
+			printf("[3ds] player name from %s: \"%s\"\n", from, s.c_str());
+		return s;
+	}();
+	return name;
+}
+
 // --- paths -------------------------------------------------------------------
 
 const std::string& user_dir()
@@ -788,6 +915,7 @@ bool boot_begin(int& argc, char**& argv)
 	open_3dslink();
 	install_tee();
 	atexit(close_outputs);
+	atexit(quit_sdl_at_exit);
 	std::set_terminate(on_terminate);
 	signal(SIGABRT, on_abort);
 	try

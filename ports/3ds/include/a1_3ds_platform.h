@@ -57,6 +57,10 @@ void boot_mark(const char* what);
 // measurements in docs/3ds/NEXT-SPRINT.md (B1, B3, B6).
 void time_mark(const char* what);
 
+// "Saving..." on both screens, drawn once before a save that blocks for
+// seconds (QuickSave.cpp, docs/3ds/PATCHES.md 52). The next frame replaces it.
+void show_saving();
+
 // Called each time the main menu is displayed; the first call logs time to
 // menu, memory and the video setup.
 void main_menu_displayed();
@@ -67,6 +71,16 @@ void main_menu_displayed();
 // screen if SDL video is not up yet) until START or A is pressed, or the
 // system asks the application to close. Also writes it to the log.
 void error_screen(const std::string& title, const std::string& body);
+
+// --- Player name (docs/3ds/PATCHES.md 50) ------------------------------------
+
+// The user name of the console's profile (System Settings > Other Settings >
+// Profile), UTF-8, from the CFGU config block 0x000A0000. Empty if it cannot be
+// read, is empty or blank, or is not valid UTF-16 (the engine then keeps its
+// default "Bob User"). Read once; later calls return the same string. Main thread.
+// Debug: sdmc:/3ds/alephone/debug-player-name, hex UTF-16 code units separated
+// by spaces, replaces the block's contents (to test the fallbacks).
+const std::string& console_user_name();
 
 // --- Entropy (docs/3ds/STAGE5-PREREQS.md item 2) -----------------------------
 

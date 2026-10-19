@@ -119,6 +119,7 @@ May 22, 2003 (Woody Zenfell):
 
 #ifdef A1_PLATFORM_3DS
 namespace a1_3ds { void time_mark(const char* what); }	// timed log (docs/3ds/NEXT-SPRINT.md)
+namespace a1_3ds { const std::string& console_user_name(); }	// UTF-8 (docs/3ds/PATCHES.md 50)
 #endif
 
 // 8-bit support is still here if you undefine this, but you'll need to fix it
@@ -208,6 +209,15 @@ static std::string get_name_from_system()
 	DWORD wname_n = UNLEN + 1;
 	if (GetUserNameW(wname, &wname_n))
 		return wide_to_utf8(wname);
+
+#elif defined(A1_PLATFORM_3DS)
+
+	// The console profile's name, converted to the field's Mac Roman (the name
+	// dialog and the prefs XML treat it as such); kept only if some character
+	// survives (a name made only of characters Mac Roman lacks becomes '?'s).
+	const std::string name = utf8_to_mac_roman(a1_3ds::console_user_name());
+	if (name.find_first_not_of("? ") != std::string::npos)
+		return name;
 
 #else
 //#error get_name_from_system() not implemented for this platform

@@ -115,7 +115,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | # | Item | Status | Cost left | Console? | Recommendation |
 | --- | --- | --- | --- | --- | --- |
 | A | Stage 7 revision on the console | **Done** (`758f2f8`): busy 14.02 / 13.50 / 13.54 ms, 4.0-4.3 below Classic; D-Pad zoom done in Azahar | S: re-check | yes | Catch-up runbook, run C |
-| 1 | Level loads; slow saves | Loads **done** (console 2.9-6.2 s, "fine"); sounds fix (43) to measure; **save 69 s open**, split by new marks | S-M | yes | Catch-up runbook; then fix the save step, or "Saving..." |
+| 1 | Level loads; slow saves | Loads **done** (console 2.9-6.2 s before 43; 0.8 s after, Run A/B 2026-10-18); **saves done: 75 s -> 4.4 s (the 2.8 MB preview write; 256x144 preview + "Saving..." box, 51-52, console-confirmed)** | none | no | Closed (optional: smaller or faster writes) |
 | 2 | Hitches entering new areas | **Measured**: 72-314 ms frames in `world` in the first ~10 s; 43 is the likely fix | S: measure | yes | Catch-up runbook, runs A-B |
 | 3 | Boot 41.8 s | **Measured**: scenario files 12.1 s, sound 9.4 s, dialog theme 5.2 s; 43 cuts part of the first two (Azahar) | S-M | yes | Measure 43; then the rest of the 12 s, the theme |
 | 4 | Level 0's max frame | **Not the sound rate** (105 ms at 32728 Hz); same as item 2 | none | with 2 | Closed into item 2 |
@@ -123,7 +123,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | 6 | HOME > Close in the demo | **Measured**: 13.4 s, 12.5 s of it the scenario reload; the APT exit hook had not run | S | yes | With item 3's reload; check the exit hook |
 | 7 | C-Stick vertical look | **Done**: "feels right now" (2026-10-13) | none | no | Closed |
 | 8 | Prefs `rate="44100"` | **Done**: 32728 on the card (2026-10-13); `audio` 10.2-10.8 → 7.7-7.8 ms | none | no | Closed |
-| 9 | Player name from CFGU | Deferred (twice) | S | no | Skip unless asked |
+| 9 | Player name from CFGU | **Done** (2026-10-17, `PATCHES.md` 50); **console confirmed 2026-10-18** ("Dashie" from the profile) | none | no | Closed |
 | 10 | 400x240 menu layouts | Deferred | L | yes | Its own stage |
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
 | 12 | Backup bundle | **Done** (refreshed after each session) | none | no | Closed |
@@ -148,12 +148,26 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    **Stage 2 (2026-10-13):** a level loads in **2.9-6.2 s** on the console (shapes
    0.49 s; the **sounds 1.4-4.6 s** lead); level 1 → 2 took 3.0 s and looked
    **fine** (no progress screen). A save took **69 s** in "save: file written",
-   but an SD write test writes the same 2.98 MB in 0.66 s, so a smaller preview
-   would not fix it; `save_game_file()` now has marks per step. The sounds were
+   but an SD write test writes the same 2.98 MB in 0.66 s, which at the time was
+   read as "a smaller preview would not fix it"; `save_game_file()` now has
+   marks per step. The sounds were
    read 4 KB at a time: one read per sound now (`PATCHES.md` 43; Azahar 0.96 →
-   0.50 s). **Left:** measure both on the console (catch-up run C); then fix
-   the slow save step, or, if it cannot be fixed, a small "Saving..." message
-   (the user's fallback).
+   0.50 s). **Run C on the console (2026-10-18):** the marks put the whole save in
+   one step, writing the *preview* wad: **74.0 s and 66.8 s**, against 1.7-2.9 s
+   for the game wad (about 215 KB). The preview was a 1280x720 BMP (2.8 MB: no
+   PNG on the 3DS). So the slow part is the engine's write path (neither the
+   card, 0.66 s for 2.98 MB, nor the render, 78 ms): both writes run at 40-100
+   KB/s, which looks like many small flushed writes (libctru's SD driver
+   flushes per write call; stdio passes small chunks) and not like card speed.
+   **Fixed (2026-10-18, `PATCHES.md` 51-52; console-confirmed):** a 256x144
+   preview (about 110 KB, 1/25 of the bytes) and a "Saving..." box on both
+   screens before the save (the user asked for both). A save is now **4.4 s**
+   (`save: begin` to `surplus saves checked`): game wad 1.6 s, preview wad
+   2.6 s, was about 75 s; the box shows on both screens (user). The preview
+   still writes at only ~42 KB/s, as before, so the write path (not the data
+   alone) is slow: the chunking theory is not proven. **Left, optional:** bigger
+   writes (a large stdio buffer or one `fwrite` per wad) would cut the 4.4 s
+   further; a 128x72 preview (all the dialog shows) would save about 2 s.
 2. **Short hitches when entering areas not seen before.** Never measured. [STAGE5 item 7]
    **Stage 2:** the `debug-perf-L*` files in `sprint8/` have `log 1`; play into new
    areas and read `max` per window.
@@ -210,8 +224,21 @@ Sources in brackets. Statuses were verified against the docs on 2026-10-12.
    32728, which also tests whether item 4's long frame goes away. [STAGE6 item 5]
    **Done (2026-10-13):** the card's prefs say 32728; the `audio` zone fell from
    10.2-10.8 to 7.7-7.8 ms; item 4's frame stayed.
-9. Player name from the console profile (CFGU) instead of "Bob User". Cosmetic,
-   deferred twice by the user. **Deferred.** [STAGE3 stub 4; STAGE5 item 6]
+9. Player name from the console profile (CFGU) instead of "Bob User". **Done in
+   Azahar — non-authoritative (2026-10-17, branch `3ds-port-player-name`,
+   `PATCHES.md` 50). Console, New 3DS (2026-10-18): the log line and Preferences >
+   Player show the profile's name ("Dashie") on fresh prefs; the card's own prefs
+   were restored afterwards.** Found on the way: HOME > Close with a dialog open
+   crashed (`STAGE5.md` "HOME > Close inside a modal dialog"), fixed with an
+   `atexit` `SDL_Quit()` and confirmed on the console. New
+   preferences take the profile's name (config block 0x000A0000, UTF-16 ->
+   UTF-8 -> the field's Mac Roman); a saved name is kept. Azahar, script
+   `18-player-name-default.txt` with `--reset-prefs`: the profile's "AZAHAR" in
+   the log, the Player dialog and the saved prefs. Faked with
+   `debug-player-name`: empty, blank, a lone surrogate (D800) and a control
+   character fall back to "Bob User" with the reason logged; "Eléonore" kept
+   (Mac Roman has é); kana ("あいう", nothing Mac Roman can show) falls back;
+   14 units are cut to the field's 10. [STAGE3 stub 4; STAGE5 item 6]
 
 **Screens**
 10. Menus, chapter screens and dialogs are still the 640x480 logical screen halved into
@@ -308,7 +335,12 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
    pattern buffer (the "save_game_file: ..." marks split the 69 s), quit to
    the main menu ("environment: ..." marks split the 12 s), wait for the
    demo, HOME > Close (is there a "system asked the application to close"
-   line?). Fetch `log.txt` over ftpd.
+   line?). Fetch `log.txt` over ftpd. Player name (backlog item 9): the log's
+   `[3ds] player name from the console profile: "..."` line shows the console's
+   profile name (on a card with saved preferences the name in them is kept:
+   to see it in Preferences > Player, move `Marathon 2 Preferences` aside with
+   ftpd first and put it back afterwards). **The player-name part of run C is
+   done (2026-10-18).**
 5. **Decide with the user** from the numbers: the slow save step (fix it, or a
    "Saving..." message as the user asked if it cannot be fixed); the next
    step of the scenario reload and boot (the dialog theme's 5.2 s too).

@@ -154,6 +154,11 @@ count will match the real folder, not 1) and that the top screen is red for
 the only remote is `origin` (upstream `Aleph-One-Marathon/alephone`), which
 is never pushed to.
 
+**Superseded (2026-10-18):** the user has since forked upstream
+(`github.com/DashieLashie/alephone-3ds`, remote `alephone-3ds`) and pushed the
+port there (`3ds-port`, `stage10-c3d`, tag `port-stage10-P1`). `origin` is still
+never pushed to; the fork is. `CLAUDE.md` "Git" has the current rule.
+
 **Notes for later** (checked, nothing changed):
 
 - The clone is shallow (`git rev-parse --is-shallow-repository` → `true`,

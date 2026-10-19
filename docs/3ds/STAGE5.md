@@ -267,6 +267,27 @@ waits. On the 3DS a system close quits without the dialog and skips the
 quit screens, the fades and the reload (`PATCHES.md` 16 and 22): **0.2 s**.
 From the main menu it was already immediate.
 
+**HOME > Close inside a modal dialog (fixed 2026-10-18, console-confirmed).**
+Upstream handles `SDL_QUIT` in any dialog with a bare `exit(0)`
+(`sdl_dialogs.cpp`), which skips `shutdown_application()` and so `SDL_Quit()`.
+The n3ds video driver then never released GSP: libctru freed the heap while
+its GSP event thread (stack in that heap) was alive, and the thread faulted
+on its next `push`. Luma dump (twice, byte-identical registers): PC
+`syncArbitrateAddress` (`push {lr}`, first instruction), LR
+`gspEventThreadMain`, SP `0x0814b7c8` in the app heap. Reproduced only with a
+dialog open (Preferences); idling at the main menu, or quitting from a game
+or the menu's demo, goes through `shell.cpp`'s `_quit_game` and was clean.
+Not caused by the player-name change (found while checking it): the same
+steps on the new build crashed from the launcher and not over 3dslink with
+the menu idle. Fix, port code only (no engine edit):
+`quit_sdl_at_exit()` in `a1_3ds_platform.cpp`, an `atexit` handler that calls
+`SDL_Quit()` when `SDL_WasInit(0)` is non-zero (a normal shutdown has already
+run it, so it is then a no-op). Log on the dialog path:
+`exit without shutdown_application (a dialog's exit): SDL_Quit`, then `exit`.
+Azahar (non-authoritative; it does not reproduce the fault), script
+`19-prefs-close.txt`: marker line then clean exit. Console, New 3DS:
+Preferences open, HOME > Close, no crash, no new Luma dump.
+
 ## Bottom screen
 
 During play the bottom screen shows a legend of the default controls and

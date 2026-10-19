@@ -1,0 +1,50 @@
+# Console report (2026-10-18): with the main map open on the top screen (SELECT),
+# the D-Pad zooms the top map, and the bottom screen's map came out corrupted
+# (parts of the map missing). Captures the bottom screen before, with the top
+# map open at each of its zoom extremes, and after. HUD + Map (bottom_screen=0).
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 3000
+circle 0 0
+wait 300
+screens t20-before
+log --- SELECT: main map on the top screen ---
+tap SELECT
+wait 1500
+screens t20-open
+log --- D-Pad Up x4: top map zoomed all the way in ---
+tap UP
+wait 300
+tap UP
+wait 300
+tap UP
+wait 300
+tap UP
+wait 1500
+screens t20-in
+log --- D-Pad Down x8: top map zoomed all the way out ---
+tap DOWN
+wait 300
+tap DOWN
+wait 300
+tap DOWN
+wait 300
+tap DOWN
+wait 300
+tap DOWN
+wait 300
+tap DOWN
+wait 300
+tap DOWN
+wait 300
+tap DOWN
+wait 1500
+screens t20-out
+log --- SELECT: close ---
+tap SELECT
+wait 1500
+screens t20-after
