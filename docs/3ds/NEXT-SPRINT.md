@@ -441,9 +441,12 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       `debug-fatal` modes 1-11 incl. 6b/8a/8t, all clean in Azahar). Critic: round 1
       REVISE, round 2 APPROVE (2026-10-24); two items deferred to `3ds-port` NEXT-SPRINT
       item 14 (HOME during the fallback; the merge note in 4).
-   3. **Next** on `3ds-port`: the A1 port side (design 5.6.1 a, c): `app_suspended()`,
-      d1, `exit_requested()` also reads `aptShouldClose()` (backlog item 16), the script
-      command `home-close`, script 22. Then the critic, as for 1-2.
+   3. **Done** on `3ds-port`: the A1 port side (design 5.6.1 a, c): `exit_requested()` also
+      returns `aptShouldClose()`, `app_suspended()` (unused until piece 5), d1 (every APT hook
+      logged with thread, GPU right, should-close), script command `home-close [should-close]`,
+      scripts `22-c3d-home-close.txt` / `22-c3d-home-close-fast.txt` (`1199548` + follow-up
+      `189857e`; `3ds-port` NEXT-SPRINT item 16). Critic round 1 APPROVE (medium effort).
+   **Next: 4.**
    4. Merge `3ds-port` into `stage10-c3d` (docs conflicts expected in NEXT-SPRINT
       items 14-16; in code, add the c3d branch noted in `error_screen_here()`: when
       `a1_c3d_release_top()` returns false, log only, no `consoleInit`, no wait; and,
