@@ -1256,25 +1256,36 @@ Close; `C3D_FRAME_NONBLOCK`; `consoleInit`'s first-call-only stdout device; when
 ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
 
 1. GSP never runs, or never signals, GX work from a process without GPU rights
-   (console run 1 of 5.6.1). *Status: piece 5 built and passing in Azahar (which cannot
-   show it); console run 1 pending.*
+   (console run 1 of 5.6.1). *Status: **VERIFIED** on a New 3DS, 2026-10-24 (A6, run 1):
+   with `close_frame 1` a frame forced after the GPU right was lost (`gpu right 0` at `before
+   frame_end`) did not retire in the 5000 ms wait (`release abandoned (release): the GPU queue
+   did not retire after 5000 ms`), while the earlier `frame_begin` retired in 0 ms (citro3d's
+   ONSUSPEND hook drained the queue). One run, the first ordering of 5.6.1 run 1; the second
+   ordering (`abandoned (frame_begin)`) was not seen. "Never" is shown up to 5 s.*
 2. What GSP does with commands still pending at `gspExit` after an abandon; the
    abandon path ends the process cleanly and the launcher survives (runs 1-2). *Status:
-   the abandon path ends cleanly in Azahar (`p1-abandon.cfg`: `release abandoned`, `real
-   gfxExit returned`, `exit`); the launcher check is console only.*
+   **VERIFIED** for the one real abandon, on a New 3DS, 2026-10-24 (A6, run 1): `release
+   abandoned` with a pending queue, `real gfxExit returned`, `exit`, the Homebrew Launcher
+   returned and Aleph One launched again, no Luma dump. What GSP does with the pending commands
+   after that stays unobserved (the process ended). `p1-abandon.cfg` was not run on the
+   console.*
 3. The 5 s acknowledgement bound and the 500 ms retire bound are assumptions. *Status:
-   piece 5 implements the 500 ms bound (`retire_wait_ms`); Azahar retires in 0 ms every
-   time, so only the console can say whether 500 ms is too tight (a release right after
-   a present on a busy frame) or whether anything needs the 5 s window of run 1.*
+   piece 5 implements the 500 ms bound (`retire_wait_ms`). Console (New 3DS, 2026-10-24,
+   A6): **500 ms was never hit** in the 6 gate-on releases of runs 2-4 (`queue retired after
+   0 ms` every time, no `release abandoned`), so it is not too tight for a HOME > Close
+   release. **Open:** a release right after a busy frame (an error screen, part B of
+   `CONSOLE-SESSION-A6.md`, not run). The 5 s window of run 1 is not needed to see the
+   failure: the queue was still not retired at 5000 ms, so any wait is spent in full; a
+   shorter diagnostic bound would have shown the same.*
 4. SPECULATIVE: dump 5 is the teardown-on-another-thread class (5.6.3 tests 2-4 on
-   the console, launcher check).
+   the console, launcher check). *Status: still pending (A6 stopped before part B2-B4).*
 5. The fallback's `svcExitProcess` skips `gspExit`, `aptExit` and `ndspExit`: the
    HOME menu and the launcher survive, and the DSP does not go on playing buffers
    from the freed heap (listen for a buzz or a looping fragment after the exit; mode
    7, console, optional). The **audio-thread variant** skips `ndspExit` too (`_Exit` ->
    `__appExit` does not stop the DSP, and SDL's audio close is skipped): the same
    silence check applies to mode 6, and to 6b when it ends in the fallback (critic,
-   piece 2 review round 1, minor 8).
+   piece 2 review round 1, minor 8). *Status: still pending (A6 stopped before part B6/B8).*
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 

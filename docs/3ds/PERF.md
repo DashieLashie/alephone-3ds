@@ -1143,6 +1143,32 @@ adds three evaluations of `gspHasGpuRight()`, `aptShouldClose()` and `app_suspen
 flags) and one `svcGetSystemTick()`. `c3d_wait` stays the unchanged `C3D_FrameBegin(0)` while
 the gate is open. These are Azahar instruction counts; the console decides.
 
+## Stage 10 console plan A: close timings (Console (New 3DS), 2026-10-24)
+
+A6 session (`CONSOLE-SESSION-A6.md`), `build-3ds-c3d`, launcher starts, SD `log.txt`. Timings
+are `[3ds]` log stamps (ms resolution) from the d1 `ONSUSPEND` hook to `exit`; only the A runs
+were done. Raw logs: `build-3ds/hw/a6/` (outside git).
+
+| Run | Config | Mode | Hook to `main loop ended` | Hook to `exit` | `queue retired after` |
+| --- | --- | --- | --- | --- | --- |
+| A1 | `p1-home-close-diag.cfg` (gate off, 5 s bound, forced frame) | Classic @30 | 4.1 s | 9.4 s | never: abandoned at 5000 ms |
+| A2-1 | `p1-gpu.cfg` | HUD + Map @60 | 3.0 s | 3.3 s | 0 ms |
+| A2-2 | `p1-gpu.cfg` | HUD + Map @60 | 2.7 s | 3.0 s | 0 ms |
+| A2-3 | `p1-gpu.cfg` | Classic @30 | 4.5 s | 4.8 s | 0 ms |
+| A3 (POWER route, main menu) | `p1-diff.cfg` | HUD + Map @60 | 0.6 s | 0.9 s | 0 ms |
+| A4-1 (dialog) | `p1-gpu.cfg` | HUD + Map @60 | n/a (no `finish_game`) | 2.8 s | 0 ms |
+| A4-2 (main menu) | `p1-gpu.cfg` | HUD + Map @60 | 3.2 s | 3.5 s | 0 ms |
+
+- The release itself (gate closed, queue retired, `C3D_Fini`, `gfxExit`) takes about 0.3 s
+  in these runs (`main loop ended` to `exit`); most of a close is the game's own
+  `finish_game` (about 2.6-3.1 s from the hook to `finish_game: begin`, then 0.1-1.4 s).
+- The 9.4 s of A1 is the diagnostic's own doing: its forced present frame submitted work
+  without GPU rights, and the release waited the full 5000 ms for a queue that never retired.
+- Present gate at the console, over the whole session: `gate_skipped` 0-2 per close, 0 in
+  A3's 5000 presents (HOME, sleep and the keyboard never saw it closed), `present_diff` 0 of
+  96000 pixels in 166 checks.
+- No frame-time measurement was taken in this session (no benchmark runs).
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now
