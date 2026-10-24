@@ -1,0 +1,11 @@
+# Fatal hand-off, debug-fatal mode 6 (vhalt() inside the SDL audio callback; the audio thread
+# is parked): the error screen is shown by the main thread, a HOME round trip happens during
+# it (on_suspend/on_resume skip their SDL audio calls: they would deadlock on the parked
+# thread's mixer lock), then A ends it. See 24-fatal-error-a.txt for how to run it.
+wait 14000
+screens fatal-before-home
+home 2000
+wait 1500
+screens fatal-after-home
+tap A
+wait 5000

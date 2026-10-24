@@ -42,6 +42,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <deque>
@@ -57,6 +58,14 @@ double elapsed_ms();
 void save_screens(const std::string& tag);
 // source/bottom_3ds.cpp
 void bottom_force_redraw();
+
+// Defined below, outside the anonymous namespace; a1_3ds_platform.cpp declares them
+// again for error_screen() (docs/3ds/CITRO3D_DESIGN.md 5.6.2 a). They keep libctru's
+// console off stdout: see console_init_keep_log().
+PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console);
+void console_write_on(PrintConsole* console, const char* text);
+const devoptab_t* console_stdout_device();
+void console_error_screen_begin();
 
 namespace {
 
@@ -85,6 +94,11 @@ const devoptab_t* s_console_out = nullptr;   // the console's stdout device
 // The game draws the bottom screen (bottom_game(true)): the console must not,
 // as it keeps a pointer to the framebuffer it was set up with.
 bool s_bottom_game = false;
+// error_screen() owns the bottom screen (console_error_screen_begin()); set once,
+// never cleared. The port's own console output (the legend, the HOME round trip's
+// bottom_redraw(), overlays) stays quiet from then on, so it cannot overwrite the
+// error text or race error_screen's console state.
+std::atomic<bool> s_error_screen_active{false};
 std::deque<std::string> s_overlay_lines;     // debug-input: last lines shown
 
 const char kLegend[] =
@@ -139,11 +153,9 @@ const char kDspFirmwareNotice[] =
 
 void console_write(const char* text)
 {
-	if (!s_console_out || s_bottom_game)
+	if (!s_console_out || s_bottom_game || s_error_screen_active)
 		return;
-	PrintConsole* previous = consoleSelect(&s_bottom);
-	s_console_out->write_r(_REENT, nullptr, text, strlen(text));
-	consoleSelect(previous);
+	console_write_on(&s_bottom, text);
 }
 
 // The console draws straight into the bottom framebuffer (single-buffered
@@ -152,7 +164,7 @@ void console_write(const char* text)
 // screen's configuration.
 void bottom_present()
 {
-	if (!s_console_out || s_bottom_game)
+	if (!s_console_out || s_bottom_game || s_error_screen_active)
 		return;
 	gfxFlushBuffers();
 	gfxScreenSwapBuffers(GFX_BOTTOM, false);
@@ -179,7 +191,7 @@ void perf_rows_draw()
 
 void bottom_redraw()
 {
-	if (!s_console_out || s_bottom_game)
+	if (!s_console_out || s_bottom_game || s_error_screen_active)
 		return;
 	console_write("\x1b[2J");
 	if (s_dsp_notice == DspNotice::Showing)
@@ -223,18 +235,7 @@ void bottom_redraw()
 // its framebuffer pointer taken from libctru.
 void console_attach()
 {
-	// consoleInit() points stdout/stderr at the console; keep the log tee.
-	const devoptab_t* saved_out = devoptab_list[STD_OUT];
-	const devoptab_t* saved_err = devoptab_list[STD_ERR];
-	PrintConsole* previous = consoleSelect(&s_bottom);   // consoleInit selects s_bottom
-	consoleInit(GFX_BOTTOM, &s_bottom);
-	// libctru installs its console device only on the first consoleInit().
-	if (!s_console_out)
-		s_console_out = devoptab_list[STD_OUT];
-	devoptab_list[STD_OUT] = saved_out;
-	devoptab_list[STD_ERR] = saved_err;
-	if (previous && previous != &s_bottom)
-		consoleSelect(previous);
+	console_init_keep_log(GFX_BOTTOM, &s_bottom);
 }
 
 void bottom_init()
@@ -598,11 +599,19 @@ void handle_finger(const SDL_TouchFingerEvent& f, Uint32 type)
 	}
 }
 
+// While set, fatal_service_point() does nothing (docs/3ds/CITRO3D_DESIGN.md 5.6.3 step 4).
+struct FatalGuard
+{
+	FatalGuard() { fatal_guard_enter(); }
+	~FatalGuard() { fatal_guard_leave(); }
+};
+
 // Runs inside SDL_PushEvent(), i.e. on the thread sending the event: the
 // main thread for input (SDL_PumpEvents). Pushing more events from here is
 // fine (SDL's N3DS mutexes are recursive).
 int SDLCALL event_filter(void*, SDL_Event* e)
 {
+	FatalGuard guard;   // no fatal hand-off served from inside SDL's event watchers
 	if (s_debug_input)
 		log_event(*e);
 	switch (e->type)
@@ -642,7 +651,10 @@ void on_suspend(const char* why)
 {
 	s_suspend_ms = elapsed_ms();
 	audio_set_suspended(true);   // not an underrun: the DSP stops by design
-	if (SDL_WasInit(SDL_INIT_AUDIO) && SDL_GetAudioStatus() == SDL_AUDIO_PLAYING)
+	// Not while the SDL audio thread is parked (a fatal error handed to main,
+	// docs/3ds/CITRO3D_DESIGN.md 5.6.3 step 6): it sits inside SDL's mixer lock, which
+	// SDL_PauseAudio would take.
+	if (!fatal_audio_parked() && SDL_WasInit(SDL_INIT_AUDIO) && SDL_GetAudioStatus() == SDL_AUDIO_PLAYING)
 	{
 		SDL_PauseAudio(1);
 		s_audio_paused_by_us = true;
@@ -663,7 +675,7 @@ void on_resume(const char* why)
 	printf("[3ds] +%.1f ms: resumed (%s) after %.1f s%s\n", now, why, (now - s_suspend_ms) / 1000.0,
 	       s_audio_paused_by_us ? "; SDL audio resumed" : "");
 	audio_set_suspended(false);
-	if (s_audio_paused_by_us)
+	if (s_audio_paused_by_us && !fatal_audio_parked())
 	{
 		SDL_PauseAudio(0);
 		s_audio_paused_by_us = false;
@@ -680,6 +692,22 @@ void on_resume(const char* why)
 // thread) and around library applets such as the keyboard.
 void apt_hook(APT_HookType hook, void*)
 {
+	FatalGuard guard;   // no fatal hand-off served inside libctru's APT hook loop
+	// d1 (docs/3ds/CITRO3D_DESIGN.md 5.6.1): every hook, the thread it runs on and the
+	// rights state. Expected: the main thread, gpu right 1 at ONSUSPEND and ONRESTORE, and
+	// no hook at all after a Close (ONEXIT comes after the log is closed). The script
+	// commands home/sleep/home-close call this directly, so in Azahar it logs the script.
+	{
+		const char* name = hook == APTHOOK_ONSUSPEND ? "ONSUSPEND" : hook == APTHOOK_ONRESTORE ? "ONRESTORE"
+		                   : hook == APTHOOK_ONSLEEP ? "ONSLEEP" : hook == APTHOOK_ONWAKEUP ? "ONWAKEUP"
+		                   : hook == APTHOOK_ONEXIT ? "ONEXIT" : "?";
+		u32 tid = 0;
+		svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+		printf("[3ds] apt hook %s on thread %lu (main %lu): gpu right %d, should close %d\n", name,
+		       static_cast<unsigned long>(tid), main_thread_id(), gspHasGpuRight() ? 1 : 0,
+		       aptShouldClose() ? 1 : 0);
+		fflush(stdout);
+	}
 	const bool was_suspended = s_in_home || s_asleep;
 	switch (hook)
 	{
@@ -796,7 +824,10 @@ void script_log(const std::string& what)
 //   swkbd TEXT | swkbd-cancel  the next keyboard returns TEXT / is cancelled
 //   screens TAG                save both screens as screen-TAG-{top,bottom}.bmp
 //   log TEXT                   write TEXT to the log
-//   quit                       as if HOME > Close was chosen
+//   quit                       as if HOME > Close was chosen (exit_requested() true)
+//   home-close                 the console's HOME > Close: ONSUSPEND, then SDL_QUIT with no
+//                              restore and exit_requested() still false; "home-close should-close"
+//                              sets it (stands in for aptShouldClose())
 bool run_script_line(const std::string& raw)
 {
 	std::string line = raw;
@@ -869,6 +900,20 @@ bool run_script_line(const std::string& raw)
 		svcSleepThread(static_cast<s64>(ms * 1000000.0));
 		apt_hook(home ? APTHOOK_ONRESTORE : APTHOOK_ONWAKEUP, nullptr);
 	}
+	else if (cmd == "home-close")
+	{
+		// The console's HOME > Close: the suspend hook runs, then SDL_QUIT on every poll with
+		// no restore hook and no s_exit_requested (APTHOOK_ONEXIT comes too late; aptShouldClose()
+		// is not flipped by a script in Azahar). "quit" is the other path, with the flag set.
+		// "home-close should-close" also sets the flag exit_requested() reads, standing in for
+		// aptShouldClose() (which a script cannot flip): the console after the piece 3 fix.
+		std::string opt;
+		in >> opt;
+		apt_hook(APTHOOK_ONSUSPEND, nullptr);
+		s.quit = true;
+		if (opt == "should-close")
+			s_exit_requested = true;
+	}
 	else if (cmd == "swkbd")
 	{
 		std::getline(in >> std::ws, s.swkbd_text);
@@ -924,6 +969,59 @@ void script_step()
 
 } // namespace
 
+// consoleInit() points stdout/stderr at the console; this keeps the log tee there.
+// libctru installs its console device (and the stdio setvbuf calls) only on the
+// first consoleInit() of the process, so that call also captures the device
+// (s_console_out). Every later console, error_screen()'s included, is drawn
+// through console_write_on(), never through printf: stdout stays the log for
+// every thread (docs/3ds/CITRO3D_DESIGN.md 5.6.2 a). Not while citro3d owns the
+// top screen: consoleInit() also swaps the top screen's buffers.
+PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console)
+{
+	const devoptab_t* saved_out = devoptab_list[STD_OUT];
+	const devoptab_t* saved_err = devoptab_list[STD_ERR];
+	PrintConsole* previous = consoleSelect(console);   // consoleInit selects it
+	PrintConsole* result = consoleInit(screen, console);
+	if (!s_console_out)
+		s_console_out = devoptab_list[STD_OUT];
+	devoptab_list[STD_OUT] = saved_out;
+	devoptab_list[STD_ERR] = saved_err;
+	if (previous && previous != console)
+		consoleSelect(previous);
+	return result;
+}
+
+// Writes text (with its escape sequences) on a console set up by
+// console_init_keep_log(), through the console's own device. No s_bottom_game
+// check: the caller owns the screen it draws on. Main thread only, or while the
+// main thread is known not to draw (the error-screen-active flag keeps main's
+// console_write quiet): consoleSelect() switches libctru's global currentConsole
+// and the console keeps its escape-sequence state in .bss, so it is not thread-safe.
+void console_write_on(PrintConsole* console, const char* text)
+{
+	if (!s_console_out || !console)
+		return;
+	PrintConsole* previous = consoleSelect(console);
+	s_console_out->write_r(_REENT, nullptr, text, strlen(text));
+	if (previous)
+		consoleSelect(previous);
+}
+
+// error_screen() calls this before it draws: from now on console_write(),
+// bottom_redraw() and bottom_present() do nothing (a HOME round trip during the
+// error screen would otherwise redraw the legend over it).
+void console_error_screen_begin()
+{
+	s_error_screen_active = true;
+}
+
+// The console's stdout device (null before the first console_init_keep_log()),
+// for error_screen's d6 log line.
+const devoptab_t* console_stdout_device()
+{
+	return s_console_out;
+}
+
 // --- HID wrappers -------------------------------------------------------------
 
 extern "C" {
@@ -936,6 +1034,7 @@ void __real_hidTouchRead(touchPosition* pos);
 
 void __wrap_hidScanInput(void)
 {
+	fatal_service_point();   // main thread only, not inside the APT hook or SDL's filter (5.6.3)
 	__real_hidScanInput();
 	if (s_suppress_pending)
 	{
@@ -1118,7 +1217,19 @@ void set_touch_look(bool look)
 
 bool exit_requested()
 {
-	return s_exit_requested;
+	// APTHOOK_ONEXIT (s_exit_requested) is called by libctru only from aptExit(), inside
+	// __appExit: after the engine has already handled HOME > Close, so on hardware the flag
+	// came too late and a game opened the (invisible) upstream quit dialog. aptShouldClose()
+	// is set by the same APTCMD_WAKEUP_CANCEL, already inside aptMainLoop(), i.e. before SDL
+	// pushes its first SDL_QUIT (docs/3ds/CITRO3D_DESIGN.md 5.6.1 c, NEXT-SPRINT item 16).
+	// An order to close or power off sets it too, from libctru's APT event thread, so it can
+	// turn true between two polls (e.g. inside finish_game, which then skips its fades).
+	return s_exit_requested || aptShouldClose();
+}
+
+bool app_suspended()
+{
+	return s_in_home || s_asleep;
 }
 
 void bottom_game(bool game)

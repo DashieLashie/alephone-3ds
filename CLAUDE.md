@@ -79,8 +79,9 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
    Azahar results are labelled "Azahar — non-authoritative".
 5. Anything that needs `sudo`: give the user the command to run in **Terminal.app** (a `!` command has no TTY and fails
    silently). Verify the install afterwards.
-6. Never break the host build or the default (software renderer, `A1_RENDER_C3D=OFF`) 3DS build. `nm` on the OFF
-   `alephone.elf` must show no citro3d symbols.
+6. Never break the host build or the default (software renderer, `A1_RENDER_C3D=OFF`) 3DS build. On the OFF
+   `alephone.elf`, `$DEVKITARM/bin/arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'` must
+   print 0. Not macOS's `nm` (it cannot read ARM ELF and prints nothing), not a bare `c3d` (matches addresses).
 7. No guessing about citro3d/PICA200: read `$DEVKITPRO/libctru/include`, `citro3d.h`, `c3d/*`, and the examples in
    `/opt/devkitpro/examples/3ds/graphics/gpu/`; cite them. `CITRO3D_DESIGN.md` marks unverified claims **UNVERIFIED**.
 8. When the user is away ("working overnight"): do only work that needs neither the console nor a decision (Azahar runs,

@@ -158,6 +158,7 @@ void SDLCALL timed_callback(void*, Uint8* stream, int len)
 {
 	if (!s_started.load(std::memory_order_relaxed))
 	{
+		fatal_note_audio_thread();   // the fatal hand-off needs to know this thread (5.6.3)
 		s_core = svcGetProcessorID();
 		s32 prio = 0;
 		svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
@@ -165,6 +166,7 @@ void SDLCALL timed_callback(void*, Uint8* stream, int len)
 		paint_audio_stack();
 		s_started = true;
 	}
+	fatal_test_audio_hook();   // debug-fatal modes 6, 8
 	const u64 t0 = svcGetSystemTick();
 	const u32 epoch = s_pause_epoch.load(std::memory_order_relaxed);
 	if (s_last_start && epoch == s_seen_epoch)

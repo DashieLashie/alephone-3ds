@@ -48,6 +48,11 @@
 #                  profiler measures PERF_MEASURE s (default 20) after PERF_SETTLE s (default 8)
 #                  and quits; runs scripts/3ds/tests/input/11-perf-bench.txt unless --script is
 #                  given; default --timeout 240. Prints the "[prof] BENCH" line at the end
+#   --fatal FILE   copy FILE to sdmc:/3ds/alephone/debug-fatal (source/fatal_test_3ds.cpp: "mode N", "delay S",
+#                  "lock 1", "first 0|1"); the run stops by itself, 2 s after the log's "exit" or
+#                  "svcExitProcess" line. Both lines are printed BEFORE steps that could still hang
+#                  (_Exit's __appExit, svcExitProcess): this is not proof that the guest ended
+#                  (docs/3ds/CITRO3D_DESIGN.md 5.6.3 tests)
 #   -h, --help     this text
 #
 # Environment:
@@ -77,6 +82,7 @@ level_music=0
 terminal_test=0
 load_test=0
 perf_level=
+fatal_file=
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -94,6 +100,7 @@ while [ $# -gt 0 ]; do
 		--level-music) level_music=1 ;;
 		--terminal-test) terminal_test=1 ;;
 		--load-test) load_test=1 ;;
+		--fatal) shift; fatal_file=${1:?--fatal needs a file} ;;
 		--perf) shift; perf_level=${1:?--perf needs a level number} ;;
 		-h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
 		-*) echo "run-azahar: unknown option $1" >&2; exit 2 ;;
@@ -193,6 +200,13 @@ if [ -n "$perf_level" ]; then
 else
 	rm -f "$userdir/debug-perf"
 fi
+if [ -n "$fatal_file" ]; then
+	[ -f "$fatal_file" ] || die "fatal file $fatal_file not found"
+	cp "$fatal_file" "$userdir/debug-fatal"
+	[ -f "$userdir/log.txt" ] && mv "$userdir/log.txt" "$userdir/log.prev.txt"
+else
+	rm -f "$userdir/debug-fatal"
+fi
 if [ "$screens" = 1 ]; then
 	: > "$userdir/debug-screens"
 else
@@ -273,12 +287,13 @@ while kill -0 "$pid" 2>/dev/null; do
 		echo "run-azahar: stopped Azahar after ${timeout} s"
 		break
 	fi
-	if [ -n "$perf_level" ] && grep -q ' ms: exit$' "$userdir/log.txt" 2>/dev/null; then
+	if { [ -n "$perf_level" ] && grep -q ' ms: exit$' "$userdir/log.txt" 2>/dev/null; } ||
+	   { [ -n "$fatal_file" ] && grep -Eq ' ms: exit$|svcExitProcess$' "$userdir/log.txt" 2>/dev/null; }; then
 		sleep 2
 		kill "$pid" 2>/dev/null || true
 		sleep 3
 		kill -9 "$pid" 2>/dev/null || true
-		echo "run-azahar: the game quit after the benchmark; stopped Azahar after ${elapsed} s"
+		echo "run-azahar: the exit line was reached; stopped Azahar after ${elapsed} s (2 s later)"
 		break
 	fi
 	sleep 1

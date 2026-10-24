@@ -342,6 +342,11 @@ bool a1_c3d_release_top()
 	return a1_c3d::back::release_from_any_thread("release_top");
 }
 
+bool a1_c3d_owns_top()
+{
+	return a1_c3d::back::s_up.load();
+}
+
 void a1_c3d_note_false_return()
 {
 	a1_c3d::back::note_false_return();

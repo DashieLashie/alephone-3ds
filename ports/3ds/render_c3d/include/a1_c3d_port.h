@@ -27,6 +27,10 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 // top screen, false if it still does (the hand-off timed out): keep off the top screen.
 bool a1_c3d_release_top();
 
+// Whether citro3d is up (owns the top screen). One atomic load: no citro3d call, no log
+// and no wait, so a thread that must not block (5.6.3's fallback) can ask it.
+bool a1_c3d_owns_top();
+
 // present_screen() is about to return false: counted if citro3d is up (design 5.1).
 void a1_c3d_note_false_return();
 

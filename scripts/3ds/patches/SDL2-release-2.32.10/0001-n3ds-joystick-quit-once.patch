@@ -1,0 +1,37 @@
+diff --git a/src/joystick/n3ds/SDL_sysjoystick.c b/src/joystick/n3ds/SDL_sysjoystick.c
+index 274f0c1..e539eb2 100644
+--- a/src/joystick/n3ds/SDL_sysjoystick.c
++++ b/src/joystick/n3ds/SDL_sysjoystick.c
+@@ -60,9 +60,19 @@ SDL_FORCE_INLINE void UpdateN3DSReleasedButtons(SDL_Joystick *joystick);
+ SDL_FORCE_INLINE void UpdateN3DSCircle(SDL_Joystick *joystick);
+ SDL_FORCE_INLINE void UpdateN3DSCStick(SDL_Joystick *joystick);
+ 
++/* Aleph One 3DS port: SDL_Quit() can quit the joystick subsystem twice
++ * (SDL_QuitSubSystem: "game controller implies joystick", then the joystick
++ * branch again under SDL_bInMainQuit). An unpaired hidExit() would release
++ * libctru's own HID reference and leave HID shut down for anything that polls
++ * input after SDL_Quit(). Hold exactly one reference. */
++static SDL_bool N3DS_hid_held = SDL_FALSE;
++
+ static int N3DS_JoystickInit(void)
+ {
+-    hidInit();
++    if (!N3DS_hid_held) {
++        hidInit();
++        N3DS_hid_held = SDL_TRUE;
++    }
+     return 0;
+ }
+ 
+@@ -188,7 +198,10 @@ static void N3DS_JoystickClose(SDL_Joystick *joystick)
+ 
+ static void N3DS_JoystickQuit(void)
+ {
+-    hidExit();
++    if (N3DS_hid_held) {
++        hidExit();
++        N3DS_hid_held = SDL_FALSE;
++    }
+ }
+ 
+ static SDL_bool N3DS_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)

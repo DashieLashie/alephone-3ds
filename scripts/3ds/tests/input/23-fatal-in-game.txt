@@ -1,0 +1,14 @@
+# Fatal hand-off, debug-fatal mode 5 (error_screen() on a second thread 10 s after the bottom
+# screen was first presented, i.e. in a HUD + Map game): starts a game as 13-bottom-screen.txt
+# does, then two captures 5 s apart (identical bottoms with the text), then one A.
+#   run-azahar.sh --screens --fatal scripts/3ds/tests/fatal/mode-5.cfg --script <this file> --timeout 150
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 18000
+screens fatal-game-1
+wait 5000
+screens fatal-game-2
+tap A
+wait 5000

@@ -280,15 +280,37 @@ Azahar) [PERF "Next candidates"]
     is a design choice for the user.
     **Console, 2026-10-19 (New 3DS, `PERF.md` "Console G0-b, second session"): worse
     than in Azahar.** The null reads are data aborts there: Luma's "An exception
-    occurred" screen, then a power-off. Main-thread `vhalt()`: the error screen's first
-    `hidScanInput` faults (`hid.c:185`, address `0x10`); the port's screen was never
-    visible (what the user saw was Luma's; corrected 2026-10-23).
+    occurred" screen, then a power-off. Main-thread `vhalt()`: the error screen shows
+    and is readable, leaving it faults in `hidScanInput` (`hid.c:185`, address `0x10`).
     `vhalt()` on a second thread: the main thread faults in `hidScanInput` from
     `N3DS_PumpEvents`. `abort()` on a second thread: the main thread faults in newlib
     `_lseek_r` (address `0x18`) in a resource-file `fseek`. `error_screen()` on a second
     thread: nothing drawn (bottom framebuffer all black), then the app exits and the
     next program (probably the Homebrew Launcher) panics in `svcBreak`. So any fatal
     error ends in a forced power-off, not a return to the launcher.
+    **Investigated 2026-10-19 (Azahar, a scratch build with `hidInit`/`hidExit`
+    wrapped at link time to log each caller; no repo change): `SDL_Quit()` shuts HID
+    down for good.** HID is reference-counted in libctru (`hidInit`/`hidExit`
+    disassembly: `ldrex`/`strex` on a counter; `hidExit` unmaps the shared memory and
+    nulls its pointer only at 0). Count at boot: 3 (libctru's `__appInit`,
+    `N3DS_VideoInit`, `N3DS_JoystickInit`). `vhalt()` -> `shutdown_application()` ->
+    `SDL_Quit()` releases 3: `SDL_JoystickQuit` **twice**, then `N3DS_VideoQuit`, so the
+    count reaches 0 before the error screen polls input. Cause, SDL2 2.32.10 `SDL.c`
+    `SDL_QuitSubSystem`: inside `SDL_Quit` (`SDL_bInMainQuit`) the game-controller
+    branch quits `SDL_INIT_JOYSTICK` ("game controller implies joystick"), then the
+    joystick branch quits it again (refcount still 1, and `SDL_bInMainQuit` forces it);
+    `N3DS_JoystickQuit` calls `hidExit()` each time. The engine starts both
+    (`shell.cpp`:244: `SDL_INIT_JOYSTICK|SDL_INIT_GAMECONTROLLER`). This explains dump 3
+    (main-thread `vhalt`: the error screen's `hidScanInput` reads the null shared
+    memory, address `0x10`, `hidScanInput+0x28` `ldr r1, [r3, #16]`) and dump 4
+    (`vhalt` on a second thread: the main thread's next `hidScanInput`). A normal exit
+    is unaffected (nothing polls HID after `SDL_Quit`). The `abort()`-on-a-second-thread
+    case (dump 6, `_lseek_r`) is a different mechanism, not traced yet. Fix options
+    (the user decides): the error screen takes its own HID reference (`hidInit()` before
+    its loop, `hidExit()` after; port code only); and/or make `N3DS_JoystickQuit`
+    idempotent in our SDL build (`build-sdl2.sh`; an upstream SDL report would be
+    outward-facing); and, for errors on other threads, hand the whole fatal path to the
+    main thread so `SDL_Quit` never runs under a live main loop.
     **Causes (2026-10-19/23):** dumps 3 and 4: SDL2 2.32.10's `SDL_Quit` releases HID
     one time more than it took (traced on `3ds-port`, `b43f9e6`); dump 6: newlib's
     signal handlers are per thread, so `abort()` off the main thread skips `on_abort`
@@ -299,6 +321,122 @@ Azahar) [PERF "Next candidates"]
     errors on other threads hand the fatal path to the main thread
     (`CITRO3D_DESIGN.md` 5.6.3, with `--wrap=abort` and a fenced `vhalt()` edit,
     `PATCHES.md` 54).
+    **Decided 2026-10-23 and in progress** (design `CITRO3D_DESIGN.md` 5.6.0, on
+    `stage10-c3d`): piece 0 (the SDL2 patch, `N3DS_JoystickQuit` releases HID once, `5cd45ce`)
+    is done; **piece 1 done on `3ds-port` (console check pending):** `error_screen()` draws
+    through the console device, not stdout (`input_3ds.cpp`: `console_init_keep_log`,
+    `console_write_on`; no `devoptab_list` swaps in `error_screen`; stdout stays the log), holds
+    its own HID reference (`hidInit()` before its loop, `hidExit()` after) and logs a d6 line
+    (`error screen d6: thread main|other (id N); stdout device after consoleInit: console|log|other`,
+    expected `log`). Azahar (non-authoritative): the boot-time error screen (scenario folder
+    missing) still draws, d6 `log`; a post-boot error screen, also after `SDL_Quit` as on the
+    `vhalt()` path, draws its text on the bottom screen, A leaves it and the process exits with
+    0 null reads. Console check: the boot-time control (rename `Marathon2`, as `STAGE4.md`'s
+    hardware checklist item 5), and by eye the port's error screen after boot once piece 2 can
+    trigger one (`vhalt()` on the main thread); pieces 2 and 3 are still to do.
+    Critic follow-ups (piece 1): `s_error_shown` is set once the text is drawn; while the
+    error screen is up the port's own bottom-screen console output is off (a HOME round trip
+    no longer redraws the legend over it); without a HID reference the screen stays 10 s and
+    polls no input. **For the piece-4 merge:** in the c3d build `error_screen_here()` calls
+    `a1_c3d_release_top()` first (comment at the spot); if it returns false (citro3d still
+    up) it must log only: no `console_init_keep_log`, no wait loop, return.
+    **Piece 2 done on `3ds-port` (console check pending), `PATCHES.md` 54:** a fatal error
+    on any thread ends on the main thread's error screen (`CITRO3D_DESIGN.md` 5.6.3):
+    `fatal_from_other_thread()` (static buffers, compare-exchange, the loser blocks and never
+    draws, 5 s acknowledgement wait, then an untimed kernel wait; the fallback draws on the
+    requesting thread through `error_screen_here(raw_log)` and ends with `svcExitProcess`),
+    serving at `present_screen()`, `present_bottom()` and `__wrap_hidScanInput` on main
+    (not inside the APT hook or SDL's event filter), `fatal_exit()` picking its variant from
+    `s_audio_parked` (a parked SDL audio thread: no `SDL_Quit`, no OpenAL, `gfxExit()` then
+    `_Exit(1)`; `on_suspend`/`on_resume` skip their SDL audio calls), `--wrap=abort`, the
+    `vhalt()` hook. **Deviations from the design text:** (1) the winner copies title and body
+    into the static buffers after the compare-exchange and publishes `s_fatal_ready`
+    (copying first let a loser overwrite the winner's text); (2) the requester takes an
+    unacknowledged request back with an `exchange` on `s_fatal_acked` before its fallback
+    (so a late main cannot also serve it); (3) `log_raw()` tries the tee lock for up to
+    200 ms before writing without it (two unlocked writes on the SD file raced on its
+    offset and lost the "handed to the main thread" line in Azahar); (4) mode 7's lock is
+    taken by main at every service point and present tick, not only at presents (main served
+    the request through `__wrap_hidScanInput` otherwise); (5) `error_screen_here` has no
+    citro3d branch on `3ds-port` (merge note above); (6) the fallback builds `std::string`s
+    and uses the console (heap), unlike the request's static buffers: there main is blocked on
+    a lock the requester holds or on one of the engine's, never inside newlib's malloc (malloc
+    calls out to nothing), so the heap is usable; the remaining risk is a corrupted heap
+    faulting the fallback, accepted for a last resort. Test: sdmc `debug-fatal`
+    (`mode N`, `delay S`, `lock 1`, `first 0|1`), `run-azahar.sh --fatal FILE`, configs
+    `scripts/3ds/tests/fatal/`, scripts `scripts/3ds/tests/input/23-fatal-in-game.txt`,
+    `24-fatal-error-a.txt`, `25-fatal-home-a.txt` (script 17 and its two As exist on
+    `stage10-c3d` only). **Azahar, non-authoritative, 2026-10-23** (every run: error text on
+    the bottom screen, d6 `log`, `azahar_log.txt` 0 null reads): mode 1 `vhalt()` on main:
+    one screen, one A, `exit`; mode 2
+    `abort()` on a second thread: probes `on_abort` (main) / `SIG_DFL` (thread), handed over,
+    shown by main, `exit`; modes 3, 4 likewise; mode 5 in a HUD + Map game: two captures 5 s
+    apart with identical bottoms; mode 6 (audio callback): parked, HOME round trip with no
+    SDL audio call, `fatal exit, audio thread parked`, `exit`; mode 6b (main in
+    `SDL_LockAudio`): no acknowledgement, fallback after 5 s on the audio thread, raw log
+    lines, `svcExitProcess`; mode 7: fallback on the second thread, no second hand-off line;
+    mode 8 in both orders: one screen drawn by main, the loser logs one line and blocks, audio
+    variant both times; modes 9, 10, 11 as described next. Mode 1 (review round 1, MAJOR 1): `vhalt()`'s own `system_alert_user()` only logs on the
+    3DS (the screen is in `alert_user()`, which `vhalt()` does not call), so `vhalt_hook()` on main
+    keeps the message (`s_vhalt_pending`) and `__wrap_abort` shows it ("Aleph One stopped" +
+    the vhalt text, exactly one `[3ds] ERROR:` line, no "abort() was called" screen) before
+    `fatal_exit()`; a bare `abort()`/`halt()` still goes to `on_abort`. Mode 9 (`error_screen()`
+    on main, then `abort()`) covers the other `__wrap_abort` branch (a screen already shown: no
+    second one, `fatal_exit()`). Mode 10 (main asleep 7 s at the failure): the requester takes the
+    request back after 5 s and draws the fallback, main wakes, logs `the request was taken back
+    ... blocking` at its next service point and blocks there (it must not draw over the fallback).
+    Mode 11 (the audio callback fails while main shows its own `error_screen()` and then
+    `exit(1)`s like `alert_user()`'s callers): `error_screen()` on main ends in `fatal_exit()` when
+    the audio thread is parked (the `exit(1)` would run `SoundManager::Shutdown` -> `SDL_CloseAudio`
+    and block on the parked thread's mixer lock); all three pass in Azahar. **`run-azahar.sh
+    --fatal` stops Azahar 2 s after the log's `exit`/`svcExitProcess` line; both lines are
+    printed before steps that could still hang (`_Exit` -> `__appExit`, `svcExitProcess`), and
+    `azahar_log.txt` has no end-of-emulation marker, so "the process ended" is a console-only
+    check (the "0 null reads" count only says no guest memory fault was logged).** `--perf`'s stop
+    condition is unchanged (`exit` only). **Frame-path cost** (Azahar, non-authoritative,
+    profile builds, Framerate Target 60, HUD + Map, L0, 2 runs each, build of `612173a4d`
+    against this one): `present` 1.46 / 1.47 ms before, 1.45 / 1.46 after; busy (`frame - idle`)
+    18.45 before, 18.43 after (frame 19.11 / 19.11 against 19.08 / 19.07): no change. **Raw log lines are not mirrored to 3dslink** (the
+    "handed to the main thread" line, a blocked loser's line, the whole fallback, "main thread:
+    the request was taken back"): on the console read them in `log.txt` on the card, not in the
+    host transcript. Azahar cannot show: whether HOME, the launcher and the DSP survive
+    `svcExitProcess` without `aptExit` (5.6.4 item 5), real scheduling and lock contention,
+    by-eye readability, the launcher after each run. **Console runs (all pending):** the
+    boot-time control and `debug-fatal` modes 1, 2, 3, 4 (the three second-thread runs of G0-b,
+    plus main), 6 and 6b: by eye the port's screen, not Luma's; A ends it; the Homebrew
+    Launcher starts again and launches Aleph One (dump 5); mode 7 only if the user wants the
+    `aptExit`-skipping exit tried. Remove `debug-fatal` from the card afterwards.
+    Console list in order: (a) the boot-time control (rename `Marathon2`); (b) mode 1: by eye
+    the vhalt text ("Aleph One stopped" + "debug-fatal mode 1: vhalt() on the main thread"), not
+    Luma's exception screen; (c) modes 2, 3, 4 (the three second-thread runs of G0-b): the
+    port's screen, A, then the launcher returns and Aleph One launches again; (d) modes 6 and
+    6b: the same, and **the DSP falls silent** (the audio variant and the fallback end in `_Exit`
+    / `svcExitProcess`, which do not run `ndspExit`, and SDL's audio close is skipped: the DSP
+    may keep reading wave buffers from freed linear memory; also listen after relaunching);
+    (e) mode 7 only if the user wants the fallback's `svcExitProcess` tried, with the same silence
+    check. After each run read the raw lines in `log.txt` on the card. Every "process ended"
+    claim is a console check (see above).
+    **Critic round 2 (last) on `05c6d27`: APPROVE**, all round-1 findings closed. Its minors,
+    applied in the next commit: (1) `__wrap_abort` clears `s_vhalt_pending` (`exchange(false)`),
+    so an `abort()` inside the vhalt screen goes on to `__real_abort` (bounded) instead of
+    recursing to a stack overflow; (2) a request's text is no longer lost when it is not shown:
+    a blocked loser logs its title and body, and main, when it acknowledges a request during its
+    own fatal path (mode 11), logs "in its own fatal path; the request's text, not shown:" and
+    the text; (3) the error screen's no-HID branch (10 s, no `hidScanInput`) calls
+    `fatal_service_point()`, so another thread's request is acknowledged there and the fallback
+    does not draw over main's screen. **Deferred:** (4) HOME or sleep during the fallback runs
+    `apt_hook` -> `on_suspend` on the requesting thread (`printf` through the tee lock,
+    `SDL_PushEvent`): if main failed to acknowledge because it is stuck in `tee_write` (item 15),
+    the fallback freezes at HOME; fix: skip logging and SDL calls in `apt_hook` off main, or
+    item 15's fix removes the cause (console: mode 7 + HOME). (5) Piece-4 merge note: with
+    `A1_RENDER_C3D`, a request taken back leaves main blocked forever, possibly between
+    `C3D_FrameBegin` and `C3D_FrameEnd`, and the fallback only logs (5.6.2 a): a frozen frame
+    until `svcExitProcess` is the design; the fallback must never call citro3d off main.
+    Azahar (non-authoritative, 2026-10-24, build with (1)-(3), script 24): modes 1, 2, 6, 7,
+    8a, 8t, 9, 10, 11 as before (one screen each, `exit` or `svcExitProcess`); mode 1's bottom
+    capture shows the vhalt text; 8a/8t log the loser's text after its "blocked" line; mode 11
+    logs the audio thread's text after "in its own fatal path"; 0 null reads in the last run's
+    `azahar_log.txt` (it is overwritten each run).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -308,13 +446,64 @@ Azahar) [PERF "Next candidates"]
     behind at +50 s and the game loop froze for ~100 s after a BENCH line. Only with
     3dslink (a launcher start has no socket). A send timeout (`SO_SNDTIMEO`) or a
     non-blocking socket would let it drop the mirror instead; not tried.
-16. **HOME > Close in a game takes upstream's slow quit path.** The port's
-    `APTHOOK_ONEXIT` hook (`input_3ds.cpp`) can never fire in time: libctru calls it
-    only from `aptExit` inside `__appExit`, after the log is closed
-    (`CITRO3D_DESIGN.md` 5.6.1). So `exit_requested()` is false, and `SDL_QUIT` in a
-    game opens upstream's (invisible) quit dialog, which draws a frame before
-    `exit(0)` (with the GPU present, the frame that hangs). Fix: `exit_requested()` also
-    returns `aptShouldClose()`; part of plan A piece 3.
+    **Fixed on `3ds-port` 2026-10-19 (console check pending):** `tee_write()` sends
+    with `MSG_DONTWAIT` (`sys/socket.h`:22; libctru has no `SO_SNDTIMEO`) and, while the
+    send buffer is full, waits for room with `poll(POLLOUT)` (`poll.h`) in 100 ms steps,
+    500 ms per write at most; past that it closes the socket and writes `[3ds] 3dslink
+    mirror stopped (stalled); the SD log goes on` to the SD log. Console check: during a
+    3dslink run, `kill -STOP` the host's 3dslink process for ~10 s: the game must keep
+    running, the SD log must show that line, and the transcript stops there.
+
+16. **HOME > Close in a game took the slow path: `APTHOOK_ONEXIT` fires too late**
+    (design `CITRO3D_DESIGN.md` 5.6.1 c, piece 3, branch `stage10-c3d`). `exit_requested()` read
+    only the flag set by `APTHOOK_ONEXIT`, which libctru calls from `aptExit()` inside
+    `__appExit`, after the engine has handled the close; so `PATCHES.md` 16/22's fast path
+    (`shell.cpp`:1522, `interface.cpp`:2417, :2990, :3056) never ran on hardware and a game opened
+    the invisible quit dialog (a draw after the close, `exit(0)` on its next `SDL_QUIT`).
+    **Done on `3ds-port` (console check pending):** `exit_requested()` also returns
+    `aptShouldClose()` (set by `APTCMD_WAKEUP_CANCEL` inside `aptMainLoop()`, before SDL's first
+    `SDL_QUIT`). New in `input_3ds.cpp`: `a1_3ds::app_suspended()` (`s_in_home || s_asleep`,
+    declared in `a1_3ds_platform.h`; nothing calls it on this branch, the stage 10 present gate
+    will); `a1_3ds::main_thread_id()`; diagnostic **d1**: every APT hook logs
+    `[3ds] apt hook <ONSUSPEND|ONRESTORE|ONSLEEP|ONWAKEUP|ONEXIT> on thread <id> (main <id>): gpu
+    right <0|1>, should close <0|1>`; script command `home-close [should-close]`; scripts
+    `22-c3d-home-close.txt` (before-the-fix path) and `22-c3d-home-close-fast.txt` (after). No
+    engine edit, so no `PATCHES.md` entry. Nothing here touches the renderer (the gate and
+    bounded waits are piece 5, stage 10).
+    **Deviations from the design text:** (1) `home-close should-close` is an extra option: a script
+    cannot flip `aptShouldClose()` in Azahar, so the option sets the flag `exit_requested()` reads
+    and models the console after the fix; plain `home-close` is exactly the design's command (the
+    pre-fix path, including the quit dialog). (2) The scripts are two files, not one. (3) d1's
+    `gpu right` is `gspHasGpuRight()`; ONEXIT is also logged, but on hardware that line is lost
+    (log already closed).
+    **Azahar — non-authoritative** (`build-3ds`, Marathon 2): `22-c3d-home-close.txt`: d1 line
+    `ONSUSPEND on thread 1 (main 1): gpu right 1, should close 0`, then a `terminals: 640x320`
+    frame (the quit dialog) and `exit without shutdown_application (a dialog's exit)`, 0.5 s after
+    the command: the old behaviour, as the design says it should be for the plain command.
+    `22-c3d-home-close-fast.txt`: d1 line, then `finish_game: begin` 0.3 ms later, no dialog frame,
+    `exit` 0.2 s later. Unchanged: `06-gameplay.txt` (HOME 3 s: ONSUSPEND/ONRESTORE both
+    on the main thread, then `quit`: `finish_game` at once, `exit`), `08-demo-close.txt`, the HOME
+    and sleep parts of `07-suspend-menus.txt` (each hook logged, resume lines as before), and the
+    fatal regression `--fatal mode-2.cfg` + script 24 (one `ERROR: Aleph One stopped`, `exit`).
+    Builds: `build-3ds` and `build-3ds-prof`, 0 warnings; `arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'`
+    = 0 (a bare `grep -ci c3d` also matches addresses such as `006c3d54`; macOS's `nm`
+    cannot read ARM ELF and prints nothing, so it "passes" vacuously: the checks recorded
+    on 2026-10-24 before the merge used it and were re-done with `arm-none-eabi-nm`: 0).
+    **Console checks pending:** HOME > Close in a game: the log (SD card) shows the d1 line
+    `ONSUSPEND on thread <main> (main <same>) gpu right 1 should close 0` and no hook after it, then
+    `finish_game` without a `terminals: 640x320` dialog frame; the launcher returns and Aleph One
+    starts again; HOME > Close at the main menu and in a dialog unchanged; HOME and back, and sleep,
+    in a game: both hooks on the main thread with gpu right 1. (Item 14's HOME/sleep gate runs
+    belong to piece 5.) Added by the critic: the software keyboard (confirm and cancel): hooks
+    paired, `should close` stays 0, the game goes on; Power button > Power Off in a game: the
+    fast path (bit 0x200), no quit dialog.
+    **Critic: APPROVE** (round 1, 2026-10-24, medium effort). It checked libctru's binary:
+    `aptShouldClose()` tests bits 0x600 of a flag word that only `WAKEUP_CANCEL` (0x400, in
+    `aptWaitForWakeUp`) and the order-to-close/shutdown event (0x200, `aptEventHandler`, on
+    libctru's APT thread) set, and nothing clears; sleep and a normal HOME round trip set
+    neither. So `exit_requested()` can turn true between two polls (power-off during a normal
+    `finish_game` skips its fades: harmless). The d1 line is inside `FatalGuard` (no fatal
+    service point in the hook); ONEXIT now logs twice, both lost on hardware (log closed).
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
@@ -446,13 +635,22 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       logged with thread, GPU right, should-close), script command `home-close [should-close]`,
       scripts `22-c3d-home-close.txt` / `22-c3d-home-close-fast.txt` (`1199548` + follow-up
       `189857e`; `3ds-port` NEXT-SPRINT item 16). Critic round 1 APPROVE (medium effort).
-   **Next: 4.**
-   4. Merge `3ds-port` into `stage10-c3d` (docs conflicts expected in NEXT-SPRINT
-      items 14-16; in code, add the c3d branch noted in `error_screen_here()`: when
-      `a1_c3d_release_top()` returns false, log only, no `consoleInit`, no wait; and,
-      critic round 2 item 5: a request taken back leaves main blocked forever, possibly
-      between `C3D_FrameBegin` and `C3D_FrameEnd`, while the fallback only logs: that frozen
-      frame is the design, the fallback must never call citro3d off main).
+   4. **Done** (2026-10-24): `3ds-port` (`189857e`) merged into `stage10-c3d`. Conflicts:
+      `CLAUDE.md` (kept this branch's stage 10 state), NEXT-SPRINT items 14-16 (both copies
+      auto-merged; one kept, with this branch's "Causes / user decision" paragraph). Merge
+      adaptations: (a) `present_screen()` runs `fatal_test_tick` and `fatal_service_point()`
+      before the GPU branch (they were in `present_screen_cpu()`, never reached with citro3d
+      presenting); (b) `error_screen_here()`: on main `a1_c3d_release_top()` first; in 5.6.3's
+      fallback (off main, `raw_log`) only the new `a1_c3d_owns_top()` (one atomic load), because
+      `release_from_any_thread()` `printf`s through the tee lock and waits 2 s for a main thread
+      known to be blocked; with citro3d up the fallback logs `citro3d still up (fallback off
+      main): logged only`, draws nothing, no wait (design 5.6.2 a; critic round 2 item 5: never
+      citro3d off main). Four builds 0 warnings; `arm-none-eabi-nm`: OFF builds 0 citro3d
+      symbols, ON 119. Azahar — non-authoritative (`build-3ds-c3d`, GPU present): `debug-fatal`
+      modes 1, 2, 6, 11: release on main, then the error screen, `exit`; modes 7, 10: the
+      fallback line above, `svcExitProcess`; scripts 22 fast (no dialog frame) and plain (the
+      dialog frame; Azahar keeps GPU rights, so no hang); 0 null reads in each run.
+   **Next: 5.**
    5. `stage10-c3d`: the HOME > Close hang (A1, design 5.6.1 a/b): the present gate,
       bounded queue waits (`C3D_FRAME_NONBLOCK` only, never a positive timeout), the
       abandon tri-state, d2-d5, `debug-c3d` keys (`suspend_gate`, `retire_wait_ms`,

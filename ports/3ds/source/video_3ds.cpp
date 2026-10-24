@@ -228,6 +228,9 @@ bool present_screen_cpu(const void* pixels, int pitch, int width, int height, ui
 
 bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
 {
+	// Before the GPU present too: with citro3d up, present_screen_cpu() is not reached.
+	fatal_test_tick(false);   // debug-fatal (5.6.3 tests); before the service point
+	fatal_service_point();    // a fatal error handed over by another thread (5.6.3 step 4)
 #ifdef A1_RENDER_C3D
 	// The GPU present (docs/3ds/CITRO3D_DESIGN.md, 5.1): citro3d owns the top screen once it
 	// is up and takes every surface it is given. False only while it is not in use.
@@ -266,6 +269,8 @@ bool present_reference(u32* fb, const void* pixels, int pitch, int width, int he
 
 bool present_bottom(const void* pixels, int pitch)
 {
+	fatal_test_tick(true);
+	fatal_service_point();
 	constexpr int kBottomW = 320;
 	if (gfxGetScreenFormat(GFX_BOTTOM) != GSP_RGB565_OES)
 		return false;

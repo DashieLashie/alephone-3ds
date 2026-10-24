@@ -19,9 +19,11 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <malloc.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,6 +154,7 @@ const char kScenarioTemplate[] =
 
 u64 s_boot_tick = 0;
 bool s_boot_begun = false;
+u32 s_main_tid = 0;   // the main thread's kernel thread id, for error_screen's d6 line
 
 // --- main stack high-water mark ------------------------------------------------
 
@@ -195,6 +198,25 @@ devoptab_t s_tee_devoptab;
 // SD file's offset: one overwrote the other's line and the offset still
 // advanced twice, leaving never-written gaps (stale card data) in log.txt.
 LightLock s_tee_lock;
+// How long one write may wait for room in the socket's send buffer. A blocking
+// send() on a stalled Wi-Fi link held s_tee_lock for ~100 s on the console, and
+// every thread that logged waited behind it (NEXT-SPRINT.md backlog item 15).
+// libctru has no SO_SNDTIMEO (sys/socket.h), so: MSG_DONTWAIT, and poll() for
+// POLLOUT while the buffer is full.
+const int kLinkStallMs = 500;
+
+// Host went away or stalled: stop mirroring; the SD log goes on.
+void drop_link(const char* why)
+{
+	close(s_link_fd);
+	s_link_fd = -1;
+	if (s_log_fd >= 0)
+	{
+		char line[96];
+		const int n = snprintf(line, sizeof line, "[3ds] 3dslink mirror stopped (%s); the SD log goes on\n", why);
+		write(s_log_fd, line, n);
+	}
+}
 
 ssize_t tee_write(struct _reent*, void*, const char* ptr, size_t len)
 {
@@ -204,17 +226,25 @@ ssize_t tee_write(struct _reent*, void*, const char* ptr, size_t len)
 	if (s_link_fd >= 0)
 	{
 		size_t sent = 0;
+		int waited_ms = 0;
 		while (sent < len)
 		{
-			ssize_t n = send(s_link_fd, ptr + sent, len - sent, 0);
-			if (n <= 0)
+			ssize_t n = send(s_link_fd, ptr + sent, len - sent, MSG_DONTWAIT);
+			if (n > 0)
 			{
-				// Host went away: stop mirroring rather than block or retry.
-				close(s_link_fd);
-				s_link_fd = -1;
-				break;
+				sent += n;
+				continue;
 			}
-			sent += n;
+			if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && waited_ms < kLinkStallMs)
+			{
+				const int step = std::min(100, kLinkStallMs - waited_ms);
+				pollfd p = {s_link_fd, POLLOUT, 0};
+				poll(&p, 1, step);
+				waited_ms += step;
+				continue;
+			}
+			drop_link(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? "stalled" : "host went away");
+			break;
 		}
 	}
 	LightLock_Unlock(&s_tee_lock);
@@ -269,6 +299,77 @@ void open_3dslink()
 std::atomic<bool> s_exiting{false};
 double ms_since_boot();
 
+// --- Fatal errors on any thread (docs/3ds/CITRO3D_DESIGN.md 5.6.3) ------------------
+//
+// A fatal error on a thread other than main is handed to the main thread: the
+// requester copies the message into static buffers, publishes it in s_fatal_from
+// (compare-exchange: the first request wins) and blocks; main serves it at its next
+// top-level service point (fatal_service_point(): present_screen(), present_bottom(),
+// __wrap_hidScanInput on main), draws the error screen and ends the process
+// (fatal_exit()). If main does not acknowledge in 5 s the requester draws the
+// screen itself (the fallback) and ends the process without __appExit.
+//
+// Invariant: no fatal error may be raised from inside tee_write() or newlib's
+// malloc. The raw log writes and the static buffers below assume that the
+// requesting thread holds neither lock. No entry point is reachable from either
+// today; keep it so.
+std::atomic<u32> s_fatal_from{0};         // kernel thread id of the request, 0 = none
+std::atomic<bool> s_fatal_ready{false};   // the title/body buffers are filled
+std::atomic<bool> s_fatal_acked{false};   // main took the request, or the requester took it back
+std::atomic<bool> s_audio_parked{false};  // the SDL audio thread failed (or lost): see fatal_exit()
+std::atomic<bool> s_fatal_active{false};  // main is in a fatal path of its own, or serving one
+std::atomic<u32> s_audio_tid{0};          // the SDL audio thread (first timed_callback call)
+std::atomic<int> s_hook_depth{0};         // inside apt_hook / the SDL event filter: no serving
+Handle s_fatal_never = 0;                 // an event that is never signalled
+void* s_main_tls = nullptr;               // the main thread's TLS block
+std::atomic<bool> s_fatal_main_took{false};  // main acknowledged the request (it did not get reclaimed)
+char s_fatal_title[128];
+char s_fatal_body[1024];
+// vhalt() on main: the message, kept for __wrap_abort (upstream's vhalt() ends in abort(),
+// and its own system_alert_user() only logs on the 3DS, so no screen is shown before that).
+std::atomic<bool> s_vhalt_pending{false};
+char s_vhalt_message[1024];
+
+bool on_main_thread()
+{
+	return !s_main_tls || getThreadLocalStorage() == s_main_tls;
+}
+
+// A log line straight to the log fd: no stdio, no heap, and no waiting for the tee
+// lock (the thread that holds it may be the main thread we are waiting for). The
+// lock is only tried, for up to 200 ms: two writes at once on the SD file race on
+// its offset (the reason for s_tee_lock) and one line is lost; if the lock stays
+// taken the line is written without it.
+void log_raw(const char* text)
+{
+	if (s_log_fd < 0)
+		return;
+	bool locked = false;
+	for (int i = 0; i < 200 && !(locked = LightLock_TryLock(&s_tee_lock) == 0); ++i)
+		svcSleepThread(1000000);
+	write(s_log_fd, text, strlen(text));
+	if (locked)
+		LightLock_Unlock(&s_tee_lock);
+}
+
+// A log line from the error screen: through the tee, or raw in the fallback.
+void log_line(bool raw, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+void log_line(bool raw, const char* fmt, ...)
+{
+	char buf[384];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+	if (raw)
+		log_raw(buf);
+	else
+	{
+		fputs(buf, stdout);
+		fflush(stdout);
+	}
+}
+
 void close_outputs()
 {
 	s_exiting = true;
@@ -309,10 +410,35 @@ void quit_sdl_at_exit()
 {
 	if (SDL_WasInit(0) == 0)
 		return;
+	if (s_audio_parked)
+		return;   // SDL_Quit would wait for the parked audio thread (5.6.3 step 6)
 	printf("[3ds] +%.1f ms: exit without shutdown_application (a dialog's exit): SDL_Quit\n",
 	       ms_since_boot());
 	fflush(stdout);
 	SDL_Quit();
+}
+
+// The one end of every fatal path on the main thread (5.6.3 step 5). The variant
+// is picked now, from s_audio_parked, not from who made the request: a parked SDL
+// audio thread sits in the kernel inside SDL's mixer lock, so SDL_Quit() (it locks
+// the device and joins that thread) and any OpenAL call would deadlock here.
+[[noreturn]] void fatal_exit()
+{
+	if (s_audio_parked)
+	{
+		printf("[3ds] +%.1f ms: fatal exit, audio thread parked: gfxExit, no SDL_Quit\n", ms_since_boot());
+		fflush(stdout);
+		if (SDL_WasInit(SDL_INIT_VIDEO))
+			gfxExit();   // SDL's reference (SDL_Quit would release it)
+	}
+	else if (SDL_WasInit(0))
+	{
+		// Stops the SDL audio thread and reaches gfxExit through SDL's video
+		// driver, like the console-proven dialog exit (STAGE5.md).
+		SDL_Quit();
+	}
+	close_outputs();
+	_Exit(1);   // __appExit runs on main; no atexit handlers, no static destructors
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -443,7 +569,7 @@ void put_le(std::vector<unsigned char>& v, size_t at, u32 value, int bytes)
 // Saves the framebuffer the display is showing (GSPGPU capture info, as
 // screenshot tools do) as a 24-bit BMP. 3DS framebuffers are stored rotated:
 // each memory row is one screen column, bottom pixel first.
-void dump_screen(int screen, const char* name)
+void dump_screen(int screen, const char* name, bool raw_log = false)
 {
 	GSPGPU_CaptureInfo info;
 	if (R_FAILED(GSPGPU_ImportDisplayCaptureInfo(&info)))
@@ -495,8 +621,8 @@ void dump_screen(int screen, const char* name)
 	{
 		fwrite(bmp.data(), 1, bmp.size(), f);
 		fclose(f);
-		printf("[3ds] saved %s (%s screen, format %lu)\n", path.c_str(),
-		       screen == 0 ? "top" : "bottom", static_cast<unsigned long>(format));
+		log_line(raw_log, "[3ds] saved %s (%s screen, format %lu)\n", path.c_str(),
+		         screen == 0 ? "top" : "bottom", static_cast<unsigned long>(format));
 	}
 }
 
@@ -592,9 +718,8 @@ std::vector<std::string> wrap(const std::string& text, size_t width)
 [[noreturn]] void die_with_message(const std::string& what)
 {
 	fflush(stdout);
-	error_screen("Aleph One stopped", what);
-	close_outputs();
-	_Exit(1);
+	error_screen("Aleph One stopped", what);   // off the main thread: never returns
+	fatal_exit();
 }
 
 void on_terminate()
@@ -635,10 +760,14 @@ void on_abort(int)
 	                 "the lines before this in the log may say why.");
 }
 
-void print_wrapped(const std::string& text, size_t width)
+// The wrapped lines, each ended by '\n' (error_screen draws them with
+// console_write_on()).
+std::string wrapped_text(const std::string& text, size_t width)
 {
+	std::string out;
 	for (const auto& line : wrap(text, width))
-		printf("%s\n", line.c_str());
+		out += line + "\n";
+	return out;
 }
 
 } // namespace
@@ -904,6 +1033,10 @@ bool boot_begin(int& argc, char**& argv)
 
 	s_boot_tick = svcGetSystemTick();
 	s_boot_begun = true;
+	svcGetThreadId(&s_main_tid, CUR_THREAD_HANDLE);
+	s_main_tls = getThreadLocalStorage();
+	if (R_FAILED(svcCreateEvent(&s_fatal_never, RESET_ONESHOT)))
+		s_fatal_never = 0;
 	stack_paint();
 
 	// sdmc:/3ds normally exists (the Homebrew Launcher lives there), but a
@@ -1072,21 +1205,78 @@ void main_menu_displayed()
 
 // --- error screen ------------------------------------------------------------
 
+// input_3ds.cpp (docs/3ds/CITRO3D_DESIGN.md 5.6.2 a). The error screen is drawn
+// through the console device, never through stdout: after boot stdout is the log
+// tee, and consoleInit() reroutes stdout only on its first call.
+PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console);
+void console_write_on(PrintConsole* console, const char* text);
+const devoptab_t* console_stdout_device();
+void console_error_screen_begin();
+
+namespace {
+// Set by error_screen_here() once the text is drawn: "a screen was drawn"
+// (5.6.3: a later fatal path shows exactly one screen).
+std::atomic<bool> s_error_shown{false};
+
+// The screen itself, on the calling thread: the body of error_screen() without the
+// hand-off to the main thread. raw_log is the fallback's (5.6.3 step 3): every log
+// line goes straight to the log fd, never through stdio or the tee lock.
+void error_screen_here(const std::string& title, const std::string& body, bool raw_log);
+}
+
+// Shows the error on the bottom screen. Off the main thread this hands the whole
+// fatal path to the main thread and never returns (5.6.3): the callers all end the
+// process afterwards anyway. On the main thread it draws, waits for A/START and
+// returns; s_fatal_active makes the service points acknowledge a request that
+// arrives meanwhile without nesting a second screen.
 void error_screen(const std::string& title, const std::string& body)
 {
-	fprintf(stderr, "[3ds] ERROR: %s\n%s\n", title.c_str(), body.c_str());
-	fflush(stdout);
-	fflush(stderr);
+	if (!on_main_thread())
+		fatal_from_other_thread(title.c_str(), body.c_str());
+	s_fatal_active = true;
+	error_screen_here(title, body, false);
+	// With the SDL audio thread parked the callers' exit(1) would run the atexit handlers
+	// (SoundManager::Shutdown -> SDL_CloseAudio) and block on the parked thread's mixer lock.
+	if (s_audio_parked)
+		fatal_exit();
+}
+
+namespace {
+void error_screen_here(const std::string& title, const std::string& body, bool raw_log)
+{
+	if (raw_log)
+	{
+		log_raw("[3ds] ERROR: ");
+		log_raw(title.c_str());
+		log_raw("\n");
+		log_raw(body.c_str());
+		log_raw("\n");
+	}
+	else
+	{
+		fprintf(stderr, "[3ds] ERROR: %s\n%s\n", title.c_str(), body.c_str());
+		fflush(stdout);
+		fflush(stderr);
+	}
+
+	// The port's own bottom-screen console output stops here: a HOME round trip
+	// during the loop below must not redraw the legend over the error.
+	console_error_screen_begin();
 
 #ifdef A1_RENDER_C3D
 	// citro3d owns the top screen once the GPU present is up: give it back before the
-	// console or SDL draw there (docs/3ds/CITRO3D_DESIGN.md, 1.3, 5.1). Idempotent. This
-	// may run on a thread other than main (on_abort/on_terminate, alert_user): then the
-	// release is handed to the main thread, and if that does not happen in time citro3d
-	// keeps the top screen and this screen stays on the bottom one.
-	const bool top_free = a1_c3d_release_top();
-#else
-	const bool top_free = true;
+	// console or SDL draw there (docs/3ds/CITRO3D_DESIGN.md, 1.3, 5.1). On main (every
+	// error screen since 5.6.3) it releases directly. Off main this is 5.6.3's fallback
+	// (raw_log), with main blocked, perhaps on the tee lock or between C3D_FrameBegin and
+	// C3D_FrameEnd: a1_c3d_release_top()'s hand-off would printf and wait for nothing, so
+	// only ask whether citro3d is up. If it is: no consoleInit (it swaps the top screen
+	// too), nothing drawn, no wait (5.6.2 a, 5.6.3 step 3); the frozen frame is the design,
+	// and this thread must never call citro3d.
+	if (raw_log ? a1_c3d_owns_top() : !a1_c3d_release_top())
+	{
+		log_line(raw_log, "[3ds] error screen: citro3d still up (fallback off main): logged only\n");
+		return;
+	}
 #endif
 
 	// Before SDL video is up nobody owns the screens yet. After it, SDL owns
@@ -1094,40 +1284,64 @@ void error_screen(const std::string& title, const std::string& body)
 	// on top if a window has shown one; until then (SDL_Init to the main
 	// window, e.g. a missing Map) the top would stay black, so use it too.
 	// Every caller exits afterwards, so taking the screen over is harmless.
-	// With citro3d still up (top_free false) gfx is necessarily initialised.
-	const bool own_gfx = top_free && !SDL_WasInit(SDL_INIT_VIDEO);
-	const bool own_top = top_free && (own_gfx || !SDL_GetKeyboardFocus());
+	const bool own_gfx = !SDL_WasInit(SDL_INIT_VIDEO);
+	const bool own_top = own_gfx || !SDL_GetKeyboardFocus();
 	if (own_gfx)
 		gfxInitDefault();
 
-	// consoleInit() points stdout/stderr at the console; put the log back
-	// afterwards.
-	const devoptab_t* saved_out = devoptab_list[STD_OUT];
-	const devoptab_t* saved_err = devoptab_list[STD_ERR];
-
+	// The consoles are initialised first, then d6 is logged, then they are drawn
+	// on. The first consoleInit() of the process (an error before input_init())
+	// makes libctru's console device, which console_init_keep_log() captures;
+	// stdout is not moved.
 	static PrintConsole top, bottom;
 	if (own_top)
-	{
-		consoleInit(GFX_TOP, &top);
-		consoleSelect(&top);
-		printf("\x1b[14;2H\x1b[31;1m%s\x1b[0m", title.c_str());
-		printf("\x1b[16;2HSee the bottom screen.");
-	}
-	consoleInit(GFX_BOTTOM, &bottom);
-	consoleSelect(&bottom);
-	const devoptab_t& bottom_out = *devoptab_list[STD_OUT];
-	printf("\x1b[31;1m");
-	print_wrapped(title, 39);
-	printf("\x1b[0m\n");
-	print_wrapped(body, 39);
-	printf("\n\x1b[32mPress START or A to exit.\x1b[0m");
+		console_init_keep_log(GFX_TOP, &top);
+	console_init_keep_log(GFX_BOTTOM, &bottom);
 
+	// d6: where the error screen runs, and that stdout is not the console.
+	u32 tid = 0;
+	svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+	const devoptab_t* out = devoptab_list[STD_OUT];
+	log_line(raw_log, "[3ds] error screen d6: thread %s (id %lu); stdout device after consoleInit: %s\n",
+	         tid == s_main_tid ? "main" : "other", static_cast<unsigned long>(tid),
+	         out == console_stdout_device() ? "console" : out == &s_tee_devoptab ? "log" : "other");
+
+	if (own_top)
+	{
+		console_write_on(&top, ("\x1b[14;2H\x1b[31;1m" + title + "\x1b[0m").c_str());
+		console_write_on(&top, "\x1b[16;2HSee the bottom screen.");
+	}
+	console_write_on(&bottom, ("\x1b[31;1m" + wrapped_text(title, 39) + "\x1b[0m\n" +
+	                           wrapped_text(body, 39) +
+	                           "\n\x1b[32mPress START or A to exit.\x1b[0m").c_str());
+	s_error_shown = true;
+
+	// The error screen holds its own HID reference (libctru's is counted):
+	// hidScanInput() stays valid whatever SDL_Quit released before this
+	// (docs/3ds/CITRO3D_DESIGN.md 5.6.2 b, NEXT-SPRINT.md item 14).
+	const Result hid_rc = hidInit();
+	if (R_FAILED(hid_rc))
+		log_line(raw_log, "[3ds] error screen: hidInit failed (0x%08lX)\n", static_cast<unsigned long>(hid_rc));
+
+	// Without a HID reference hidScanInput() may read unmapped shared memory (the
+	// old dump 3 fault): then no input is polled and the screen stays up 10 s.
+	const bool have_hid = R_SUCCEEDED(hid_rc);
+	const int kNoHidFrames = 600;   // 10 s of VBlanks
 	int frames = 0;
 	while (aptMainLoop())
 	{
-		hidScanInput();
-		if (hidKeysDown() & (KEY_START | KEY_A))
-			break;
+		if (have_hid)
+		{
+			hidScanInput();
+			if (hidKeysDown() & (KEY_START | KEY_A))
+				break;
+		}
+		else
+		{
+			if (frames >= kNoHidFrames)
+				break;
+			fatal_service_point();   // no hidScanInput here: acknowledge another thread's request
+		}
 		gfxFlushBuffers();
 		if (own_gfx)
 			gfxSwapBuffers();
@@ -1140,17 +1354,221 @@ void error_screen(const std::string& title, const std::string& body)
 		gspWaitForVBlank();
 		if (++frames == 10 && debug_screens_enabled())
 		{
-			devoptab_list[STD_OUT] = saved_out;   // log the "saved" lines
-			dump_screen(0, "screen-error-top.bmp");
-			dump_screen(1, "screen-error-bottom.bmp");
-			devoptab_list[STD_OUT] = &bottom_out;
+			dump_screen(0, "screen-error-top.bmp", raw_log);   // logs "saved" lines
+			dump_screen(1, "screen-error-bottom.bmp", raw_log);
 		}
 	}
 
-	devoptab_list[STD_OUT] = saved_out;
-	devoptab_list[STD_ERR] = saved_err;
+	if (have_hid)
+		hidExit();
 	if (own_gfx)
 		gfxExit();
 }
 
+// Blocks the calling thread for good, in an untimed kernel wait. Never a sleep
+// loop: __libctru_exit frees the heap before svcExitProcess, and a thread that
+// wakes with its stack in the heap faults (STAGE5.md, the gspEventThreadMain fault).
+[[noreturn]] void block_forever()
+{
+	for (;;)
+	{
+		if (s_fatal_never)
+			svcWaitSynchronization(s_fatal_never, -1);
+		else
+			svcSleepThread(1000000000LL);   // no event (svcCreateEvent failed at boot)
+	}
+}
+
+void copy_text(char* dst, size_t size, const char* src)
+{
+	size_t i = 0;
+	for (; i + 1 < size && src && src[i]; ++i)
+		dst[i] = src[i];
+	dst[i] = 0;
+}
+} // namespace
+
+// 5.6.3 step 1-3: a fatal error on a thread other than main.
+void fatal_from_other_thread(const char* title, const char* body)
+{
+	u32 tid = 0;
+	svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+	char line[160];
+	// The SDL audio thread first, win or lose: main must never call SDL_Quit/OpenAL
+	// afterwards (step 6).
+	if (tid && tid == s_audio_tid.load())
+		s_audio_parked = true;
+
+	u32 expected = 0;
+	if (!s_fatal_from.compare_exchange_strong(expected, tid ? tid : 0xFFFFFFFFu))
+	{
+		// A loser never draws (a second consoleInit would also swap the top over
+		// the first screen) and never exits the process.
+		snprintf(line, sizeof line, "[3ds] fatal error on thread %lu while thread %lu's is handled: blocked\n",
+		         static_cast<unsigned long>(tid), static_cast<unsigned long>(expected));
+		log_raw(line);
+		// Main shows another thread's text: this one's may be the real cause.
+		log_raw(title ? title : "");
+		log_raw("\n");
+		log_raw(body ? body : "");
+		log_raw("\n");
+		block_forever();
+	}
+	// The winner owns the buffers; main reads them only after s_fatal_ready.
+	copy_text(s_fatal_title, sizeof s_fatal_title, title);
+	copy_text(s_fatal_body, sizeof s_fatal_body, body);
+	s_fatal_ready.store(true, std::memory_order_release);
+	snprintf(line, sizeof line, "[3ds] fatal error on thread %lu: handed to the main thread\n",
+	         static_cast<unsigned long>(tid));
+	log_raw(line);
+
+	for (int ms = 0; ms < 5000 && !s_fatal_acked.load(); ++ms)
+		svcSleepThread(1000000);
+	// Take the request back if main has not (it can no longer serve it), else it did.
+	if (s_fatal_acked.exchange(true))
+		block_forever();
+
+	snprintf(line, sizeof line, "[3ds] fatal error on thread %lu: not acknowledged in 5 s; shown on this thread\n",
+	         static_cast<unsigned long>(tid));
+	log_raw(line);
+	// The fallback (main is blocked): this thread draws and ends the process
+	// without __appExit's teardown under a live main thread. Whether HOME, the
+	// launcher and the DSP survive svcExitProcess is UNVERIFIED (5.6.4 item 5).
+	// In the c3d build error_screen_here() logs only and returns at once when
+	// a1_c3d_release_top() fails (citro3d still up).
+	// std::string and the console use the heap here, unlike step 1's request (static
+	// buffers): in the fallback main is blocked on a lock this thread holds or on one
+	// of the engine's, never inside newlib's malloc (malloc calls out to nothing), so the
+	// heap is usable; the remaining risk is a corrupted heap faulting the fallback,
+	// acceptable for a last resort.
+	error_screen_here(s_fatal_title, s_fatal_body, true);
+	log_raw("[3ds] fallback error screen left; svcExitProcess\n");
+	svcExitProcess();
+}
+
+// 5.6.3 step 4: main thread, top-level service points only.
+void fatal_service_point()
+{
+	if (!on_main_thread())
+		return;
+	fatal_test_frame_lock();   // debug-fatal mode 7: a lock main takes at every service point
+	if (s_fatal_from.load(std::memory_order_relaxed) == 0)
+		return;
+	// Not inside libctru's APT hook loop or SDL's event filter (their locks).
+	if (s_hook_depth.load() != 0 || !s_fatal_ready.load(std::memory_order_acquire))
+		return;
+	if (s_fatal_acked.exchange(true))
+	{
+		// Acknowledged by main earlier (it is in its own fatal path): carry on. Otherwise
+		// the requester took the request back and is drawing the fallback screen: main must
+		// not run on and draw over it (present_bottom redraws the HUD), it waits for the
+		// requester's svcExitProcess.
+		if (!s_fatal_main_took.load())
+		{
+			log_raw("[3ds] main thread: the request was taken back by its thread (fallback screen); blocking\n");
+			block_forever();
+		}
+		return;
+	}
+	s_fatal_main_took = true;
+	// Main is in a fatal path of its own (or serving): acknowledge, do not nest. Its
+	// screen shows its own text, so the request's goes to the log.
+	if (s_fatal_active.exchange(true))
+	{
+		log_raw("[3ds] main thread: in its own fatal path; the request's text, not shown:\n");
+		log_raw(s_fatal_title);
+		log_raw("\n");
+		log_raw(s_fatal_body);
+		log_raw("\n");
+		return;
+	}
+	char line[160];
+	snprintf(line, sizeof line, "[3ds] +%.1f ms: fatal error from thread %lu, shown by the main thread\n",
+	         ms_since_boot(), static_cast<unsigned long>(s_fatal_from.load()));
+	fputs(line, stdout);
+	fflush(stdout);
+	error_screen(s_fatal_title, s_fatal_body);
+	fatal_exit();
+}
+
+void fatal_guard_enter()
+{
+	++s_hook_depth;
+}
+
+void fatal_guard_leave()
+{
+	--s_hook_depth;
+}
+
+bool fatal_audio_parked()
+{
+	return s_audio_parked;
+}
+
+void fatal_note_audio_thread()
+{
+	u32 tid = 0;
+	svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+	s_audio_tid = tid;
+}
+
+bool is_abort_handler(void (*handler)(int))
+{
+	return handler == on_abort;
+}
+
+// 5.6.3 step 7: the engine's vhalt(), at its top (PATCHES.md 54), before
+// stop_recording(), logFatal and shutdown_application() can run on the wrong thread.
+void vhalt_hook(const char* message)
+{
+	if (!on_main_thread())
+		fatal_from_other_thread("Aleph One stopped", message);   // never returns
+	if (s_audio_parked)
+	{
+		// Upstream's shutdown_application() would deadlock on the audio lock.
+		s_fatal_active = true;
+		error_screen("Aleph One stopped", message);
+		fatal_exit();
+	}
+	// Upstream's vhalt() goes on as before (SDL_Quit, a log line, abort()); __wrap_abort then
+	// shows this message on the error screen.
+	copy_text(s_vhalt_message, sizeof s_vhalt_message, message);
+	s_vhalt_pending = true;
+	s_fatal_active = true;
+}
+
+unsigned long main_thread_id()
+{
+	return s_main_tid;
+}
+
 } // namespace a1_3ds
+
+// 5.6.3 step 7: abort() on any thread. newlib's signal handlers are per _reent and
+// a thread's is zeroed, so on a second thread signal(SIGABRT, on_abort) does not
+// apply and abort() would _exit() under a live main thread.
+extern "C" void __real_abort(void) __attribute__((noreturn));
+extern "C" void __wrap_abort(void)
+{
+	if (!a1_3ds::on_main_thread())
+	{
+		u32 tid = 0;
+		svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+		char what[200];   // the thread blocks inside the call below: the buffer stays valid
+		snprintf(what, sizeof what, "abort() was called on thread %lu (failed assertion, halt() or "
+		         "vhalt()); the lines before this in the log may say why.", static_cast<unsigned long>(tid));
+		a1_3ds::fatal_from_other_thread("Aleph One stopped", what);
+	}
+	if (a1_3ds::s_error_shown)
+		a1_3ds::fatal_exit();   // a screen was shown already: no second one (debug-fatal mode 9)
+	if (a1_3ds::s_vhalt_pending.exchange(false))   // once: an abort() inside the screen goes on below
+	{
+		// vhalt() on main ends in abort(), and its own alert shows nothing on the 3DS (the
+		// 3DS screen is in alert_user(), which vhalt() does not call): show vhalt()'s message,
+		// not on_abort's generic one.
+		a1_3ds::error_screen("Aleph One stopped", a1_3ds::s_vhalt_message);
+		a1_3ds::fatal_exit();
+	}
+	__real_abort();   // a bare abort() or halt(): on_abort -> die_with_message
+}
