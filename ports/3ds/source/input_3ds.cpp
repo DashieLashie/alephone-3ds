@@ -693,6 +693,21 @@ void on_resume(const char* why)
 void apt_hook(APT_HookType hook, void*)
 {
 	FatalGuard guard;   // no fatal hand-off served inside libctru's APT hook loop
+	// d1 (docs/3ds/CITRO3D_DESIGN.md 5.6.1): every hook, the thread it runs on and the
+	// rights state. Expected: the main thread, gpu right 1 at ONSUSPEND and ONRESTORE, and
+	// no hook at all after a Close (ONEXIT comes after the log is closed). The script
+	// commands home/sleep/home-close call this directly, so in Azahar it logs the script.
+	{
+		const char* name = hook == APTHOOK_ONSUSPEND ? "ONSUSPEND" : hook == APTHOOK_ONRESTORE ? "ONRESTORE"
+		                   : hook == APTHOOK_ONSLEEP ? "ONSLEEP" : hook == APTHOOK_ONWAKEUP ? "ONWAKEUP"
+		                   : hook == APTHOOK_ONEXIT ? "ONEXIT" : "?";
+		u32 tid = 0;
+		svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+		printf("[3ds] apt hook %s on thread %lu (main %lu): gpu right %d, should close %d\n", name,
+		       static_cast<unsigned long>(tid), main_thread_id(), gspHasGpuRight() ? 1 : 0,
+		       aptShouldClose() ? 1 : 0);
+		fflush(stdout);
+	}
 	const bool was_suspended = s_in_home || s_asleep;
 	switch (hook)
 	{
@@ -809,7 +824,10 @@ void script_log(const std::string& what)
 //   swkbd TEXT | swkbd-cancel  the next keyboard returns TEXT / is cancelled
 //   screens TAG                save both screens as screen-TAG-{top,bottom}.bmp
 //   log TEXT                   write TEXT to the log
-//   quit                       as if HOME > Close was chosen
+//   quit                       as if HOME > Close was chosen (exit_requested() true)
+//   home-close                 the console's HOME > Close: ONSUSPEND, then SDL_QUIT with no
+//                              restore and exit_requested() still false; "home-close should-close"
+//                              sets it (stands in for aptShouldClose())
 bool run_script_line(const std::string& raw)
 {
 	std::string line = raw;
@@ -881,6 +899,20 @@ bool run_script_line(const std::string& raw)
 		apt_hook(home ? APTHOOK_ONSUSPEND : APTHOOK_ONSLEEP, nullptr);
 		svcSleepThread(static_cast<s64>(ms * 1000000.0));
 		apt_hook(home ? APTHOOK_ONRESTORE : APTHOOK_ONWAKEUP, nullptr);
+	}
+	else if (cmd == "home-close")
+	{
+		// The console's HOME > Close: the suspend hook runs, then SDL_QUIT on every poll with
+		// no restore hook and no s_exit_requested (APTHOOK_ONEXIT comes too late; aptShouldClose()
+		// is not flipped by a script in Azahar). "quit" is the other path, with the flag set.
+		// "home-close should-close" also sets the flag exit_requested() reads, standing in for
+		// aptShouldClose() (which a script cannot flip): the console after the piece 3 fix.
+		std::string opt;
+		in >> opt;
+		apt_hook(APTHOOK_ONSUSPEND, nullptr);
+		s.quit = true;
+		if (opt == "should-close")
+			s_exit_requested = true;
 	}
 	else if (cmd == "swkbd")
 	{
@@ -1185,7 +1217,17 @@ void set_touch_look(bool look)
 
 bool exit_requested()
 {
-	return s_exit_requested;
+	// APTHOOK_ONEXIT (s_exit_requested) is called by libctru only from aptExit(), inside
+	// __appExit: after the engine has already handled HOME > Close, so on hardware the flag
+	// came too late and a game opened the (invisible) upstream quit dialog. aptShouldClose()
+	// is set by the same APTCMD_WAKEUP_CANCEL, already inside aptMainLoop(), i.e. before SDL
+	// pushes its first SDL_QUIT (docs/3ds/CITRO3D_DESIGN.md 5.6.1 c, NEXT-SPRINT item 16).
+	return s_exit_requested || aptShouldClose();
+}
+
+bool app_suspended()
+{
+	return s_in_home || s_asleep;
 }
 
 void bottom_game(bool game)

@@ -159,6 +159,15 @@ void set_touch_look(bool look);
 // or the power button). SDL then sends SDL_QUIT on every event poll.
 bool exit_requested();
 
+// True while the application is suspended by the HOME menu, an applet or sleep (input_3ds.cpp:
+// set and cleared by the APT hooks, which run on the main thread). After HOME > Close no
+// restore hook ever runs, so this stays true; on hardware that is the only time it is true
+// during a present. The stage 10 present gate reads it (docs/3ds/CITRO3D_DESIGN.md 5.6.1 a).
+bool app_suspended();
+
+// The main thread's kernel thread id (0 before boot_begin), for diagnostics.
+unsigned long main_thread_id();
+
 // The system keyboard (swkbd). `text` is UTF-8 in both directions: the
 // initial text on entry, the result on return. Returns false (and leaves
 // `text` alone) if the user cancelled. `max_chars` is the most characters

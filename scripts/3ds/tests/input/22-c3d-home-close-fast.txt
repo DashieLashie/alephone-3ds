@@ -1,0 +1,15 @@
+# Piece 3, after-the-fix path: as 22-c3d-home-close.txt but exit_requested() is true (aptShouldClose() on hardware): the fast exit.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+screens hc-start
+circle 0 150
+wait 2000
+circle 0 0
+wait 3000
+screens hc-before
+log --- HOME > Close (console path: hook, then SDL_QUIT, no restore) ---
+home-close should-close
+wait 8000

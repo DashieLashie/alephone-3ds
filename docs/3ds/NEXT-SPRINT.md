@@ -441,6 +441,46 @@ Azahar) [PERF "Next candidates"]
     3dslink run, `kill -STOP` the host's 3dslink process for ~10 s: the game must keep
     running, the SD log must show that line, and the transcript stops there.
 
+16. **HOME > Close in a game took the slow path: `APTHOOK_ONEXIT` fires too late**
+    (design `CITRO3D_DESIGN.md` 5.6.1 c, piece 3, branch `stage10-c3d`). `exit_requested()` read
+    only the flag set by `APTHOOK_ONEXIT`, which libctru calls from `aptExit()` inside
+    `__appExit`, after the engine has handled the close; so `PATCHES.md` 16/22's fast path
+    (`shell.cpp`:1522, `interface.cpp`:2417, :2990, :3056) never ran on hardware and a game opened
+    the invisible quit dialog (a draw after the close, `exit(0)` on its next `SDL_QUIT`).
+    **Done on `3ds-port` (console check pending):** `exit_requested()` also returns
+    `aptShouldClose()` (set by `APTCMD_WAKEUP_CANCEL` inside `aptMainLoop()`, before SDL's first
+    `SDL_QUIT`). New in `input_3ds.cpp`: `a1_3ds::app_suspended()` (`s_in_home || s_asleep`,
+    declared in `a1_3ds_platform.h`; nothing calls it on this branch, the stage 10 present gate
+    will); `a1_3ds::main_thread_id()`; diagnostic **d1**: every APT hook logs
+    `[3ds] apt hook <ONSUSPEND|ONRESTORE|ONSLEEP|ONWAKEUP|ONEXIT> on thread <id> (main <id>): gpu
+    right <0|1>, should close <0|1>`; script command `home-close [should-close]`; scripts
+    `22-c3d-home-close.txt` (before-the-fix path) and `22-c3d-home-close-fast.txt` (after). No
+    engine edit, so no `PATCHES.md` entry. Nothing here touches the renderer (the gate and
+    bounded waits are piece 5, stage 10).
+    **Deviations from the design text:** (1) `home-close should-close` is an extra option: a script
+    cannot flip `aptShouldClose()` in Azahar, so the option sets the flag `exit_requested()` reads
+    and models the console after the fix; plain `home-close` is exactly the design's command (the
+    pre-fix path, including the quit dialog). (2) The scripts are two files, not one. (3) d1's
+    `gpu right` is `gspHasGpuRight()`; ONEXIT is also logged, but on hardware that line is lost
+    (log already closed).
+    **Azahar — non-authoritative** (`build-3ds`, Marathon 2): `22-c3d-home-close.txt`: d1 line
+    `ONSUSPEND on thread 1 (main 1): gpu right 1, should close 0`, then a `terminals: 640x320`
+    frame (the quit dialog) and `exit without shutdown_application (a dialog's exit)`, 0.5 s after
+    the command: the old behaviour, as the design says it should be for the plain command.
+    `22-c3d-home-close-fast.txt`: d1 line, then `finish_game: begin` 0.3 ms later, no dialog frame,
+    `exit` 0.2 s later. Unchanged: `06-gameplay.txt` (HOME 3 s: ONSUSPEND/ONRESTORE both
+    on the main thread, then `quit`: `finish_game` at once, `exit`), `08-demo-close.txt`, the HOME
+    and sleep parts of `07-suspend-menus.txt` (each hook logged, resume lines as before), and the
+    fatal regression `--fatal mode-2.cfg` + script 24 (one `ERROR: Aleph One stopped`, `exit`).
+    Builds: `build-3ds` and `build-3ds-prof`, 0 warnings; `nm build-3ds/alephone.elf | grep -ci c3d`
+    = 0.
+    **Console checks pending:** HOME > Close in a game: the log (SD card) shows the d1 line
+    `ONSUSPEND on thread <main> (main <same>) gpu right 1 should close 0` and no hook after it, then
+    `finish_game` without a `terminals: 640x320` dialog frame; the launcher returns and Aleph One
+    starts again; HOME > Close at the main menu and in a dialog unchanged; HOME and back, and sleep,
+    in a game: both hooks on the main thread with gpu right 1. (Item 14's HOME/sleep gate runs
+    belong to piece 5.)
+
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
 previews are BMPs); Old 3DS untested (no hardware); one controller binding per action;

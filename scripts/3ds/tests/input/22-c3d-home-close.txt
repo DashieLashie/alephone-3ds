@@ -1,0 +1,20 @@
+# Stage 10 plan A piece 3 (docs/3ds/CITRO3D_DESIGN.md 5.6.1): HOME > Close in a game.
+# Starts a game as 06-gameplay.txt, plays 5 s, then "home-close": the ONSUSPEND hook (d1 line),
+# then SDL_QUIT with no restore hook and exit_requested() false = the console's path BEFORE
+# the piece 3 fix (the engine opens the quit dialog). Run again with the last command changed
+# to "home-close should-close" (22-c3d-home-close-fast.txt) for the path AFTER the fix
+# (exit_requested() true, as aptShouldClose() is on hardware): the fast exit, no dialog.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+screens hc-start
+circle 0 150
+wait 2000
+circle 0 0
+wait 3000
+screens hc-before
+log --- HOME > Close (console path: hook, then SDL_QUIT, no restore) ---
+home-close
+wait 8000

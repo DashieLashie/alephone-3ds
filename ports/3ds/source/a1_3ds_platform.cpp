@@ -1524,6 +1524,11 @@ void vhalt_hook(const char* message)
 	s_fatal_active = true;
 }
 
+unsigned long main_thread_id()
+{
+	return s_main_tid;
+}
+
 } // namespace a1_3ds
 
 // 5.6.3 step 7: abort() on any thread. newlib's signal handlers are per _reent and
