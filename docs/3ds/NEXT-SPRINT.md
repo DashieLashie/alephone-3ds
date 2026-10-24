@@ -748,8 +748,12 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       `build-3ds-c3d` (or `-prof`), install over the launcher as before, **start every run from
       the Homebrew Launcher**, not 3dslink: the pass criterion is that "Closing software..."
       ends, the launcher comes back and Aleph One launches again. Put the config on the card with
-      `scripts/3ds/sd-ftp.sh IP put scripts/3ds/tests/c3d/<cfg> /3ds/alephone/` and rename it to
-      `debug-c3d` (`sd-ftp.sh IP mv /3ds/alephone/<cfg> /3ds/alephone/debug-c3d`); read the card's
+      `scripts/3ds/sd-ftp.sh IP put scripts/3ds/tests/c3d/<cfg> /3ds/alephone/`, remove the old one
+      (`sd-ftp.sh IP rm /3ds/alephone/debug-c3d`; a rename onto an existing file may fail on the
+      card's FAT and silently keep the previous config) and rename the new one to `debug-c3d`
+      (`sd-ftp.sh IP mv /3ds/alephone/<cfg> /3ds/alephone/debug-c3d`). **Check each run's config
+      at the top of `log.txt`:** the boot line `[c3d] debug-c3d: ... suspend_gate X,
+      retire_wait_ms Y ...` must match the run (run 1: `suspend_gate 0`). Read the card's
       `/3ds/alephone/log.txt` afterwards (the d1-d5 lines are in it; a launcher start has no
       3dslink mirror). Delete `debug-c3d` at the end.
       1. **Diagnostic**, `p1-home-close-diag.cfg`, Classic @30 (as `home-close-1`), in a game:
@@ -757,21 +761,45 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
          and no hook line after it; the `d3 close_frame:` breadcrumbs with `gpu right 0` before
          the forced `frame_end`; then `did not retire` / `release abandoned (release): the GPU
          queue did not retire after 5000 ms`, `real gfxExit returned`, a normal close.
-         That confirms the last UNVERIFIED step (GSP never completes work without rights). If
+         **Also a pass (the other ordering):** a natural present after the hook runs first, its
+         bounded `frame_begin` succeeds (citro3d's ONSUSPEND hook drained the queue) and its
+         `frame_end` submits without rights; the release's `close_frame` then abandons inside
+         `frame_begin`: `release abandoned (frame_begin): the GPU queue did not retire after
+         5000 ms`, the `gpu right 0` breadcrumb is that present's `before frame_end`, and there
+         is no `close_frame: after frame_begin` and no `release: waiting for the queue` line.
+         Either ordering confirms the last UNVERIFIED step (GSP never completes work without rights). If
          `queue retired after X ms` with a large X: slow, not never; report X. If it hangs: the
          last `d3`/`release:` line on the card names the wait; stop and report. Then relaunch.
       2. **The fix**, `p1-gpu.cfg`: HOME > Close in a game three times (HUD + Map @60 twice,
-         Classic @30 once). Expect `gate closed at present N (gpu_right 0, ...)` with >= 1 skipped
-         present (or none, with piece 3's fast path quitting before a draw), `queue retired
+         Classic @30 once). Expect the release's state line `gate closed (gpu_right 0, should_close 1, ...)`,
+         and `gate closed at present N` with >= 1 skipped present only if a present came before
+         the quit (with piece 3's fast path there may be no present, so no such line), `queue retired
          after 0 ms`, `release done`, `real gfxExit returned`, `exit`. Each close returns to the
          launcher and Aleph One starts again.
       3. `p1-diff.cfg`: HOME and back in a game twice, sleep (lid) and wake in a game twice: the
          picture is right, `present_diff` shows 0 differences, `gate_skipped=0` in the stats lines
          (predicted: the main thread is blocked in `aptMainLoop()` for both), each d1 hook on the
-         main thread with gpu right 1.
+         main thread with gpu right 1. Also the software keyboard (e.g. naming a save) confirmed
+         and cancelled, and POWER then cancel, both with `p1-gpu.cfg`: library-applet suspend /
+         power menu, the gate never seen closed or reopened with presents resuming (a skipped
+         ONRESTORE would leave `s_in_home` set: every present skipped, frozen top screen).
       4. No regression: HOME > Close in a dialog and at the main menu; no new Luma dumps.
       Also read off the first run: whether `retire_wait_ms` 500 is ever hit in a normal release
       (an error screen right after a busy frame): a `release abandoned` line outside run 1 is a bug.
+      Reading d2: "ms since the last frame end" is genuinely 0 when the release is served from
+      `present_bottom`'s service point right after the top present (`test_vhalt` 2-4,
+      `debug-fatal` 2).
+      **Critic round 1 on `6b152e4`: APPROVE** (2026-10-24, medium effort; runbook findings 1, 2,
+      6 applied above). Deferred: (3) after an abandon, `a1_c3d_owns_top()` and
+      `release_from_any_thread()` report citro3d gone, so an error screen during exit does
+      `consoleInit` on the top screen while citro3d's `onQueueFinish` is still bound (it would
+      `gfxScreenSwapBuffers` on the GSP thread if the abandoned queue ever retired): decide
+      log-only-after-abandon or document the accepted race (5.6.1 b); reachable only with an
+      abandon plus an error at exit, or the forced configs. (4) `kHandoffWaitMs` (2000) is
+      shorter than a main release under `p1-home-close-diag.cfg` (up to 5 + 5 s); fix later as
+      max(2000, 2 x `retire_wait_ms` + 500); not reachable in run 1. (5) 500 ms default kept.
+      Nits: `p1-unbounded.cfg` is a deliberate reproduction only; `ensure_up()`'s
+      `if (s_up) return !serve_release();` is dead in practice.
    6. **One console session** for all of it: design 5.6.1 runs 1-4 (written out in item 5), the `debug-fatal`
       list in item 14 (boot-time control, mode 1 by eye, modes 2-4, 6, 6b; the launcher
       relaunches Aleph One after each; the DSP falls silent after 6/6b/7), the mirror
