@@ -321,6 +321,12 @@ Azahar) [PERF "Next candidates"]
     0 null reads. Console check: the boot-time control (rename `Marathon2`, as `STAGE4.md`'s
     hardware checklist item 5), and by eye the port's error screen after boot once piece 2 can
     trigger one (`vhalt()` on the main thread); pieces 2 and 3 are still to do.
+    Critic follow-ups (piece 1): `s_error_shown` is set once the text is drawn; while the
+    error screen is up the port's own bottom-screen console output is off (a HOME round trip
+    no longer redraws the legend over it); without a HID reference the screen stays 10 s and
+    polls no input. **For the piece-4 merge:** in the c3d build `error_screen_here()` calls
+    `a1_c3d_release_top()` first (comment at the spot); if it returns false (citro3d still
+    up) it must log only: no `console_init_keep_log`, no wait loop, return.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its

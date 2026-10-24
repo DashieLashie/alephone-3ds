@@ -42,6 +42,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <deque>
@@ -64,6 +65,7 @@ void bottom_force_redraw();
 PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console);
 void console_write_on(PrintConsole* console, const char* text);
 const devoptab_t* console_stdout_device();
+void console_error_screen_begin();
 
 namespace {
 
@@ -92,6 +94,11 @@ const devoptab_t* s_console_out = nullptr;   // the console's stdout device
 // The game draws the bottom screen (bottom_game(true)): the console must not,
 // as it keeps a pointer to the framebuffer it was set up with.
 bool s_bottom_game = false;
+// error_screen() owns the bottom screen (console_error_screen_begin()); set once,
+// never cleared. The port's own console output (the legend, the HOME round trip's
+// bottom_redraw(), overlays) stays quiet from then on, so it cannot overwrite the
+// error text or race error_screen's console state.
+std::atomic<bool> s_error_screen_active{false};
 std::deque<std::string> s_overlay_lines;     // debug-input: last lines shown
 
 const char kLegend[] =
@@ -146,7 +153,7 @@ const char kDspFirmwareNotice[] =
 
 void console_write(const char* text)
 {
-	if (!s_console_out || s_bottom_game)
+	if (!s_console_out || s_bottom_game || s_error_screen_active)
 		return;
 	console_write_on(&s_bottom, text);
 }
@@ -157,7 +164,7 @@ void console_write(const char* text)
 // screen's configuration.
 void bottom_present()
 {
-	if (!s_console_out || s_bottom_game)
+	if (!s_console_out || s_bottom_game || s_error_screen_active)
 		return;
 	gfxFlushBuffers();
 	gfxScreenSwapBuffers(GFX_BOTTOM, false);
@@ -184,7 +191,7 @@ void perf_rows_draw()
 
 void bottom_redraw()
 {
-	if (!s_console_out || s_bottom_game)
+	if (!s_console_out || s_bottom_game || s_error_screen_active)
 		return;
 	console_write("\x1b[2J");
 	if (s_dsp_notice == DspNotice::Showing)
@@ -942,7 +949,10 @@ PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console)
 
 // Writes text (with its escape sequences) on a console set up by
 // console_init_keep_log(), through the console's own device. No s_bottom_game
-// check: the caller owns the screen it draws on.
+// check: the caller owns the screen it draws on. Main thread only, or while the
+// main thread is known not to draw (the error-screen-active flag keeps main's
+// console_write quiet): consoleSelect() switches libctru's global currentConsole
+// and the console keeps its escape-sequence state in .bss, so it is not thread-safe.
 void console_write_on(PrintConsole* console, const char* text)
 {
 	if (!s_console_out || !console)
@@ -951,6 +961,14 @@ void console_write_on(PrintConsole* console, const char* text)
 	s_console_out->write_r(_REENT, nullptr, text, strlen(text));
 	if (previous)
 		consoleSelect(previous);
+}
+
+// error_screen() calls this before it draws: from now on console_write(),
+// bottom_redraw() and bottom_present() do nothing (a HOME round trip during the
+// error screen would otherwise redraw the legend over it).
+void console_error_screen_begin()
+{
+	s_error_screen_active = true;
 }
 
 // The console's stdout device (null before the first console_init_keep_log()),

@@ -1109,9 +1109,11 @@ void main_menu_displayed()
 PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console);
 void console_write_on(PrintConsole* console, const char* text);
 const devoptab_t* console_stdout_device();
+void console_error_screen_begin();
 
 namespace {
-// Set by error_screen() (5.6.3: a later fatal path shows exactly one screen).
+// Set by error_screen_here() once the text is drawn: "a screen was drawn"
+// (5.6.3: a later fatal path shows exactly one screen).
 std::atomic<bool> s_error_shown{false};
 
 // The screen itself, on the calling thread. Piece 2 (5.6.3) puts the hand-off
@@ -1121,7 +1123,6 @@ void error_screen_here(const std::string& title, const std::string& body);
 
 void error_screen(const std::string& title, const std::string& body)
 {
-	s_error_shown = true;
 	error_screen_here(title, body);
 }
 
@@ -1131,6 +1132,15 @@ void error_screen_here(const std::string& title, const std::string& body)
 	fprintf(stderr, "[3ds] ERROR: %s\n%s\n", title.c_str(), body.c_str());
 	fflush(stdout);
 	fflush(stderr);
+
+	// Merge note (piece 4, stage10-c3d): there, the `#ifdef A1_RENDER_C3D` release
+	// call goes right here (a1_c3d_release_top()). If it returns false (citro3d
+	// still up) this function logs only: no console_init_keep_log, no wait loop,
+	// it returns (CITRO3D_DESIGN.md 5.6.2 a, 5.6.3 step 3).
+
+	// The port's own bottom-screen console output stops here: a HOME round trip
+	// during the loop below must not redraw the legend over the error.
+	console_error_screen_begin();
 
 	// Before SDL video is up nobody owns the screens yet. After it, SDL owns
 	// the top screen and the bottom one is unused. Keep the game's last frame
@@ -1168,6 +1178,7 @@ void error_screen_here(const std::string& title, const std::string& body)
 	console_write_on(&bottom, ("\x1b[31;1m" + wrapped_text(title, 39) + "\x1b[0m\n" +
 	                           wrapped_text(body, 39) +
 	                           "\n\x1b[32mPress START or A to exit.\x1b[0m").c_str());
+	s_error_shown = true;
 
 	// The error screen holds its own HID reference (libctru's is counted):
 	// hidScanInput() stays valid whatever SDL_Quit released before this
@@ -1176,11 +1187,20 @@ void error_screen_here(const std::string& title, const std::string& body)
 	if (R_FAILED(hid_rc))
 		printf("[3ds] error screen: hidInit failed (0x%08lX)\n", static_cast<unsigned long>(hid_rc));
 
+	// Without a HID reference hidScanInput() may read unmapped shared memory (the
+	// old dump 3 fault): then no input is polled and the screen stays up 10 s.
+	const bool have_hid = R_SUCCEEDED(hid_rc);
+	const int kNoHidFrames = 600;   // 10 s of VBlanks
 	int frames = 0;
 	while (aptMainLoop())
 	{
-		hidScanInput();
-		if (hidKeysDown() & (KEY_START | KEY_A))
+		if (have_hid)
+		{
+			hidScanInput();
+			if (hidKeysDown() & (KEY_START | KEY_A))
+				break;
+		}
+		else if (frames >= kNoHidFrames)
 			break;
 		gfxFlushBuffers();
 		if (own_gfx)
@@ -1199,7 +1219,7 @@ void error_screen_here(const std::string& title, const std::string& body)
 		}
 	}
 
-	if (R_SUCCEEDED(hid_rc))
+	if (have_hid)
 		hidExit();
 	if (own_gfx)
 		gfxExit();
