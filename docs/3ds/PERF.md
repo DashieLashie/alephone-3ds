@@ -1125,6 +1125,24 @@ upstream's quit dialog draws one more frame, after the app has lost its GPU righ
 Card after the session: `debug-c3d`, `debug-perf` and `debug-input-script` deleted;
 prefs set to the user's HUD + Map, Framerate Target 60.
 
+## Stage 10 plan A piece 5: cost of the present gate (Azahar — non-authoritative)
+
+Recorded 2026-10-24. `-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`, `p1-gpu.cfg`, HUD + Map, Framerate
+Target 60 (`PREFS="fps_target=60 bottom_screen=0" LEVELS=0 RUNS=1 perf-bench.sh`), level 0,
+three runs each, interleaved. Before: HEAD `833b92784` built in a separate worktree the same
+way; after: piece 5 (the gate, `gate_present()`/`gate_closed()` per present, bounded
+release). Logs in `build/perf/a5-*` (not in git).
+
+| Build | fps | frame | busy | present | bottom | idle | max |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| before (3 runs) | 51.72 / 51.74 / 51.69 | 19.34 / 19.33 / 19.35 | 18.78 / 18.77 / 18.80 | 1.74 / 1.74 / 1.75 | 2.55 / 2.55 / 2.56 | 0.56 / 0.56 / 0.55 | 61.8 / 47.4 / 52.5 |
+| after (3 runs) | 51.69 / 51.82 / 51.78 | 19.35 / 19.30 / 19.31 | 18.78 / 18.73 / 18.74 | 1.75 / 1.74 / 1.74 | 2.54 / 2.52 / 2.52 | 0.57 / 0.57 / 0.57 | 52.3 / 45.1 / 49.4 |
+
+No measurable change (busy -0.3% to +0.0%, `present` within 0.01 ms): per present the gate
+adds three evaluations of `gspHasGpuRight()`, `aptShouldClose()` and `app_suspended()` (cached
+flags) and one `svcGetSystemTick()`. `c3d_wait` stays the unchanged `C3D_FrameBegin(0)` while
+the gate is open. These are Azahar instruction counts; the console decides.
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

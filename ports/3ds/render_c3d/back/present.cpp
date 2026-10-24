@@ -294,7 +294,48 @@ void test_vhalt_thread(void* arg)
 	vhalt("debug-c3d test_vhalt 3 (second thread)");   // SDL_Quit's gfxExit, then the error screen
 }
 
+// The GPU state of a present and its one quad into the screen target (step 4 below; also the
+// close_frame forced frame).
+void draw_present_quad()
+{
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_FrameDrawOn(s_target);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
+	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+}
+
 } // namespace
+
+bool present_close_frame()
+{
+	if (!s_tex_ready || !s_target)
+		return true;
+	// Console run 1 (design 5.6.1): the GPU work of a present (a draw from the present texture
+	// into the linked target plus the display transfer to the framebuffer), forced while the gate
+	// condition holds, with breadcrumbs. No upload and no staging write: the texture holds the
+	// last picture.
+	crumb("close_frame: before frame_begin");
+	const FrameStart fs = frame_begin();
+	if (fs == FrameStart::Abandoned)
+		return false;
+	if (fs != FrameStart::Ok)
+	{
+		crumb("close_frame: frame_begin refused (already in a frame); no forced frame");
+		return true;
+	}
+	crumb("close_frame: after frame_begin");
+	draw_present_quad();
+	char line[96];
+	snprintf(line, sizeof line, "close_frame: before frame_end (gpu right %d, in frame 1)", gspHasGpuRight() ? 1 : 0);
+	crumb(line);
+	frame_end(1, true);
+	crumb("close_frame: after frame_end");
+	return true;
+}
 
 bool present_init()
 {
@@ -436,8 +477,24 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 				printf("[c3d] test_vhalt: threadCreate failed\n");
 		}
 	}
+	// Design 5.6.1 a, in this order: 1. a pending release is served; 2. the gate: no GPU work without
+	// the GPU rights, while suspended or closing (the HOME menu owns the screens; after a Close
+	// the GPU never retires the work); 3. ensure_up().
+	if (serve_release())
+		return top_surrendered();
+	switch (gate_present())
+	{
+	case GatePresent::Skip:
+		return true;    // counted by the gate; no citro3d call
+	case GatePresent::Cpu:
+		return false;   // citro3d not up: the CPU present, as without citro3d
+	case GatePresent::Open:
+		break;
+	}
 	if (!ensure_up())
 		return top_surrendered();   // true: the frame is "presented" by leaving the top screen alone
+	// d3 breadcrumbs only while the gate condition holds (so only with suspend_gate 0).
+	const bool trace = gate_closed();
 	const unsigned n = ++s_present;
 	const uint64_t now = svcGetSystemTick();
 	count_present();
@@ -485,7 +542,10 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 	}
 
 	// 1. The previous C3D frame has retired when this returns.
-	if (!frame_begin())
+	const FrameStart fs = frame_begin();
+	if (fs == FrameStart::Abandoned)
+		return true;   // citro3d abandoned (top surrendered): draw nothing, and no CPU present (5.6.1 b)
+	if (fs != FrameStart::Ok)
 	{
 		printf("[c3d] C3D_FrameBegin(0) returned false (already inside a frame): giving the top screen back\n");
 		release_and_fini();
@@ -532,28 +592,26 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		printf("[c3d] GX budget: present upload refused\n");
 
 	// 4. One quad into the screen target (or, calibrating, a flat frame-indexed colour).
-	C3D_CullFace(GPU_CULL_NONE);
-	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-	C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
-	C3D_AlphaTest(false, GPU_ALWAYS, 0);
-	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	if (cfg.calibrate)
 	{
+		C3D_CullFace(GPU_CULL_NONE);
+		C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+		C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 		const u32 colour = ((n & 0xFF) << 24) | (((n >> 8) & 0xFF) << 16) | (0xA5u << 8) | 0xFF;
 		gx_op([&] { C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, colour, 0); });
 		C3D_FrameDrawOn(s_target);
 	}
 	else
-	{
-		C3D_FrameDrawOn(s_target);
-		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
-		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
-	}
+		draw_present_quad();
 
 	// 5. The transfer's destination is taken at C3D_FrameEnd, and the previous queue (with
 	// its swap request) finished in step 1: if that swap has not taken effect yet (next
 	// VBlank), the buffer gfxGetFramebuffer() would return is still on screen. Wait.
 	GSPGPU_FlushDataCache(s_staging, kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
+	if (trace)
+		crumb("before the VBlank wait");
 	if (gspIsPresentPending(GSP_SCREEN_TOP))
 		gspWaitForVBlank();
 	if (s_odd_capture_pending)
@@ -577,7 +635,15 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		else
 			++s_diff_fb_size;
 	}
-	frame_end(1);
+	if (trace)
+	{
+		char line[96];
+		snprintf(line, sizeof line, "before frame_end (gpu right %d, in frame 1)", gspHasGpuRight() ? 1 : 0);
+		crumb(line);
+	}
+	frame_end(1, trace);
+	if (trace)
+		crumb("after frame_end");
 
 	if (odd_now && s_odd_captures < 2)
 		s_odd_capture_pending = true;

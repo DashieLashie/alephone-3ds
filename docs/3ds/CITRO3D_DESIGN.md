@@ -765,7 +765,7 @@ change on `stage10-c3d` alone.
 | 2 | `3ds-port` | the fatal hand-off to the main thread: request/serve, `--wrap=abort`, the `vhalt()` hook (**engine edit, `PATCHES.md` 54**), the audio-thread exit variant, the fallback; `debug-fatal` tests | 5.6.3, item 14 (c) |
 | 3 | `3ds-port` | the A1 port side: `app_suspended()`, d1, `exit_requested()` with `aptShouldClose()`, script command `home-close`, script 22 | 5.6.1 a, c |
 | 4 | — | merge `3ds-port` into `stage10-c3d` (`error_screen`'s `#ifdef A1_RENDER_C3D` release call, `a1_3ds_platform.cpp`:1081-1090, survives the merge) | — |
-| 5 | `stage10-c3d` | the gate, bounded waits, abandon, d2-d5, `debug-c3d` keys, configs; `test_vhalt` 1-4 re-run against pieces 1-2 | 5.6.1 a, b |
+| 5 | `stage10-c3d` | **built, Azahar passes, console check pending** (`NEXT-SPRINT.md` plan A item 5): the gate, bounded waits, abandon, d2-d5, `debug-c3d` keys, configs; `test_vhalt` 1-4 re-run against pieces 1-2 | 5.6.1 a, b |
 
 Order 1 → 2 → 3 → 4 → 5; 3 may go before 1-2 (independent). Each piece: Azahar
 first, then the console runbook items of its section.
@@ -975,6 +975,14 @@ can kill the next program).
    **0 skipped presents** (predicted: the main thread is blocked in `aptMainLoop()`
    for both); d1 shows each hook on the main thread with gpu right 1.
 4. No regression: HOME > Close in a dialog and at the main menu. Luma dumps: none new.
+
+**Built (plan A piece 5, Azahar — non-authoritative; deviations in `NEXT-SPRINT.md`
+plan A item 5).** Code: pure state `render_c3d/core/gate.h` (`GateInputs`, `GateTracker`,
+`retire_wait`, `FrameStart`) with the host test `scripts/3ds/tests/c3d-host/build.sh`;
+`back/context.cpp` (`gate_present()`, `serve_release()`, bounded `release_and_fini()`,
+`abandon()`, tri-state `frame_begin()`, d2, d4, d5), `back/present.cpp` (the order 1-2-3 of
+5.6.1 a, d3, `present_close_frame()`); configs `p1-home-close-diag.cfg`, `p1-abandon.cfg`,
+`p1-unbounded.cfg`.
 
 **Risk:** GSP running the abandoned work after `gfxExit` freed the framebuffers, or
 leaving the system unhappy at `gspExit` (the process is exiting; the launcher /
@@ -1248,10 +1256,16 @@ Close; `C3D_FRAME_NONBLOCK`; `consoleInit`'s first-call-only stdout device; when
 ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
 
 1. GSP never runs, or never signals, GX work from a process without GPU rights
-   (console run 1 of 5.6.1).
+   (console run 1 of 5.6.1). *Status: piece 5 built and passing in Azahar (which cannot
+   show it); console run 1 pending.*
 2. What GSP does with commands still pending at `gspExit` after an abandon; the
-   abandon path ends the process cleanly and the launcher survives (runs 1-2).
-3. The 5 s acknowledgement bound and the 500 ms retire bound are assumptions.
+   abandon path ends the process cleanly and the launcher survives (runs 1-2). *Status:
+   the abandon path ends cleanly in Azahar (`p1-abandon.cfg`: `release abandoned`, `real
+   gfxExit returned`, `exit`); the launcher check is console only.*
+3. The 5 s acknowledgement bound and the 500 ms retire bound are assumptions. *Status:
+   piece 5 implements the 500 ms bound (`retire_wait_ms`); Azahar retires in 0 ms every
+   time, so only the console can say whether 500 ms is too tight (a release right after
+   a present on a busy frame) or whether anything needs the 5 s window of run 1.*
 4. SPECULATIVE: dump 5 is the teardown-on-another-thread class (5.6.3 tests 2-4 on
    the console, launcher check).
 5. The fallback's `svcExitProcess` skips `gspExit`, `aptExit` and `ndspExit`: the

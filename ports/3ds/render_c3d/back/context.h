@@ -12,6 +12,7 @@
 #define A1_C3D_BACK_CONTEXT_H
 
 #include "../core/config.h"
+#include "../core/gate.h"
 
 #include <cstdint>
 
@@ -29,10 +30,25 @@ const Config& config();
 
 // --- the frame, and the GX queue budget (design 2.4) ---
 
-// C3D_FrameBegin(0) (zone c3d_wait); false: already inside a frame, a bug.
-bool frame_begin();
+// Design 5.6.1 a: the GPU rights are gone (gspHasGpuRight()), the app is closing
+// (aptShouldClose()) or suspended (a1_3ds::app_suspended()). Main thread; a few flag reads.
+bool gate_closed();
+// The gate step of a1_c3d_present(), in the design's order: 1. a pending release is served
+// (true: citro3d is down now, the caller returns top_surrendered()); the caller then asks
+// gate_present() for 2.: GateSkip = count a skipped present and return true with no citro3d
+// call; GateCpu = closed and citro3d not up: return false (CPU present); GateOpen = go on.
+bool serve_release();
+enum class GatePresent { Open, Skip, Cpu };
+GatePresent gate_present();
+// Diagnostic d3: one "[c3d] d3 ..." line (the caller decides whether the gate condition holds).
+void crumb(const char* what);
+
+// C3D_FrameBegin(0) (zone c3d_wait). With the gate condition true (only reachable with
+// suspend_gate 0) the wait is bounded: retire_wait(), and on timeout citro3d is abandoned.
+FrameStart frame_begin();
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) with the queue accounting of the frame closed.
-void frame_end(int drawn_linked_targets);
+// `gate_was_closed`: the gate condition held when the present began (diagnostic d2).
+void frame_end(int drawn_linked_targets, bool gate_was_closed = false);
 // An operation that enters citro3d's GX queue is about to be issued: false = over the
 // budget, do not issue it. Call right before each C3D_Sync* / C3D_RenderTargetClear.
 bool gx_take();
@@ -69,6 +85,9 @@ void count_odd_surface();
 void stats_tick();   // logs "[c3d] stats ..." once a second
 
 // --- teardown, called by context.cpp; defined in present.cpp ---
+// close_frame (console run 1): one frame that draws the present quad from the present texture
+// into the linked target, with d3 breadcrumbs. False: citro3d was abandoned meanwhile.
+bool present_close_frame();
 bool present_init();       // after C3D_Init: target, texture, shader, buffers
 void present_detach();     // before C3D_Fini: unlink the screen target
 void present_free();       // after C3D_Fini: texture, shader, buffers

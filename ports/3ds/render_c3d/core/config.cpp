@@ -69,6 +69,20 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		cfg.present_diff = static_cast<unsigned>(v);
 		return true;
 	}
+	if (key == "suspend_gate")
+		return parse_flag(value, cfg.suspend_gate);
+	if (key == "force_abandon")
+		return parse_flag(value, cfg.force_abandon);
+	if (key == "close_frame")
+		return parse_flag(value, cfg.close_frame);
+	if (key == "retire_wait_ms")
+	{
+		long v = 0;
+		if (!parse_int(value, 0, 600000, v))
+			return false;
+		cfg.retire_wait_ms = static_cast<unsigned>(v);
+		return true;
+	}
 	return false;
 }
 

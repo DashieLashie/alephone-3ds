@@ -21,6 +21,18 @@
 	                    with the framebuffer the GPU present wrote, at the next present; per-check
 	                    and final "[c3d] present_diff" log lines (critic P1 minor 1)
 
+	Keys of plan A piece 5 (design 5.6.1, the HOME > Close hang):
+
+	  suspend_gate 0|1  default 1: no GPU present without GPU rights or while suspended/closing.
+	                    0 restores the pre-gate behaviour (console confirmation run only)
+	  retire_wait_ms N  default 500, 0..600000: how long a wait for the GPU queue may take where it
+	                    might never retire (release; a frame begun with the gate condition true)
+	                    before citro3d is abandoned. 0 = unbounded (C3D_FrameBegin(0), the old
+	                    behaviour, for a deliberate reproduction)
+	  force_abandon 0|1 the release takes the abandon path without polling (Azahar cannot hang a queue)
+	  close_frame 0|1   the release, when the gate condition holds, first ends one frame that draws
+	                    the present quad (the GPU work of a present), console run 1
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -42,6 +54,10 @@ struct Config
 	bool odd_surface = false;
 	int test_vhalt = 0;
 	unsigned present_diff = 0;
+	bool suspend_gate = true;
+	unsigned retire_wait_ms = 500;   // 0 = unbounded
+	bool force_abandon = false;
+	bool close_frame = false;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.

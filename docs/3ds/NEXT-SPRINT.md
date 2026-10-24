@@ -650,12 +650,129 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       modes 1, 2, 6, 11: release on main, then the error screen, `exit`; modes 7, 10: the
       fallback line above, `svcExitProcess`; scripts 22 fast (no dialog frame) and plain (the
       dialog frame; Azahar keeps GPU rights, so no hang); 0 null reads in each run.
-   **Next: 5.**
-   5. `stage10-c3d`: the HOME > Close hang (A1, design 5.6.1 a/b): the present gate,
-      bounded queue waits (`C3D_FRAME_NONBLOCK` only, never a positive timeout), the
-      abandon tri-state, d2-d5, `debug-c3d` keys (`suspend_gate`, `retire_wait_ms`,
-      `force_abandon`, `close_frame`), configs; `test_vhalt` 1-4 re-run.
-   6. **One console session** for all of it: design 5.6.1 runs 1-4, the `debug-fatal`
+   **Next: 6 (the console session), then B.**
+   5. **Done (Azahar; console check pending), 2026-10-24:** the HOME > Close hang (A1, design
+      5.6.1 a/b), `stage10-c3d` only, no engine edit (no `PATCHES.md` entry), commit
+      `stage10: A5 ...`. What it is, in the order of the code:
+      - `render_c3d/core/gate.h` (new, pure, host-tested): `GateInputs` (`!gpu_right ||
+        should_close || suspended`), `GateTracker` (d5 transitions, per-episode and total skip
+        counts), `retire_wait` (poll a non-blocking try with a 1 ms sleep between, up to a
+        bound; a template, so the host test drives it with a fake queue and clock), `FrameStart
+        { Ok, AlreadyInFrame, Abandoned }`. Host test:
+        `scripts/3ds/tests/c3d-host/build.sh` (36 checks: the parser incl. the four new keys,
+        the gate, the tracker, the retire loop; also the first host test of `core/`, so the
+        directory is new).
+      - `back/context.cpp`: `gate_closed()` = `!gspHasGpuRight() || aptShouldClose() ||
+        a1_3ds::app_suspended()`; `serve_release()` (the former `ensure_up()` branch, now
+        step 1 of the present); `gate_present()` (step 2: Skip = closed and citro3d up or
+        surrendered, return true with no citro3d call; Cpu = closed and citro3d not up, return
+        false; with `suspend_gate 0` it only watches and logs); `ensure_up()` refuses to
+        initialise while the gate condition holds (step 3); `frame_begin()` returns the
+        tri-state, and polls `C3D_FrameBegin(C3D_FRAME_NONBLOCK)` with 1 ms sleeps up to
+        `retire_wait_ms` **only when the gate condition holds** (the measured path with the gate
+        open is the unchanged `C3D_FrameBegin(0)`); `release_and_fini()` always uses the bounded
+        wait instead of `C3D_FrameBegin(0)` and, past the bound, `abandon()`s: no `C3D_Fini`, no
+        `present_free`, `s_off`/`s_surrendered`/`s_abandoned` set, `s_up` false last, and
+        `__wrap_gfxExit` still calls the real `gfxExit()`. No `gxCmdQueueWait(q, N > 0)` anywhere
+        (`gx.h`:125). d2: a state line first (`in_frame`, gate and its inputs, frames ended with
+        the gate closed, skipped presents, ms since the last frame end), then one line per
+        step. d4: `real gfxExit returned`. d5: `gate closed at present N (...)`, `gate open
+        again after K skipped presents`, `gate_skipped=` in the stats line and in `[c3d] final`.
+      - `back/present.cpp`: the order of 5.6.1 a in `a1_c3d_present()` (serve release, gate,
+        `ensure_up()`); an `Abandoned` frame_begin returns true without drawing and without the
+        "already inside a frame" branch; d3 breadcrumbs (before/after `frame_begin` inside
+        `frame_begin`, before the VBlank wait, before and after `frame_end` with `gspHasGpuRight()`
+        and in-frame), printed only while the gate condition holds; `present_close_frame()`
+        (`close_frame 1`: in the release, when the gate condition holds, one forced frame that
+        draws the present quad from the present texture, no upload).
+      - `debug-c3d` keys (`core/config.h` + parser + host test): `suspend_gate 0|1` (default 1),
+        `retire_wait_ms N` (default 500, 0 = unbounded, max 600000), `force_abandon 0|1`,
+        `close_frame 0|1`. Configs in `scripts/3ds/tests/c3d/`: `p1-home-close-diag.cfg`
+        (`suspend_gate 0`, `retire_wait_ms 5000`, `close_frame 1`), `p1-abandon.cfg`,
+        `p1-unbounded.cfg` (`suspend_gate 0`, `retire_wait_ms 0`: the old behaviour, to
+        reproduce the hang on purpose; not needed by any run).
+      **Deviations from the design text:** (1) d2/d5 log the gate's inputs as `gpu_right`,
+      `should_close`, `suspended` (`app_suspended()` = `in_home || asleep`); the design names
+      `in_home` and `asleep` separately, but only the combined value is exported, and the
+      accessors are in `input_3ds.cpp`/`a1_3ds_platform.h`, shared with `3ds-port` (5.6.0: fixed
+      there, not here). (2) `frame_begin()` also returns `AlreadyInFrame` when our own
+      `s_in_frame` is set, without calling citro3d (a NONBLOCK poll would otherwise spin out the
+      whole bound on a refused `C3D_FrameBegin`). (3) `ensure_up()` returns false without
+      setting `s_off` while the gate condition holds, so citro3d can still start later (the gate
+      at boot is open anyway). (4) The release's state line and step lines are printed for every
+      release, not only gate-closed ones (they cost nothing outside an exit). (5) `crumb` (d3)
+      lines go through `fflush(stdout)` each, so the last breadcrumb is on the card before a
+      hang. (6) A release started by a thread other than main waits `kHandoffWaitMs` = 2 s
+      (`context.cpp`); with `p1-home-close-diag.cfg` the main thread's release can take up to
+      5 s + 5 s, so an off-main caller would give up first in that config (only matters for
+      run 1 if an error screen on a second thread coincides; not expected).
+      **Azahar — non-authoritative** (`build-3ds-c3d`, Marathon 2; Azahar keeps GPU rights,
+      retires GPU frames synchronously and cannot hang a queue, so `queue retired after 0 ms`
+      every time and the gate closes through `in_home` only):
+      - script 22 plain (`home-close`: ONSUSPEND hook, then `SDL_QUIT`, the invisible quit dialog)
+        with `p1-gpu.cfg`: `apt hook ONSUSPEND ... gpu right 1`, `gate closed at present 558
+        (gpu_right 1, should_close 0, suspended 1)`, 3 presents skipped (the dialog's draw
+        included, no citro3d call), release state line `gate closed ... skipped presents 3`,
+        every d2 line, `release done`, `final: ... gate_skipped=3 gate_episodes=1`, `real
+        gfxExit returned`, `exit`. Script 22 fast: gate never observed (no present after the
+        hook), 0 skipped, same release lines, `exit`.
+      - `p1-home-close-diag.cfg` (`suspend_gate 0`, 5000 ms, `close_frame 1`), script 22 plain:
+        `gate closed ... ; suspend_gate 0: presenting anyway`, d3 breadcrumbs around three
+        presents (`frame_begin ... retired in 0 ms`, VBlank, `before frame_end (gpu right 1, in
+        frame 1)`, `after frame_end`), release: `close_frame 1: one forced present frame`, its
+        breadcrumbs, `queue retired after 0 ms`, `release done`, `frames_gate_closed=4`, `real
+        gfxExit returned`, `exit`. Fast script: same release path.
+      - `p1-abandon.cfg` (`force_abandon 1`), scripts 22 plain and fast: `release abandoned
+        (release): force_abandon 1, not polling`, `final: ... abandoned=1`, `real gfxExit
+        returned`, `exit`; no CPU present afterwards.
+      - `test_vhalt` 1, 2, 3, 4 (`p1-vhalt*.cfg`, script 17), against pieces 1-2: one `release`
+        each (modes 2-4 served by the main thread, d6 `thread main`, `stdout device ... log`),
+        `queue retired after 0 ms`, `release done`, `real gfxExit returned`, `exit`; mode 1 also
+        logs gfxExit #2 (`citro3d down`).
+      - `debug-fatal` modes 1, 2, 7, 11 (script 24, `--fatal`): 1, 2 and 11 release on main then the
+        error screen then `exit`; 7 logs `citro3d still up (fallback off main): logged only` and
+        `svcExitProcess` (no citro3d call off main), as before the piece.
+      - Regression, `p1-gpu.cfg` and `p1-diff.cfg`, scripts 07, 08, 13, 14, 19: all run to the
+        end (07 and 14 have no `quit` and are stopped by the timeout, so no `final` line; their
+        last `[c3d] stats` line is read), **0 skipped presents** in every run (the scripted `home`
+        and `sleep` hold the main thread in the hook), `present_screen_false_returns=0`,
+        `present_diff` 0 differences in every check (diff-08: 71 checks, diff-13: 31, diff-14: 24,
+        diff-19: 3; 07: all logged checks 0), gx high-water 3. Frame-indexed `p1-calibrate.cfg` and
+        `p1-calibrate-altload.cfg`: 24 captures each, every one uniform and showing the logged
+        frame number; `p1-odd.cfg`: odd picture captures taken, 120 odd presents, 0 false
+        returns. `azahar_log.txt`: no guest fault in any run.
+      - Builds: all four, 0 warnings; `arm-none-eabi-nm build-3ds/alephone.elf` and
+        `build-3ds-prof/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'` = 0. Frame cost of the gate:
+        `PERF.md` "Stage 10 plan A piece 5".
+      **Console runs still to do (the single session, item 6; design 5.6.1 runs 1-4).** Build
+      `build-3ds-c3d` (or `-prof`), install over the launcher as before, **start every run from
+      the Homebrew Launcher**, not 3dslink: the pass criterion is that "Closing software..."
+      ends, the launcher comes back and Aleph One launches again. Put the config on the card with
+      `scripts/3ds/sd-ftp.sh IP put scripts/3ds/tests/c3d/<cfg> /3ds/alephone/` and rename it to
+      `debug-c3d` (`sd-ftp.sh IP mv /3ds/alephone/<cfg> /3ds/alephone/debug-c3d`); read the card's
+      `/3ds/alephone/log.txt` afterwards (the d1-d5 lines are in it; a launcher start has no
+      3dslink mirror). Delete `debug-c3d` at the end.
+      1. **Diagnostic**, `p1-home-close-diag.cfg`, Classic @30 (as `home-close-1`), in a game:
+         HOME, then Close. Expect `apt hook ONSUSPEND on thread <main> (main <same>): gpu right 1`
+         and no hook line after it; the `d3 close_frame:` breadcrumbs with `gpu right 0` before
+         the forced `frame_end`; then `did not retire` / `release abandoned (release): the GPU
+         queue did not retire after 5000 ms`, `real gfxExit returned`, a normal close.
+         That confirms the last UNVERIFIED step (GSP never completes work without rights). If
+         `queue retired after X ms` with a large X: slow, not never; report X. If it hangs: the
+         last `d3`/`release:` line on the card names the wait; stop and report. Then relaunch.
+      2. **The fix**, `p1-gpu.cfg`: HOME > Close in a game three times (HUD + Map @60 twice,
+         Classic @30 once). Expect `gate closed at present N (gpu_right 0, ...)` with >= 1 skipped
+         present (or none, with piece 3's fast path quitting before a draw), `queue retired
+         after 0 ms`, `release done`, `real gfxExit returned`, `exit`. Each close returns to the
+         launcher and Aleph One starts again.
+      3. `p1-diff.cfg`: HOME and back in a game twice, sleep (lid) and wake in a game twice: the
+         picture is right, `present_diff` shows 0 differences, `gate_skipped=0` in the stats lines
+         (predicted: the main thread is blocked in `aptMainLoop()` for both), each d1 hook on the
+         main thread with gpu right 1.
+      4. No regression: HOME > Close in a dialog and at the main menu; no new Luma dumps.
+      Also read off the first run: whether `retire_wait_ms` 500 is ever hit in a normal release
+      (an error screen right after a busy frame): a `release abandoned` line outside run 1 is a bug.
+   6. **One console session** for all of it: design 5.6.1 runs 1-4 (written out in item 5), the `debug-fatal`
       list in item 14 (boot-time control, mode 1 by eye, modes 2-4, 6, 6b; the launcher
       relaunches Aleph One after each; the DSP falls silent after 6/6b/7), the mirror
       check (item 15: `kill -STOP` the host 3dslink), and read the card's `log.txt`
