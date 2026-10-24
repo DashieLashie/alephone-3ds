@@ -436,21 +436,20 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
    1. **Done** on `3ds-port`: `error_screen` draws through the console device, holds its
       own HID reference, survives HOME, logs d6 (`94e3036` + review follow-up `612173a`;
       critic APPROVE).
-   2. **Done, review not finished** on `3ds-port`: the fatal hand-off to the main thread
-      (`8d66595` + round-1 fixes `05c6d27`; `PATCHES.md` 54, `--wrap=abort`,
-      `debug-fatal` modes 1-11 incl. 6b/8a/8t, all clean in Azahar). The critic's round 1
-      was REVISE (fixed in `05c6d27`); **its round 2 (the last) was cut off by a usage
-      limit: run it first** (`c3d-critic` on `05c6d27`, the brief: check each round-1 fix
-      and for regressions: `__wrap_abort`'s `error_screen` call when `abort()` comes from
-      inside `error_screen` or from a destructor after `close_outputs`; `block_forever`
-      at a service point inside the error screen's own `hidScanInput`; test hooks gated
-      on `debug-fatal` only).
+   2. **Done** on `3ds-port`: the fatal hand-off to the main thread (`8d66595` + round-1
+      fixes `05c6d27` + round-2 minors `b1495f1`; `PATCHES.md` 54, `--wrap=abort`,
+      `debug-fatal` modes 1-11 incl. 6b/8a/8t, all clean in Azahar). Critic: round 1
+      REVISE, round 2 APPROVE (2026-10-24); two items deferred to `3ds-port` NEXT-SPRINT
+      item 14 (HOME during the fallback; the merge note in 4).
    3. **Next** on `3ds-port`: the A1 port side (design 5.6.1 a, c): `app_suspended()`,
       d1, `exit_requested()` also reads `aptShouldClose()` (backlog item 16), the script
       command `home-close`, script 22. Then the critic, as for 1-2.
    4. Merge `3ds-port` into `stage10-c3d` (docs conflicts expected in NEXT-SPRINT
       items 14-16; in code, add the c3d branch noted in `error_screen_here()`: when
-      `a1_c3d_release_top()` returns false, log only, no `consoleInit`, no wait).
+      `a1_c3d_release_top()` returns false, log only, no `consoleInit`, no wait; and,
+      critic round 2 item 5: a request taken back leaves main blocked forever, possibly
+      between `C3D_FrameBegin` and `C3D_FrameEnd`, while the fallback only logs: that frozen
+      frame is the design, the fallback must never call citro3d off main).
    5. `stage10-c3d`: the HOME > Close hang (A1, design 5.6.1 a/b): the present gate,
       bounded queue waits (`C3D_FRAME_NONBLOCK` only, never a positive timeout), the
       abandon tri-state, d2-d5, `debug-c3d` keys (`suspend_gate`, `retire_wait_ms`,
