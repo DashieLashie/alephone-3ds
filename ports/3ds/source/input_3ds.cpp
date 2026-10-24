@@ -1222,6 +1222,8 @@ bool exit_requested()
 	// came too late and a game opened the (invisible) upstream quit dialog. aptShouldClose()
 	// is set by the same APTCMD_WAKEUP_CANCEL, already inside aptMainLoop(), i.e. before SDL
 	// pushes its first SDL_QUIT (docs/3ds/CITRO3D_DESIGN.md 5.6.1 c, NEXT-SPRINT item 16).
+	// An order to close or power off sets it too, from libctru's APT event thread, so it can
+	// turn true between two polls (e.g. inside finish_game, which then skips its fades).
 	return s_exit_requested || aptShouldClose();
 }
 

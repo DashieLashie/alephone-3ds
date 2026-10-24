@@ -472,14 +472,23 @@ Azahar) [PERF "Next candidates"]
     on the main thread, then `quit`: `finish_game` at once, `exit`), `08-demo-close.txt`, the HOME
     and sleep parts of `07-suspend-menus.txt` (each hook logged, resume lines as before), and the
     fatal regression `--fatal mode-2.cfg` + script 24 (one `ERROR: Aleph One stopped`, `exit`).
-    Builds: `build-3ds` and `build-3ds-prof`, 0 warnings; `nm build-3ds/alephone.elf | grep -ci c3d`
-    = 0.
+    Builds: `build-3ds` and `build-3ds-prof`, 0 warnings; `nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'`
+    = 0 (a bare `grep -ci c3d` also matches addresses such as `006c3d54`).
     **Console checks pending:** HOME > Close in a game: the log (SD card) shows the d1 line
     `ONSUSPEND on thread <main> (main <same>) gpu right 1 should close 0` and no hook after it, then
     `finish_game` without a `terminals: 640x320` dialog frame; the launcher returns and Aleph One
     starts again; HOME > Close at the main menu and in a dialog unchanged; HOME and back, and sleep,
     in a game: both hooks on the main thread with gpu right 1. (Item 14's HOME/sleep gate runs
-    belong to piece 5.)
+    belong to piece 5.) Added by the critic: the software keyboard (confirm and cancel): hooks
+    paired, `should close` stays 0, the game goes on; Power button > Power Off in a game: the
+    fast path (bit 0x200), no quit dialog.
+    **Critic: APPROVE** (round 1, 2026-10-24, medium effort). It checked libctru's binary:
+    `aptShouldClose()` tests bits 0x600 of a flag word that only `WAKEUP_CANCEL` (0x400, in
+    `aptWaitForWakeUp`) and the order-to-close/shutdown event (0x200, `aptEventHandler`, on
+    libctru's APT thread) set, and nothing clears; sleep and a normal HOME round trip set
+    neither. So `exit_requested()` can turn true between two polls (power-off during a normal
+    `finish_game` skips its fades: harmless). The d1 line is inside `FatalGuard` (no fatal
+    service point in the hook); ONEXIT now logs twice, both lost on hardware (log closed).
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
