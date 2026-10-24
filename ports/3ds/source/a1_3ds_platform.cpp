@@ -150,6 +150,7 @@ const char kScenarioTemplate[] =
 
 u64 s_boot_tick = 0;
 bool s_boot_begun = false;
+u32 s_main_tid = 0;   // the main thread's kernel thread id, for error_screen's d6 line
 
 // --- main stack high-water mark ------------------------------------------------
 
@@ -660,10 +661,14 @@ void on_abort(int)
 	                 "the lines before this in the log may say why.");
 }
 
-void print_wrapped(const std::string& text, size_t width)
+// The wrapped lines, each ended by '\n' (error_screen draws them with
+// console_write_on()).
+std::string wrapped_text(const std::string& text, size_t width)
 {
+	std::string out;
 	for (const auto& line : wrap(text, width))
-		printf("%s\n", line.c_str());
+		out += line + "\n";
+	return out;
 }
 
 } // namespace
@@ -929,6 +934,7 @@ bool boot_begin(int& argc, char**& argv)
 
 	s_boot_tick = svcGetSystemTick();
 	s_boot_begun = true;
+	svcGetThreadId(&s_main_tid, CUR_THREAD_HANDLE);
 	stack_paint();
 
 	// sdmc:/3ds normally exists (the Homebrew Launcher lives there), but a
@@ -1097,7 +1103,30 @@ void main_menu_displayed()
 
 // --- error screen ------------------------------------------------------------
 
+// input_3ds.cpp (docs/3ds/CITRO3D_DESIGN.md 5.6.2 a). The error screen is drawn
+// through the console device, never through stdout: after boot stdout is the log
+// tee, and consoleInit() reroutes stdout only on its first call.
+PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console);
+void console_write_on(PrintConsole* console, const char* text);
+const devoptab_t* console_stdout_device();
+
+namespace {
+// Set by error_screen() (5.6.3: a later fatal path shows exactly one screen).
+std::atomic<bool> s_error_shown{false};
+
+// The screen itself, on the calling thread. Piece 2 (5.6.3) puts the hand-off
+// to the main thread in error_screen() and calls this for the fallback.
+void error_screen_here(const std::string& title, const std::string& body);
+}
+
 void error_screen(const std::string& title, const std::string& body)
+{
+	s_error_shown = true;
+	error_screen_here(title, body);
+}
+
+namespace {
+void error_screen_here(const std::string& title, const std::string& body)
 {
 	fprintf(stderr, "[3ds] ERROR: %s\n%s\n", title.c_str(), body.c_str());
 	fflush(stdout);
@@ -1113,27 +1142,39 @@ void error_screen(const std::string& title, const std::string& body)
 	if (own_gfx)
 		gfxInitDefault();
 
-	// consoleInit() points stdout/stderr at the console; put the log back
-	// afterwards.
-	const devoptab_t* saved_out = devoptab_list[STD_OUT];
-	const devoptab_t* saved_err = devoptab_list[STD_ERR];
-
+	// The consoles are initialised first, then d6 is logged, then they are drawn
+	// on. The first consoleInit() of the process (an error before input_init())
+	// makes libctru's console device, which console_init_keep_log() captures;
+	// stdout is not moved.
 	static PrintConsole top, bottom;
 	if (own_top)
+		console_init_keep_log(GFX_TOP, &top);
+	console_init_keep_log(GFX_BOTTOM, &bottom);
+
+	// d6: where the error screen runs, and that stdout is not the console.
+	u32 tid = 0;
+	svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+	const devoptab_t* out = devoptab_list[STD_OUT];
+	printf("[3ds] error screen d6: thread %s (id %lu); stdout device after consoleInit: %s\n",
+	       tid == s_main_tid ? "main" : "other", static_cast<unsigned long>(tid),
+	       out == console_stdout_device() ? "console" : out == &s_tee_devoptab ? "log" : "other");
+	fflush(stdout);
+
+	if (own_top)
 	{
-		consoleInit(GFX_TOP, &top);
-		consoleSelect(&top);
-		printf("\x1b[14;2H\x1b[31;1m%s\x1b[0m", title.c_str());
-		printf("\x1b[16;2HSee the bottom screen.");
+		console_write_on(&top, ("\x1b[14;2H\x1b[31;1m" + title + "\x1b[0m").c_str());
+		console_write_on(&top, "\x1b[16;2HSee the bottom screen.");
 	}
-	consoleInit(GFX_BOTTOM, &bottom);
-	consoleSelect(&bottom);
-	const devoptab_t& bottom_out = *devoptab_list[STD_OUT];
-	printf("\x1b[31;1m");
-	print_wrapped(title, 39);
-	printf("\x1b[0m\n");
-	print_wrapped(body, 39);
-	printf("\n\x1b[32mPress START or A to exit.\x1b[0m");
+	console_write_on(&bottom, ("\x1b[31;1m" + wrapped_text(title, 39) + "\x1b[0m\n" +
+	                           wrapped_text(body, 39) +
+	                           "\n\x1b[32mPress START or A to exit.\x1b[0m").c_str());
+
+	// The error screen holds its own HID reference (libctru's is counted):
+	// hidScanInput() stays valid whatever SDL_Quit released before this
+	// (docs/3ds/CITRO3D_DESIGN.md 5.6.2 b, NEXT-SPRINT.md item 14).
+	const Result hid_rc = hidInit();
+	if (R_FAILED(hid_rc))
+		printf("[3ds] error screen: hidInit failed (0x%08lX)\n", static_cast<unsigned long>(hid_rc));
 
 	int frames = 0;
 	while (aptMainLoop())
@@ -1153,17 +1194,16 @@ void error_screen(const std::string& title, const std::string& body)
 		gspWaitForVBlank();
 		if (++frames == 10 && debug_screens_enabled())
 		{
-			devoptab_list[STD_OUT] = saved_out;   // log the "saved" lines
-			dump_screen(0, "screen-error-top.bmp");
+			dump_screen(0, "screen-error-top.bmp");   // logs "saved" lines
 			dump_screen(1, "screen-error-bottom.bmp");
-			devoptab_list[STD_OUT] = &bottom_out;
 		}
 	}
 
-	devoptab_list[STD_OUT] = saved_out;
-	devoptab_list[STD_ERR] = saved_err;
+	if (R_SUCCEEDED(hid_rc))
+		hidExit();
 	if (own_gfx)
 		gfxExit();
+}
 }
 
 } // namespace a1_3ds

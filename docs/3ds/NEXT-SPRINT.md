@@ -308,6 +308,19 @@ Azahar) [PERF "Next candidates"]
     idempotent in our SDL build (`build-sdl2.sh`; an upstream SDL report would be
     outward-facing); and, for errors on other threads, hand the whole fatal path to the
     main thread so `SDL_Quit` never runs under a live main loop.
+    **Decided 2026-10-23 and in progress** (design `CITRO3D_DESIGN.md` 5.6.0, on
+    `stage10-c3d`): piece 0 (the SDL2 patch, `N3DS_JoystickQuit` releases HID once, `5cd45ce`)
+    is done; **piece 1 done on `3ds-port` (console check pending):** `error_screen()` draws
+    through the console device, not stdout (`input_3ds.cpp`: `console_init_keep_log`,
+    `console_write_on`; no `devoptab_list` swaps in `error_screen`; stdout stays the log), holds
+    its own HID reference (`hidInit()` before its loop, `hidExit()` after) and logs a d6 line
+    (`error screen d6: thread main|other (id N); stdout device after consoleInit: console|log|other`,
+    expected `log`). Azahar (non-authoritative): the boot-time error screen (scenario folder
+    missing) still draws, d6 `log`; a post-boot error screen, also after `SDL_Quit` as on the
+    `vhalt()` path, draws its text on the bottom screen, A leaves it and the process exits with
+    0 null reads. Console check: the boot-time control (rename `Marathon2`, as `STAGE4.md`'s
+    hardware checklist item 5), and by eye the port's error screen after boot once piece 2 can
+    trigger one (`vhalt()` on the main thread); pieces 2 and 3 are still to do.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its

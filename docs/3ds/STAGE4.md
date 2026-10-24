@@ -144,6 +144,12 @@ screen; afterwards the top screen keeps the game's last frame. Used for:
 | Uncaught exception in `main()` | "Aleph One stopped" + `what()` |
 | `std::terminate()`, `abort()` (`halt()`, `vhalt()`) | "Aleph One stopped" + reason |
 
+Since stage 10 piece 1 the screen is drawn through libctru's console device
+(`console_write_on()`, `input_3ds.cpp`), not through `printf`: after boot stdout is the log
+tee and `consoleInit()` reroutes it only on its first call, so an error screen after boot
+used to write to the log and show nothing. It also holds its own HID reference, so it can
+poll input after `SDL_Quit`. See `NEXT-SPRINT.md` backlog item 14.
+
 ![error screen, bottom](img/stage4-error-bottom.png) ![error screen, top](img/stage4-error-top.png)
 
 The terminate/abort handlers matter on the 3DS: newlib's `abort()` exits

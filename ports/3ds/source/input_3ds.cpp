@@ -58,6 +58,13 @@ void save_screens(const std::string& tag);
 // source/bottom_3ds.cpp
 void bottom_force_redraw();
 
+// Defined below, outside the anonymous namespace; a1_3ds_platform.cpp declares them
+// again for error_screen() (docs/3ds/CITRO3D_DESIGN.md 5.6.2 a). They keep libctru's
+// console off stdout: see console_init_keep_log().
+PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console);
+void console_write_on(PrintConsole* console, const char* text);
+const devoptab_t* console_stdout_device();
+
 namespace {
 
 // If this file exists in the user dir, every input event is logged
@@ -141,9 +148,7 @@ void console_write(const char* text)
 {
 	if (!s_console_out || s_bottom_game)
 		return;
-	PrintConsole* previous = consoleSelect(&s_bottom);
-	s_console_out->write_r(_REENT, nullptr, text, strlen(text));
-	consoleSelect(previous);
+	console_write_on(&s_bottom, text);
 }
 
 // The console draws straight into the bottom framebuffer (single-buffered
@@ -223,18 +228,7 @@ void bottom_redraw()
 // its framebuffer pointer taken from libctru.
 void console_attach()
 {
-	// consoleInit() points stdout/stderr at the console; keep the log tee.
-	const devoptab_t* saved_out = devoptab_list[STD_OUT];
-	const devoptab_t* saved_err = devoptab_list[STD_ERR];
-	PrintConsole* previous = consoleSelect(&s_bottom);   // consoleInit selects s_bottom
-	consoleInit(GFX_BOTTOM, &s_bottom);
-	// libctru installs its console device only on the first consoleInit().
-	if (!s_console_out)
-		s_console_out = devoptab_list[STD_OUT];
-	devoptab_list[STD_OUT] = saved_out;
-	devoptab_list[STD_ERR] = saved_err;
-	if (previous && previous != &s_bottom)
-		consoleSelect(previous);
+	console_init_keep_log(GFX_BOTTOM, &s_bottom);
 }
 
 void bottom_init()
@@ -923,6 +917,48 @@ void script_step()
 }
 
 } // namespace
+
+// consoleInit() points stdout/stderr at the console; this keeps the log tee there.
+// libctru installs its console device (and the stdio setvbuf calls) only on the
+// first consoleInit() of the process, so that call also captures the device
+// (s_console_out). Every later console, error_screen()'s included, is drawn
+// through console_write_on(), never through printf: stdout stays the log for
+// every thread (docs/3ds/CITRO3D_DESIGN.md 5.6.2 a). Not while citro3d owns the
+// top screen: consoleInit() also swaps the top screen's buffers.
+PrintConsole* console_init_keep_log(gfxScreen_t screen, PrintConsole* console)
+{
+	const devoptab_t* saved_out = devoptab_list[STD_OUT];
+	const devoptab_t* saved_err = devoptab_list[STD_ERR];
+	PrintConsole* previous = consoleSelect(console);   // consoleInit selects it
+	PrintConsole* result = consoleInit(screen, console);
+	if (!s_console_out)
+		s_console_out = devoptab_list[STD_OUT];
+	devoptab_list[STD_OUT] = saved_out;
+	devoptab_list[STD_ERR] = saved_err;
+	if (previous && previous != console)
+		consoleSelect(previous);
+	return result;
+}
+
+// Writes text (with its escape sequences) on a console set up by
+// console_init_keep_log(), through the console's own device. No s_bottom_game
+// check: the caller owns the screen it draws on.
+void console_write_on(PrintConsole* console, const char* text)
+{
+	if (!s_console_out || !console)
+		return;
+	PrintConsole* previous = consoleSelect(console);
+	s_console_out->write_r(_REENT, nullptr, text, strlen(text));
+	if (previous)
+		consoleSelect(previous);
+}
+
+// The console's stdout device (null before the first console_init_keep_log()),
+// for error_screen's d6 log line.
+const devoptab_t* console_stdout_device()
+{
+	return s_console_out;
+}
 
 // --- HID wrappers -------------------------------------------------------------
 
