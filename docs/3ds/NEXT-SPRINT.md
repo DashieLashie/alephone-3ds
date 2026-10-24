@@ -428,21 +428,39 @@ pieces go through `c3d-architect` / `c3d-critic` / `c3d-implementer` as in
 `CLAUDE.md`):
 
 A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
-   5.6.0 (designed, critic round 1 applied; round 2 pending):
-   0. `3ds-port`, done: the SDL2 patch (item 14 b, `5cd45ce`) and the 3dslink mirror
-      (item 15, `29a3326`; console check pending).
-   1. `3ds-port`: `error_screen` draws through the console device (its text went to
-      the log, so it never showed after boot), takes its own HID reference (item 14 a),
-      logs d6.
-   2. `3ds-port`: the fatal hand-off to the main thread (item 14 c): `--wrap=abort`,
-      the `vhalt()` hook (engine edit, `PATCHES.md` 54), the audio-thread variant, the
-      `svcExitProcess` fallback, `debug-fatal` modes 1-7.
-   3. `3ds-port`: the A1 port side: `app_suspended()`, d1, `exit_requested()` also
-      reads `aptShouldClose()` (backlog item 16), the `home-close` script command.
-   4. Merge `3ds-port` into `stage10-c3d`.
-   5. `stage10-c3d`: the HOME > Close hang (A1): the present gate (no present without
-      GPU rights or while suspended/closing), bounded queue waits, the abandon path,
-      d2-d5. Console: the runs of design 5.6.1 and 5.6.3.
+   5.6.0 (design critic-approved, `3233e60`). **Handoff, 2026-10-24** (a fresh session
+   continues from here; nothing below is pushed to the fork yet):
+   0. **Done** on `3ds-port`: the SDL2 patch, HID released once (item 14 b,
+      `5cd45ce` + `b829aff`; SDL reinstalled into portlibs), and the 3dslink mirror no
+      longer blocks (item 15, `29a3326`).
+   1. **Done** on `3ds-port`: `error_screen` draws through the console device, holds its
+      own HID reference, survives HOME, logs d6 (`94e3036` + review follow-up `612173a`;
+      critic APPROVE).
+   2. **Done, review not finished** on `3ds-port`: the fatal hand-off to the main thread
+      (`8d66595` + round-1 fixes `05c6d27`; `PATCHES.md` 54, `--wrap=abort`,
+      `debug-fatal` modes 1-11 incl. 6b/8a/8t, all clean in Azahar). The critic's round 1
+      was REVISE (fixed in `05c6d27`); **its round 2 (the last) was cut off by a usage
+      limit: run it first** (`c3d-critic` on `05c6d27`, the brief: check each round-1 fix
+      and for regressions: `__wrap_abort`'s `error_screen` call when `abort()` comes from
+      inside `error_screen` or from a destructor after `close_outputs`; `block_forever`
+      at a service point inside the error screen's own `hidScanInput`; test hooks gated
+      on `debug-fatal` only).
+   3. **Next** on `3ds-port`: the A1 port side (design 5.6.1 a, c): `app_suspended()`,
+      d1, `exit_requested()` also reads `aptShouldClose()` (backlog item 16), the script
+      command `home-close`, script 22. Then the critic, as for 1-2.
+   4. Merge `3ds-port` into `stage10-c3d` (docs conflicts expected in NEXT-SPRINT
+      items 14-16; in code, add the c3d branch noted in `error_screen_here()`: when
+      `a1_c3d_release_top()` returns false, log only, no `consoleInit`, no wait).
+   5. `stage10-c3d`: the HOME > Close hang (A1, design 5.6.1 a/b): the present gate,
+      bounded queue waits (`C3D_FRAME_NONBLOCK` only, never a positive timeout), the
+      abandon tri-state, d2-d5, `debug-c3d` keys (`suspend_gate`, `retire_wait_ms`,
+      `force_abandon`, `close_frame`), configs; `test_vhalt` 1-4 re-run.
+   6. **One console session** for all of it: design 5.6.1 runs 1-4, the `debug-fatal`
+      list in item 14 (boot-time control, mode 1 by eye, modes 2-4, 6, 6b; the launcher
+      relaunches Aleph One after each; the DSP falls silent after 6/6b/7), the mirror
+      check (item 15: `kill -STOP` the host 3dslink), and read the card's `log.txt`
+      (raw fatal lines are not mirrored). Workflow per piece: implementer, then critic
+      (max 2 revise rounds); design: architect then critic.
 B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
    Measured on the console against the current GPU present.
