@@ -141,6 +141,8 @@ bool present_native(const void* pixels, int pitch)
 
 bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
 {
+	fatal_test_tick(false);   // debug-fatal (5.6.3 tests); before the service point
+	fatal_service_point();    // a fatal error handed over by another thread (5.6.3 step 4)
 	if (width == kScreenW && height == kScreenH && gfxGetScreenFormat(GFX_TOP) == GSP_RGBA8_OES &&
 	    (sdl_format == SDL_PIXELFORMAT_RGB888 || sdl_format == SDL_PIXELFORMAT_ARGB8888))
 		return present_native(pixels, pitch);
@@ -209,6 +211,8 @@ bool present_screen(const void* pixels, int pitch, int width, int height, uint32
 
 bool present_bottom(const void* pixels, int pitch)
 {
+	fatal_test_tick(true);
+	fatal_service_point();
 	constexpr int kBottomW = 320;
 	if (gfxGetScreenFormat(GFX_BOTTOM) != GSP_RGB565_OES)
 		return false;

@@ -599,11 +599,19 @@ void handle_finger(const SDL_TouchFingerEvent& f, Uint32 type)
 	}
 }
 
+// While set, fatal_service_point() does nothing (docs/3ds/CITRO3D_DESIGN.md 5.6.3 step 4).
+struct FatalGuard
+{
+	FatalGuard() { fatal_guard_enter(); }
+	~FatalGuard() { fatal_guard_leave(); }
+};
+
 // Runs inside SDL_PushEvent(), i.e. on the thread sending the event: the
 // main thread for input (SDL_PumpEvents). Pushing more events from here is
 // fine (SDL's N3DS mutexes are recursive).
 int SDLCALL event_filter(void*, SDL_Event* e)
 {
+	FatalGuard guard;   // no fatal hand-off served from inside SDL's event watchers
 	if (s_debug_input)
 		log_event(*e);
 	switch (e->type)
@@ -643,7 +651,10 @@ void on_suspend(const char* why)
 {
 	s_suspend_ms = elapsed_ms();
 	audio_set_suspended(true);   // not an underrun: the DSP stops by design
-	if (SDL_WasInit(SDL_INIT_AUDIO) && SDL_GetAudioStatus() == SDL_AUDIO_PLAYING)
+	// Not while the SDL audio thread is parked (a fatal error handed to main,
+	// docs/3ds/CITRO3D_DESIGN.md 5.6.3 step 6): it sits inside SDL's mixer lock, which
+	// SDL_PauseAudio would take.
+	if (!fatal_audio_parked() && SDL_WasInit(SDL_INIT_AUDIO) && SDL_GetAudioStatus() == SDL_AUDIO_PLAYING)
 	{
 		SDL_PauseAudio(1);
 		s_audio_paused_by_us = true;
@@ -664,7 +675,7 @@ void on_resume(const char* why)
 	printf("[3ds] +%.1f ms: resumed (%s) after %.1f s%s\n", now, why, (now - s_suspend_ms) / 1000.0,
 	       s_audio_paused_by_us ? "; SDL audio resumed" : "");
 	audio_set_suspended(false);
-	if (s_audio_paused_by_us)
+	if (s_audio_paused_by_us && !fatal_audio_parked())
 	{
 		SDL_PauseAudio(0);
 		s_audio_paused_by_us = false;
@@ -681,6 +692,7 @@ void on_resume(const char* why)
 // thread) and around library applets such as the keyboard.
 void apt_hook(APT_HookType hook, void*)
 {
+	FatalGuard guard;   // no fatal hand-off served inside libctru's APT hook loop
 	const bool was_suspended = s_in_home || s_asleep;
 	switch (hook)
 	{
@@ -990,6 +1002,7 @@ void __real_hidTouchRead(touchPosition* pos);
 
 void __wrap_hidScanInput(void)
 {
+	fatal_service_point();   // main thread only, not inside the APT hook or SDL's filter (5.6.3)
 	__real_hidScanInput();
 	if (s_suppress_pending)
 	{

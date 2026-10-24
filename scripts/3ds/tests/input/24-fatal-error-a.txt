@@ -1,0 +1,13 @@
+# Fatal hand-off (docs/3ds/CITRO3D_DESIGN.md 5.6.3), debug-fatal modes 1, 2, 3, 4, 7, 8: the
+# error screen appears ~20 s after the first present (the script starts ~9 s after it, at
+# the main menu), is captured twice, and is left with ONE A (a vhalt() shows exactly one
+# screen: its trailing abort() goes straight to the exit). Run with
+#   run-azahar.sh --screens --fatal scripts/3ds/tests/fatal/mode-N.cfg --script <this file> --timeout 120
+# (modes 7 and 6b: the fallback screen appears 5 s later and the script only advances once
+# that screen polls input).
+wait 14000
+screens fatal-1
+wait 3000
+screens fatal-2
+tap A
+wait 5000

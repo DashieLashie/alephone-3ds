@@ -307,6 +307,12 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/exidx_fix.c"
 # Paths, boot log/diagnostics and the error screen (docs/3ds/STAGE4.md).
 set(_a1_platform_src "${CMAKE_CURRENT_SOURCE_DIR}/source/a1_3ds_platform.cpp")
 target_sources(alephone PRIVATE "${_a1_platform_src}")
+# A fatal error on any thread ends on the main thread's error screen (the hand-off is in
+# source/a1_3ds_platform.cpp, docs/3ds/CITRO3D_DESIGN.md 5.6.3): abort() is wrapped so a
+# thread other than main (newlib's signal handlers are per thread) reaches it too.
+# source/fatal_test_3ds.cpp is the debug-fatal test file's code.
+target_link_options(alephone PRIVATE "LINKER:--wrap=abort")
+target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/fatal_test_3ds.cpp")
 # Debug self-tests that need engine headers (debug-entropy flag).
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/selftest.cpp")
 # Audio output (docs/3ds/STAGE6.md): the engine's AudioBackend (stereo S16

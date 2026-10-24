@@ -72,6 +72,40 @@ void main_menu_displayed();
 // system asks the application to close. Also writes it to the log.
 void error_screen(const std::string& title, const std::string& body);
 
+// --- Fatal errors on any thread (docs/3ds/CITRO3D_DESIGN.md 5.6.3) ----------------
+
+// Called at the top of the engine's vhalt() (docs/3ds/PATCHES.md 54), before it runs
+// anything: on a thread other than main the whole fatal path is handed to the main
+// thread and the call never returns; on main it records that a fatal path is
+// running and returns (or, with the SDL audio thread parked, shows the error and
+// ends the process).
+void vhalt_hook(const char* message);
+
+// Hands a fatal error raised on a thread other than main to the main thread, which
+// shows the error screen and ends the process. Never returns. error_screen() calls
+// it when it runs elsewhere than on main.
+[[noreturn]] void fatal_from_other_thread(const char* title, const char* body);
+
+// Main thread, at a top-level point (present_screen(), present_bottom(),
+// __wrap_hidScanInput): serves a pending request. Never returns when it does.
+void fatal_service_point();
+
+// Port internals. apt_hook() and the SDL event filter bracket their bodies with
+// the guard (no serving inside them); audio_3ds.cpp records the audio thread;
+// input_3ds.cpp skips SDL audio calls while the audio thread is parked.
+void fatal_guard_enter();
+void fatal_guard_leave();
+void fatal_note_audio_thread();
+bool fatal_audio_parked();
+bool is_abort_handler(void (*handler)(int));
+
+// debug-fatal (docs/3ds/CITRO3D_DESIGN.md 5.6.3 tests, source/fatal_test_3ds.cpp):
+// the main thread's present_screen()/present_bottom() tick it; the audio callback
+// calls the hook.
+void fatal_test_tick(bool bottom_screen);
+void fatal_test_frame_lock();
+void fatal_test_audio_hook();
+
 // --- Player name (docs/3ds/PATCHES.md 50) ------------------------------------
 
 // The user name of the console's profile (System Settings > Other Settings >

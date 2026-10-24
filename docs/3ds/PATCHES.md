@@ -927,3 +927,29 @@ Added 2026-10-18 on branch `3ds-port-player-name`.
 
 **Non-3DS check** (2026-10-18, `ppcheck.sh`, both volumes): `OverheadMapRenderer.cpp`
 IDENTICAL; `-fsyntax-only` 0 diagnostics.
+
+## Fatal errors on any thread (54)
+
+Added 2026-10-23 on `3ds-port` (stage 10 piece 2, `CITRO3D_DESIGN.md` 5.6.3; backlog
+item 14 in `NEXT-SPRINT.md`).
+
+54. **`CSeries/csalerts_sdl.cpp`: `a1_3ds::vhalt_hook(message)` at the top of
+    `vhalt()`.** `vhalt()` ran `stop_recording()`, `logFatal()` and
+    `shutdown_application()` (-> `SDL_Quit`: HID, video, audio) on whatever thread
+    called it, before any port code: on a second thread the main thread then faulted in
+    `hidScanInput` (Luma dump 4). The hook comes first. On a thread other than main it
+    hands the whole fatal path to the main thread (`fatal_from_other_thread()`, port code
+    in `a1_3ds_platform.cpp`) and never returns; on main it records that a fatal path is
+    running (`s_fatal_active`) and returns, and upstream's `vhalt()` goes on as before (with
+    the SDL audio thread parked it shows the error and ends the process itself: upstream's
+    `shutdown_application()` would deadlock on the audio lock). Declared in
+    `a1_3ds_platform.h`, which the file already includes under the same `#ifdef`. Port side
+    (no engine edit): the request/serve hand-off with the 5 s fallback, `--wrap=abort`,
+    `fatal_exit()`, `debug-fatal` (`source/fatal_test_3ds.cpp`), service points in
+    `present_screen()`, `present_bottom()` and `__wrap_hidScanInput`; see `NEXT-SPRINT.md`
+    item 14 for the design deviations and the test results.
+
+**Non-3DS check** (2026-10-23, `ppcheck.sh "Source_Files/CSeries/csalerts_sdl.cpp"
+"Source_Files/CSeries/csalerts_sdl.cpp"`, both volumes): DIFFER (2 lines), **0 lines with
+numbers normalised** (only `__LINE__` moved); `-fsyntax-only` exit 0, 0 diagnostics
+(167 934 and 89 269 preprocessed lines).

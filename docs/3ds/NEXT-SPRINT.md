@@ -327,6 +327,48 @@ Azahar) [PERF "Next candidates"]
     polls no input. **For the piece-4 merge:** in the c3d build `error_screen_here()` calls
     `a1_c3d_release_top()` first (comment at the spot); if it returns false (citro3d still
     up) it must log only: no `console_init_keep_log`, no wait loop, return.
+    **Piece 2 done on `3ds-port` (console check pending), `PATCHES.md` 54:** a fatal error
+    on any thread ends on the main thread's error screen (`CITRO3D_DESIGN.md` 5.6.3):
+    `fatal_from_other_thread()` (static buffers, compare-exchange, the loser blocks and never
+    draws, 5 s acknowledgement wait, then an untimed kernel wait; the fallback draws on the
+    requesting thread through `error_screen_here(raw_log)` and ends with `svcExitProcess`),
+    serving at `present_screen()`, `present_bottom()` and `__wrap_hidScanInput` on main
+    (not inside the APT hook or SDL's event filter), `fatal_exit()` picking its variant from
+    `s_audio_parked` (a parked SDL audio thread: no `SDL_Quit`, no OpenAL, `gfxExit()` then
+    `_Exit(1)`; `on_suspend`/`on_resume` skip their SDL audio calls), `--wrap=abort`, the
+    `vhalt()` hook. **Deviations from the design text:** (1) the winner copies title and body
+    into the static buffers after the compare-exchange and publishes `s_fatal_ready`
+    (copying first let a loser overwrite the winner's text); (2) the requester takes an
+    unacknowledged request back with an `exchange` on `s_fatal_acked` before its fallback
+    (so a late main cannot also serve it); (3) `log_raw()` tries the tee lock for up to
+    200 ms before writing without it (two unlocked writes on the SD file raced on its
+    offset and lost the "handed to the main thread" line in Azahar); (4) mode 7's lock is
+    taken by main at every service point and present tick, not only at presents (main served
+    the request through `__wrap_hidScanInput` otherwise); (5) `error_screen_here` has no
+    citro3d branch on `3ds-port` (merge note above). Test: sdmc `debug-fatal`
+    (`mode N`, `delay S`, `lock 1`, `first 0|1`), `run-azahar.sh --fatal FILE`, configs
+    `scripts/3ds/tests/fatal/`, scripts `scripts/3ds/tests/input/23-fatal-in-game.txt`,
+    `24-fatal-error-a.txt`, `25-fatal-home-a.txt` (script 17 and its two As exist on
+    `stage10-c3d` only). **Azahar, non-authoritative, 2026-10-23** (every run: error text on
+    the bottom screen, d6 `log`, `azahar_log.txt` 0 null reads): mode 1 `vhalt()` on main:
+    one screen, one A, `exit`; mode 2
+    `abort()` on a second thread: probes `on_abort` (main) / `SIG_DFL` (thread), handed over,
+    shown by main, `exit`; modes 3, 4 likewise; mode 5 in a HUD + Map game: two captures 5 s
+    apart with identical bottoms; mode 6 (audio callback): parked, HOME round trip with no
+    SDL audio call, `fatal exit, audio thread parked`, `exit`; mode 6b (main in
+    `SDL_LockAudio`): no acknowledgement, fallback after 5 s on the audio thread, raw log
+    lines, `svcExitProcess`; mode 7: fallback on the second thread, no second hand-off line;
+    mode 8 in both orders: one screen drawn by main, the loser logs one line and blocks, audio
+    variant both times. In mode 1 the one screen is the one `abort()` ends up showing (`on_abort` -> `die_with_message`):
+    `vhalt()`'s own `alert_user()` after `shutdown_application()` showed none in Azahar (not
+    investigated), so `s_error_shown` was false at the `__wrap_abort`; with a screen already
+    shown `__wrap_abort` goes straight to `fatal_exit()`. Azahar cannot show: whether HOME, the launcher and the DSP survive
+    `svcExitProcess` without `aptExit` (5.6.4 item 5), real scheduling and lock contention,
+    by-eye readability, the launcher after each run. **Console runs (all pending):** the
+    boot-time control and `debug-fatal` modes 1, 2, 3, 4 (the three second-thread runs of G0-b,
+    plus main), 6 and 6b: by eye the port's screen, not Luma's; A ends it; the Homebrew
+    Launcher starts again and launches Aleph One (dump 5); mode 7 only if the user wants the
+    `aptExit`-skipping exit tried. Remove `debug-fatal` from the card afterwards.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its

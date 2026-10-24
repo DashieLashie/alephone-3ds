@@ -321,6 +321,11 @@ extern void shutdown_application();
 
 void vhalt(const char *message)
 {
+#ifdef A1_PLATFORM_3DS
+	// On another thread this hands the whole fatal path to the main thread and does not
+	// return (docs/3ds/PATCHES.md 54).
+	a1_3ds::vhalt_hook(message);
+#endif
 	stop_recording();
         logFatal("vhalt: %s", message);
 	GetCurrentLogger()->flush();
