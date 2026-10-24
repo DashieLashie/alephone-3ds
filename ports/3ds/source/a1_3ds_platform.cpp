@@ -1322,8 +1322,12 @@ void error_screen_here(const std::string& title, const std::string& body, bool r
 			if (hidKeysDown() & (KEY_START | KEY_A))
 				break;
 		}
-		else if (frames >= kNoHidFrames)
-			break;
+		else
+		{
+			if (frames >= kNoHidFrames)
+				break;
+			fatal_service_point();   // no hidScanInput here: acknowledge another thread's request
+		}
 		gfxFlushBuffers();
 		if (own_gfx)
 			gfxSwapBuffers();
@@ -1389,6 +1393,11 @@ void fatal_from_other_thread(const char* title, const char* body)
 		snprintf(line, sizeof line, "[3ds] fatal error on thread %lu while thread %lu's is handled: blocked\n",
 		         static_cast<unsigned long>(tid), static_cast<unsigned long>(expected));
 		log_raw(line);
+		// Main shows another thread's text: this one's may be the real cause.
+		log_raw(title ? title : "");
+		log_raw("\n");
+		log_raw(body ? body : "");
+		log_raw("\n");
 		block_forever();
 	}
 	// The winner owns the buffers; main reads them only after s_fatal_ready.
@@ -1448,9 +1457,17 @@ void fatal_service_point()
 		return;
 	}
 	s_fatal_main_took = true;
-	// Main is in a fatal path of its own (or serving): acknowledge, do not nest.
+	// Main is in a fatal path of its own (or serving): acknowledge, do not nest. Its
+	// screen shows its own text, so the request's goes to the log.
 	if (s_fatal_active.exchange(true))
+	{
+		log_raw("[3ds] main thread: in its own fatal path; the request's text, not shown:\n");
+		log_raw(s_fatal_title);
+		log_raw("\n");
+		log_raw(s_fatal_body);
+		log_raw("\n");
 		return;
+	}
 	char line[160];
 	snprintf(line, sizeof line, "[3ds] +%.1f ms: fatal error from thread %lu, shown by the main thread\n",
 	         ms_since_boot(), static_cast<unsigned long>(s_fatal_from.load()));
@@ -1526,7 +1543,7 @@ extern "C" void __wrap_abort(void)
 	}
 	if (a1_3ds::s_error_shown)
 		a1_3ds::fatal_exit();   // a screen was shown already: no second one (debug-fatal mode 9)
-	if (a1_3ds::s_vhalt_pending)
+	if (a1_3ds::s_vhalt_pending.exchange(false))   // once: an abort() inside the screen goes on below
 	{
 		// vhalt() on main ends in abort(), and its own alert shows nothing on the 3DS (the
 		// 3DS screen is in alert_user(), which vhalt() does not call): show vhalt()'s message,

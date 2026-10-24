@@ -403,6 +403,27 @@ Azahar) [PERF "Next candidates"]
     (e) mode 7 only if the user wants the fallback's `svcExitProcess` tried, with the same silence
     check. After each run read the raw lines in `log.txt` on the card. Every "process ended"
     claim is a console check (see above).
+    **Critic round 2 (last) on `05c6d27`: APPROVE**, all round-1 findings closed. Its minors,
+    applied in the next commit: (1) `__wrap_abort` clears `s_vhalt_pending` (`exchange(false)`),
+    so an `abort()` inside the vhalt screen goes on to `__real_abort` (bounded) instead of
+    recursing to a stack overflow; (2) a request's text is no longer lost when it is not shown:
+    a blocked loser logs its title and body, and main, when it acknowledges a request during its
+    own fatal path (mode 11), logs "in its own fatal path; the request's text, not shown:" and
+    the text; (3) the error screen's no-HID branch (10 s, no `hidScanInput`) calls
+    `fatal_service_point()`, so another thread's request is acknowledged there and the fallback
+    does not draw over main's screen. **Deferred:** (4) HOME or sleep during the fallback runs
+    `apt_hook` -> `on_suspend` on the requesting thread (`printf` through the tee lock,
+    `SDL_PushEvent`): if main failed to acknowledge because it is stuck in `tee_write` (item 15),
+    the fallback freezes at HOME; fix: skip logging and SDL calls in `apt_hook` off main, or
+    item 15's fix removes the cause (console: mode 7 + HOME). (5) Piece-4 merge note: with
+    `A1_RENDER_C3D`, a request taken back leaves main blocked forever, possibly between
+    `C3D_FrameBegin` and `C3D_FrameEnd`, and the fallback only logs (5.6.2 a): a frozen frame
+    until `svcExitProcess` is the design; the fallback must never call citro3d off main.
+    Azahar (non-authoritative, 2026-10-24, build with (1)-(3), script 24): modes 1, 2, 6, 7,
+    8a, 8t, 9, 10, 11 as before (one screen each, `exit` or `svcExitProcess`); mode 1's bottom
+    capture shows the vhalt text; 8a/8t log the loser's text after its "blocked" line; mode 11
+    logs the audio thread's text after "in its own fatal path"; 0 null reads in the last run's
+    `azahar_log.txt` (it is overwritten each run).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
