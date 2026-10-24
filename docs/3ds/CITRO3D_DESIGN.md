@@ -1257,7 +1257,10 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
 5. The fallback's `svcExitProcess` skips `gspExit`, `aptExit` and `ndspExit`: the
    HOME menu and the launcher survive, and the DSP does not go on playing buffers
    from the freed heap (listen for a buzz or a looping fragment after the exit; mode
-   7, console, optional).
+   7, console, optional). The **audio-thread variant** skips `ndspExit` too (`_Exit` ->
+   `__appExit` does not stop the DSP, and SDL's audio close is skipped): the same
+   silence check applies to mode 6, and to 6b when it ends in the fallback (critic,
+   piece 2 review round 1, minor 8).
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 
