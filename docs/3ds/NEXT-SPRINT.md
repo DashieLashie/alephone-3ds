@@ -280,8 +280,9 @@ Azahar) [PERF "Next candidates"]
     is a design choice for the user.
     **Console, 2026-10-19 (New 3DS, `PERF.md` "Console G0-b, second session"): worse
     than in Azahar.** The null reads are data aborts there: Luma's "An exception
-    occurred" screen, then a power-off. Main-thread `vhalt()`: the error screen shows
-    and is readable, leaving it faults in `hidScanInput` (`hid.c:185`, address `0x10`).
+    occurred" screen, then a power-off. Main-thread `vhalt()`: the error screen's first
+    `hidScanInput` faults (`hid.c:185`, address `0x10`); the port's screen was never
+    visible (what the user saw was Luma's; corrected 2026-10-23).
     `vhalt()` on a second thread: the main thread faults in `hidScanInput` from
     `N3DS_PumpEvents`. `abort()` on a second thread: the main thread faults in newlib
     `_lseek_r` (address `0x18`) in a resource-file `fseek`. `error_screen()` on a second

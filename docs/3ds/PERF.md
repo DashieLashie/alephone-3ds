@@ -823,8 +823,9 @@ and "second session" below) in brackets.
    [HOME and back, sleep, HOME > Close in a dialog: pass. **HOME > Close in a game:
    hangs** when a present runs after the suspend (2 of 2 in the second session; the
    release never returns). Release before `gfxExit` on `vhalt` (main thread and
-   second thread): pass; the error screen shows on the main thread, not from a
-   second thread; leaving it faults in `hidScanInput` (backlog item 14).]
+   second thread): pass. The port's error screen was never visible: its first
+   `hidScanInput` faulted (backlog item 14) and its text went to the log (design
+   5.6.2); what the user saw was Luma's exception screen (correction, 2026-10-23).]
 2. No tearing and frame N or N-1 only (the frame-indexed test with `alt_load`) @30 and
    @60; the VBlank guard before `C3D_FrameEnd`; ordering margin (design 10, 2).
    [Pass @30 and @60: every capture frame N.]
@@ -1078,7 +1079,7 @@ are this session's error-path runs, below.
 
 | Run | citro3d part | What the console showed | How it ended |
 | --- | --- | --- | --- |
-| `p1-vhalt` (`vhalt()` on main) | **pass**: `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done` (linear 17800 KiB, VRAM 6144 KiB), then the error | the error screen, readable ("Aleph One stopped" on top, the message on the bottom) | leaving it: dump 3, data abort reading `0x10` in libctru `hidScanInput` (`hid.c:185`) via `__wrap_hidScanInput` from `a1_3ds::error_screen`: HID already shut down. Luma's exception screen, then power-off. No `gfxExit call #2` logged |
+| `p1-vhalt` (`vhalt()` on main) | **pass**: `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done` (linear 17800 KiB, VRAM 6144 KiB), then the error | Luma's exception screen ("An exception occurred": registers on top, a stack dump on the bottom), not the port's error screen: corrected 2026-10-23 (the first reading took it for the port's; its text went to the log, design 5.6.2) | dump 3, data abort reading `0x10` in libctru `hidScanInput` (`hid.c:185`) via `__wrap_hidScanInput` from `a1_3ds::error_screen`: HID already shut down. Luma's exception screen, then power-off. No `gfxExit call #2` logged |
 | `p1-odd` | **pass**: `present: 300x200 SDL_PIXELFORMAT_RGB565 converted and letterboxed into 400x240`, 0 false returns, `odd_surface` +1 per second | the picture once a second (the menu and the picture alternate: by design) | the two captures (`screen-c3d-odd{1,2}-top.bmp`) equal the generator's picture in all 60 000 pixels within 1 level, at (50, 20), diagonal top-left to bottom-right, letterbox black. The HOME > Close at the end **hung** (below) |
 | `p1-vhalt-thread-sdl` (`vhalt()` on a second thread) | **pass**: `gfxExit on a thread other than main (thread 291, main 280)`, `release requested by another thread`, `release #1`, `release done` | Luma's exception screen | dump 4, the same `hidScanInput` null read, **on the main thread** (`main_event_loop` -> `SDL_WaitEventTimeout` -> `N3DS_PumpEvents`): the second thread's `SDL_Quit` shut HID down under it. `gfxExit: released by the main thread` not logged (the process died first) |
 | `p1-vhalt-thread-screen` (`error_screen()` on a second thread) | **pass**: `release_top on a thread other than main (thread 294, main 283)`, `release requested ...`, `release #1`, `release done`, `release_top: released by the main thread` | **no error screen**: the top screen kept the dimmed main menu (the top is left alone, as designed), the bottom screen stayed black | the error screen's own captures: bottom framebuffer **0 of 76 800 pixels lit**, so the text never reached it (the Azahar captures were black for the same reason: `PERF.md` "Merge of 3ds-port" put them down to Azahar; they are real). Aleph One then exited (3dslink saw the close); dump 5 is **not Aleph One** (its code is not in the build; PC on `svc 0x3c`, `svcBreak`, SP `0x0fffffc8`): the next program, probably the Homebrew Launcher, panicked on start |
@@ -1099,17 +1100,19 @@ the power button turns the console off.
 | `exit without shutdown_application ... SDL_Quit` -> `gfxExit call #1` -> `release #1` | yes | `home-close-1`: yes, 10.9 s after the suspend; `odd`: nothing after the stats line |
 | `release done: C3D_Fini returned` | yes | **never** |
 
-So the hang is inside `release()` (`back/context.cpp`:170-178): one of
-`C3D_FrameEnd(0)`, the empty `C3D_FrameBegin(0)`/`C3D_FrameEnd(0)` that retires the
-queue, or `C3D_Fini()` waits for GPU work that never completes. Which one is
-**UNVERIFIED** (needs a log line between them). The trigger is a present while the
+So in `home-close-1` the hang is inside `release()` (`back/context.cpp`:170-178):
+one of `C3D_FrameEnd(0)`, the empty `C3D_FrameBegin(0)`/`C3D_FrameEnd(0)` that
+retires the queue, or `C3D_Fini()` waits for GPU work that never completes. Which
+one is **UNVERIFIED** (needs a log line between them). In `odd` the log ends before
+the exit line, so there it is most likely the next present's `C3D_FrameBegin(0)`
+(design 5.6.1, correction 2026-10-23). The trigger is a present while the
 app is suspended: the GPU present queues work for the GPU while the HOME menu owns
 it, and every later wait on that queue blocks. The software present writes the
 framebuffer with the CPU, so it has nothing to wait for. A likely fix is to skip
 the GPU present while suspended (the port tracks it: `s_in_home` / `s_asleep`,
 `input_3ds.cpp`) and not to wait on the queue in `release()` after such a frame;
-**UNVERIFIED** until built and tried. The `odd` run's log ends before the exit line,
-so there the wait may have been in the present itself.
+**UNVERIFIED** until built and tried. Design 5.6.1 has the full chain: after Close,
+upstream's quit dialog draws one more frame, after the app has lost its GPU rights.
 
 Card after the session: `debug-c3d`, `debug-perf` and `debug-input-script` deleted;
 prefs set to the user's HUD + Map, Framerate Target 60.
