@@ -472,8 +472,10 @@ Azahar) [PERF "Next candidates"]
     on the main thread, then `quit`: `finish_game` at once, `exit`), `08-demo-close.txt`, the HOME
     and sleep parts of `07-suspend-menus.txt` (each hook logged, resume lines as before), and the
     fatal regression `--fatal mode-2.cfg` + script 24 (one `ERROR: Aleph One stopped`, `exit`).
-    Builds: `build-3ds` and `build-3ds-prof`, 0 warnings; `nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'`
-    = 0 (a bare `grep -ci c3d` also matches addresses such as `006c3d54`).
+    Builds: `build-3ds` and `build-3ds-prof`, 0 warnings; `arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'`
+    = 0 (a bare `grep -ci c3d` also matches addresses such as `006c3d54`; macOS's `nm`
+    cannot read ARM ELF and prints nothing, so it "passes" vacuously: the checks recorded
+    on 2026-10-24 before the merge used it and were re-done with `arm-none-eabi-nm`: 0).
     **Console checks pending:** HOME > Close in a game: the log (SD card) shows the d1 line
     `ONSUSPEND on thread <main> (main <same>) gpu right 1 should close 0` and no hook after it, then
     `finish_game` without a `terminals: 640x320` dialog frame; the launcher returns and Aleph One
