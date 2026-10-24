@@ -289,6 +289,16 @@ Azahar) [PERF "Next candidates"]
     thread: nothing drawn (bottom framebuffer all black), then the app exits and the
     next program (probably the Homebrew Launcher) panics in `svcBreak`. So any fatal
     error ends in a forced power-off, not a return to the launcher.
+    **Causes (2026-10-19/23):** dumps 3 and 4: SDL2 2.32.10's `SDL_Quit` releases HID
+    one time more than it took (traced on `3ds-port`, `b43f9e6`); dump 6: newlib's
+    signal handlers are per thread, so `abort()` off the main thread skips `on_abort`
+    and runs libctru's whole exit (`__appExit`: sdmc unmounted, heap freed) on that
+    thread while the main thread runs on (`CITRO3D_DESIGN.md` 5.6.3). **User decision
+    (2026-10-19), all three:** (a) the error screen takes its own HID reference; (b) the
+    SDL patch, **done** (`5cd45ce`, `scripts/3ds/patches/SDL2-release-2.32.10/`); (c)
+    errors on other threads hand the fatal path to the main thread
+    (`CITRO3D_DESIGN.md` 5.6.3, with `--wrap=abort` and a fenced `vhalt()` edit,
+    `PATCHES.md` 54).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -298,6 +308,13 @@ Azahar) [PERF "Next candidates"]
     behind at +50 s and the game loop froze for ~100 s after a BENCH line. Only with
     3dslink (a launcher start has no socket). A send timeout (`SO_SNDTIMEO`) or a
     non-blocking socket would let it drop the mirror instead; not tried.
+16. **HOME > Close in a game takes upstream's slow quit path.** The port's
+    `APTHOOK_ONEXIT` hook (`input_3ds.cpp`) can never fire in time: libctru calls it
+    only from `aptExit` inside `__appExit`, after the log is closed
+    (`CITRO3D_DESIGN.md` 5.6.1). So `exit_requested()` is false, and `SDL_QUIT` in a
+    game opens upstream's (invisible) quit dialog, which draws a frame before
+    `exit(0)` (with the GPU present, the frame that hangs). Fix: `exit_requested()` also
+    returns `aptShouldClose()`; part of plan A piece 3.
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
@@ -410,23 +427,24 @@ found. The plan, in order (each piece: Azahar first, then a console check; stage
 pieces go through `c3d-architect` / `c3d-critic` / `c3d-implementer` as in
 `CLAUDE.md`):
 
-A. **Fixes** (before anything builds on P1):
-   1. **HOME > Close in a game hangs** (stage 10). First a log line between the
-      steps of `release()` (`back/context.cpp`:170-178) to find which wait blocks;
-      then skip the GPU present while suspended (`s_in_home` / `s_asleep` in
-      `input_3ds.cpp`) and do not wait on the GPU queue in `release()` after a frame
-      submitted while suspended. Design note, critic, implementation. Console: HOME >
-      Close in a game three times with `p1-gpu.cfg`; HOME and back; sleep in a game.
-   2. **`error_screen()` on a second thread draws nothing** (stage 10, P1 minor 4
-      path; `p1-vhalt-thread-screen.cfg`): the bottom framebuffer stays black.
-   3. **Backlog item 14, fatal errors end in a power-off** (`3ds-port`, every
-      build): a design choice (hand the fatal path to the main thread, or stop the
-      main thread before `shutdown_application()`; keep HID usable for the error
-      screen's own input), then merge `3ds-port` into `stage10-c3d`.
-   4. **Backlog item 15, the 3dslink mirror can freeze the game** (`3ds-port`):
-      a send timeout or a non-blocking socket in `tee_write()`.
+A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
+   5.6.0 (designed, critic round 1 applied; round 2 pending):
+   0. `3ds-port`, done: the SDL2 patch (item 14 b, `5cd45ce`) and the 3dslink mirror
+      (item 15, `29a3326`; console check pending).
+   1. `3ds-port`: `error_screen` draws through the console device (its text went to
+      the log, so it never showed after boot), takes its own HID reference (item 14 a),
+      logs d6.
+   2. `3ds-port`: the fatal hand-off to the main thread (item 14 c): `--wrap=abort`,
+      the `vhalt()` hook (engine edit, `PATCHES.md` 54), the audio-thread variant, the
+      `svcExitProcess` fallback, `debug-fatal` modes 1-7.
+   3. `3ds-port`: the A1 port side: `app_suspended()`, d1, `exit_requested()` also
+      reads `aptShouldClose()` (backlog item 16), the `home-close` script command.
+   4. Merge `3ds-port` into `stage10-c3d`.
+   5. `stage10-c3d`: the HOME > Close hang (A1): the present gate (no present without
+      GPU rights or while suspended/closing), bounded queue waits, the abandon path,
+      d2-d5. Console: the runs of design 5.6.1 and 5.6.3.
 B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
-   read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 54+).
+   read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
    Measured on the console against the current GPU present.
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)

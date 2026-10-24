@@ -811,7 +811,10 @@ RGB565 picture, converted and letterboxed by the GPU present, correct picture an
 orientation, 0 false returns. `test_vhalt 1`: one `[c3d] release` (from `SDL_Quit`'s
 `gfxExit`), `gfxExit` #1 (up, released) and #2 (down) logged in order, the error
 screen is reached and left; the error screen captures are black with and without
-citro3d (identical), so Azahar cannot show them.
+citro3d (identical), so Azahar cannot show them. **Corrected 2026-10-23:** the black
+captures are real, not Azahar: the error screen's `printf`s go to the log tee, not to
+the console (libctru installs its console device on the first `consoleInit` only;
+design 5.6.2).
 
 ### Needs console verification (P1)
 
@@ -950,7 +953,7 @@ run with `debug-c3d` and the ON build unless noted:
 | script 19 (HOME > Close in Preferences), `p1-gpu.cfg` | **pass**: `exit without shutdown_application (a dialog's exit): SDL_Quit`, `gfxExit call #1 (citro3d up: release first)`, `release #1`, `release done` (linear 17792 KiB, VRAM 6144 KiB: as at boot), `exit`; no guest fault in `azahar_log.txt` |
 | script 15 + `--load-test` (two saves, a level change), `p1-diff.cfg` | **pass**: both saves log every `save:`/`save_game_file:` mark (about 130 ms each in Azahar); `present_diff final: 65 checks, 0 with RGB differences`. The "Saving..." box is presented through `MainScreenUpdateRect` like every frame; it is up for too short a time in Azahar to capture: console |
 | script 17, `p1-vhalt.cfg` | as in P1: release, `gfxExit` #1 (up) and #2 (down), error screen. The `atexit` hook stays silent (`SDL_Quit` has already run). ~8150 null reads in `hidScanInput` after the second error screen: backlog item 14, as before |
-| script 17, `p1-vhalt-thread-sdl.cfg` / `-screen.cfg` | as in the P1 follow-ups (hand-off to the main thread, `release #1`, then item 14's `hidScanInput` faults for `test_vhalt 3`; none for `test_vhalt 4`). The `test_vhalt 4` error-screen captures are black; the pre-merge build (`615902f`, same script) gives byte-identical captures, so this is Azahar, not the merge |
+| script 17, `p1-vhalt-thread-sdl.cfg` / `-screen.cfg` | as in the P1 follow-ups (hand-off to the main thread, `release #1`, then item 14's `hidScanInput` faults for `test_vhalt 3`; none for `test_vhalt 4`). The `test_vhalt 4` error-screen captures are black; the pre-merge build (`615902f`, same script) gives byte-identical captures, so it is not the merge. (Corrected 2026-10-23: nor Azahar; the text goes to the log, design 5.6.2) |
 | HUD + Map @30 L0/L6/L20, `p1-diff.cfg` (ON-prof) | `present_diff final` 32 / 32 / 31 checks, **0 with RGB differences** |
 | the same, OFF-prof against ON-prof | end-of-run captures **byte-identical on all six** (top and bottom, L0/L6/L20; L20's liquid matched this time) |
 
@@ -1088,6 +1091,11 @@ are this session's error-path runs, below.
 The `hidScanInput` and `_lseek_r` faults are backlog item 14, now confirmed on the
 console: in Azahar they were logged null reads; on the console a data abort, Luma's
 exception screen and a power-off. They occur with any fatal error, citro3d or not.
+Root causes (2026-10-19/23): the `hidScanInput` faults (dumps 3, 4) come from SDL2
+2.32.10's `SDL_Quit` releasing HID once more than it took (fixed on `3ds-port`,
+`5cd45ce`); the `_lseek_r` fault (dump 6) from newlib's per-thread signal handlers:
+`abort()` off the main thread skips `on_abort` and runs libctru's whole exit on that
+thread while the main thread runs on (design 5.6.3).
 
 **HOME > Close in a game hangs with the GPU present: a G0-b blocker.** Twice in two
 tries (`odd`, then `home-close-1` with plain `p1-gpu.cfg`, both Classic @30): HOME,
