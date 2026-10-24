@@ -424,6 +424,17 @@ Azahar) [PERF "Next candidates"]
     capture shows the vhalt text; 8a/8t log the loser's text after its "blocked" line; mode 11
     logs the audio thread's text after "in its own fatal path"; 0 null reads in the last run's
     `azahar_log.txt` (it is overwritten each run).
+    **Console (New 3DS), 2026-10-24 (A6 session, partial: the session was stopped after B0):**
+    boot-time control passes. `Marathon2` renamed to `Marathon2-x`, no `debug-c3d`/`debug-fatal`:
+    the port's own screen on the console, text as the code builds it ("Aleph One cannot start /
+    Scenario folder not found: sdmc:/3ds/alephone/Marathon2 (chosen by: default) / Copy a
+    scenario's files ... / Log: sdmc:/3ds/alephone/log.txt"), not Luma's exception screen; one A
+    ends it, the Homebrew Launcher returns and Aleph One launches again. The log has `ERROR: Aleph
+    One cannot start`, `error screen d6: thread main (id 964); stdout device after consoleInit:
+    log`, `gfxExit call #1 (citro3d down)` (the error came before citro3d started, nothing to
+    release), `real gfxExit returned`, `exit`. No new Luma dump (still dumps 0-6). **Not run yet:**
+    mode 1 by eye, modes 2-4, 5, 6/6b, 10, 11, 7, and the shipping-build spot check (runbook
+    `CONSOLE-SESSION-A6.md` part B). The card was cleaned up (no `debug-fatal`).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -440,6 +451,8 @@ Azahar) [PERF "Next candidates"]
     mirror stopped (stalled); the SD log goes on` to the SD log. Console check: during a
     3dslink run, `kill -STOP` the host's 3dslink process for ~10 s: the game must keep
     running, the SD log must show that line, and the transcript stops there.
+    **Console (New 3DS), 2026-10-24 (A6 session):** the `kill -STOP` check (part C of
+    `CONSOLE-SESSION-A6.md`) has **not been run yet**.
 
 16. **HOME > Close in a game took the slow path: `APTHOOK_ONEXIT` fires too late**
     (design `CITRO3D_DESIGN.md` 5.6.1 c, piece 3, branch `stage10-c3d`). `exit_requested()` read
@@ -491,6 +504,30 @@ Azahar) [PERF "Next candidates"]
     neither. So `exit_requested()` can turn true between two polls (power-off during a normal
     `finish_game` skips its fades: harmless). The d1 line is inside `FatalGuard` (no fatal
     service point in the hook); ONEXIT now logs twice, both lost on hardware (log closed).
+    **Console (New 3DS), 2026-10-24 (A6 session; `build-3ds-c3d`, launcher starts, logs read from the
+    card):** the fast path works. In every HOME > Close (in a game: `p1-gpu.cfg` HUD + Map @60 ×2
+    and Classic @30 ×1, plus the diagnostic config's Classic @30 run; once in a dialog; once at
+    the main menu) the log has one d1 line `ONSUSPEND on thread <main> (main <same>): gpu right 1,
+    should close 0` and no hook after it, then (in a game) `finish_game: begin` without a
+    `terminals: 640x320` dialog frame, `main loop ended`, `exit`; the launcher returns and Aleph
+    One launches again every time. Hook to `exit`: 3.0-4.8 s in a game with `p1-gpu.cfg` (about
+    2.6-3.1 s of it before `finish_game` begins), 9.4 s with the diagnostic config (5 s of it the
+    abandoned queue wait, see `CITRO3D_DESIGN.md` 5.6.4), 2.8 s in a dialog, 3.5 s at the main
+    menu; 1.0 s for the POWER route below. HOME and back ×2 (3.5 s and 3.6 s) and lid sleep and wake ×2 (1.1 s and 0.9 s):
+    `ONSUSPEND`/`ONRESTORE` and `ONSLEEP`/`ONWAKEUP`, each pair on the main thread with gpu right
+    1. The software keyboard (player name, main menu): confirmed once and cancelled once, hooks
+    paired (`ONSUSPEND`, `ONRESTORE`) around `keyboard: confirmed (button 2, result 2)` and
+    `keyboard: cancelled (button 0, result 1)`, the game goes on. (Saves in game do not open a
+    keyboard: they save at once from a pattern buffer, so the name edit stands in for them.)
+    HOME > Close at the main menu: unchanged. No new Luma dump.
+    **POWER button, short press:** on this console it closes the running software even when the
+    power menu is then cancelled: the log has `ONSUSPEND` (gpu right 1, should close 0), no
+    `ONRESTORE`, and the exit about 1 s later (gate closed, `queue retired after 0 ms`, `release
+    done`, `exit`); the user lands on the HOME menu. So the runbook's "POWER then cancel, presents
+    resume" expectation is wrong for this console: the cancel path is the same close as a Close,
+    and it is clean. **Not tested:** hold POWER > Power Off (part D), so the "no quit dialog
+    after the d1 line" check for that route is still open (the POWER route above was taken at
+    the main menu, so it also shows no dialog).
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
