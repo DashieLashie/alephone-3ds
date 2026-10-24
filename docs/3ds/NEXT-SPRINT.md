@@ -800,7 +800,7 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       max(2000, 2 x `retire_wait_ms` + 500); not reachable in run 1. (5) 500 ms default kept.
       Nits: `p1-unbounded.cfg` is a deliberate reproduction only; `ensure_up()`'s
       `if (s_up) return !serve_release();` is dead in practice.
-   6. **One console session** for all of it: design 5.6.1 runs 1-4 (written out in item 5), the `debug-fatal`
+   6. **One console session** (procedure and order for a fresh agent: `docs/3ds/CONSOLE-SESSION-A6.md`) for all of it: design 5.6.1 runs 1-4 (written out in item 5), the `debug-fatal`
       list in item 14 (boot-time control, mode 1 by eye, modes 2-4, 6, 6b; the launcher
       relaunches Aleph One after each; the DSP falls silent after 6/6b/7), the mirror
       check (item 15: `kill -STOP` the host 3dslink), and read the card's `log.txt`
