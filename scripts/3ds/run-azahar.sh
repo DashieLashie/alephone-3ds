@@ -46,8 +46,10 @@
 #                  and quits; runs scripts/3ds/tests/input/11-perf-bench.txt unless --script is
 #                  given; default --timeout 240. Prints the "[prof] BENCH" line at the end
 #   --fatal FILE   copy FILE to sdmc:/3ds/alephone/debug-fatal (source/fatal_test_3ds.cpp: "mode N", "delay S",
-#                  "lock 1", "first 0|1"); the run stops by itself, 2 s after the game's "exit" or
-#                  "svcExitProcess" log line (docs/3ds/CITRO3D_DESIGN.md 5.6.3 tests)
+#                  "lock 1", "first 0|1"); the run stops by itself, 2 s after the log's "exit" or
+#                  "svcExitProcess" line. Both lines are printed BEFORE steps that could still hang
+#                  (_Exit's __appExit, svcExitProcess): this is not proof that the guest ended
+#                  (docs/3ds/CITRO3D_DESIGN.md 5.6.3 tests)
 #   -h, --help     this text
 #
 # Environment:
@@ -274,12 +276,13 @@ while kill -0 "$pid" 2>/dev/null; do
 		echo "run-azahar: stopped Azahar after ${timeout} s"
 		break
 	fi
-	if { [ -n "$perf_level" ] || [ -n "$fatal_file" ]; } && grep -Eq ' ms: exit$|svcExitProcess$' "$userdir/log.txt" 2>/dev/null; then
+	if { [ -n "$perf_level" ] && grep -q ' ms: exit$' "$userdir/log.txt" 2>/dev/null; } ||
+	   { [ -n "$fatal_file" ] && grep -Eq ' ms: exit$|svcExitProcess$' "$userdir/log.txt" 2>/dev/null; }; then
 		sleep 2
 		kill "$pid" 2>/dev/null || true
 		sleep 3
 		kill -9 "$pid" 2>/dev/null || true
-		echo "run-azahar: the game quit; stopped Azahar after ${elapsed} s"
+		echo "run-azahar: the exit line was reached; stopped Azahar after ${elapsed} s (2 s later)"
 		break
 	fi
 	sleep 1

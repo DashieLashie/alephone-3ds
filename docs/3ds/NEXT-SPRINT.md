@@ -345,7 +345,11 @@ Azahar) [PERF "Next candidates"]
     offset and lost the "handed to the main thread" line in Azahar); (4) mode 7's lock is
     taken by main at every service point and present tick, not only at presents (main served
     the request through `__wrap_hidScanInput` otherwise); (5) `error_screen_here` has no
-    citro3d branch on `3ds-port` (merge note above). Test: sdmc `debug-fatal`
+    citro3d branch on `3ds-port` (merge note above); (6) the fallback builds `std::string`s
+    and uses the console (heap), unlike the request's static buffers: there main is blocked on
+    a lock the requester holds or on one of the engine's, never inside newlib's malloc (malloc
+    calls out to nothing), so the heap is usable; the remaining risk is a corrupted heap
+    faulting the fallback, accepted for a last resort. Test: sdmc `debug-fatal`
     (`mode N`, `delay S`, `lock 1`, `first 0|1`), `run-azahar.sh --fatal FILE`, configs
     `scripts/3ds/tests/fatal/`, scripts `scripts/3ds/tests/input/23-fatal-in-game.txt`,
     `24-fatal-error-a.txt`, `25-fatal-home-a.txt` (script 17 and its two As exist on
@@ -359,16 +363,46 @@ Azahar) [PERF "Next candidates"]
     `SDL_LockAudio`): no acknowledgement, fallback after 5 s on the audio thread, raw log
     lines, `svcExitProcess`; mode 7: fallback on the second thread, no second hand-off line;
     mode 8 in both orders: one screen drawn by main, the loser logs one line and blocks, audio
-    variant both times. In mode 1 the one screen is the one `abort()` ends up showing (`on_abort` -> `die_with_message`):
-    `vhalt()`'s own `alert_user()` after `shutdown_application()` showed none in Azahar (not
-    investigated), so `s_error_shown` was false at the `__wrap_abort`; with a screen already
-    shown `__wrap_abort` goes straight to `fatal_exit()`. Azahar cannot show: whether HOME, the launcher and the DSP survive
+    variant both times; modes 9, 10, 11 as described next. Mode 1 (review round 1, MAJOR 1): `vhalt()`'s own `system_alert_user()` only logs on the
+    3DS (the screen is in `alert_user()`, which `vhalt()` does not call), so `vhalt_hook()` on main
+    keeps the message (`s_vhalt_pending`) and `__wrap_abort` shows it ("Aleph One stopped" +
+    the vhalt text, exactly one `[3ds] ERROR:` line, no "abort() was called" screen) before
+    `fatal_exit()`; a bare `abort()`/`halt()` still goes to `on_abort`. Mode 9 (`error_screen()`
+    on main, then `abort()`) covers the other `__wrap_abort` branch (a screen already shown: no
+    second one, `fatal_exit()`). Mode 10 (main asleep 7 s at the failure): the requester takes the
+    request back after 5 s and draws the fallback, main wakes, logs `the request was taken back
+    ... blocking` at its next service point and blocks there (it must not draw over the fallback).
+    Mode 11 (the audio callback fails while main shows its own `error_screen()` and then
+    `exit(1)`s like `alert_user()`'s callers): `error_screen()` on main ends in `fatal_exit()` when
+    the audio thread is parked (the `exit(1)` would run `SoundManager::Shutdown` -> `SDL_CloseAudio`
+    and block on the parked thread's mixer lock); all three pass in Azahar. **`run-azahar.sh
+    --fatal` stops Azahar 2 s after the log's `exit`/`svcExitProcess` line; both lines are
+    printed before steps that could still hang (`_Exit` -> `__appExit`, `svcExitProcess`), and
+    `azahar_log.txt` has no end-of-emulation marker, so "the process ended" is a console-only
+    check (the "0 null reads" count only says no guest memory fault was logged).** `--perf`'s stop
+    condition is unchanged (`exit` only). **Frame-path cost** (Azahar, non-authoritative,
+    profile builds, Framerate Target 60, HUD + Map, L0, 2 runs each, build of `612173a4d`
+    against this one): `present` 1.46 / 1.47 ms before, 1.45 / 1.46 after; busy (`frame - idle`)
+    18.45 before, 18.43 after (frame 19.11 / 19.11 against 19.08 / 19.07): no change. **Raw log lines are not mirrored to 3dslink** (the
+    "handed to the main thread" line, a blocked loser's line, the whole fallback, "main thread:
+    the request was taken back"): on the console read them in `log.txt` on the card, not in the
+    host transcript. Azahar cannot show: whether HOME, the launcher and the DSP survive
     `svcExitProcess` without `aptExit` (5.6.4 item 5), real scheduling and lock contention,
     by-eye readability, the launcher after each run. **Console runs (all pending):** the
     boot-time control and `debug-fatal` modes 1, 2, 3, 4 (the three second-thread runs of G0-b,
     plus main), 6 and 6b: by eye the port's screen, not Luma's; A ends it; the Homebrew
     Launcher starts again and launches Aleph One (dump 5); mode 7 only if the user wants the
     `aptExit`-skipping exit tried. Remove `debug-fatal` from the card afterwards.
+    Console list in order: (a) the boot-time control (rename `Marathon2`); (b) mode 1: by eye
+    the vhalt text ("Aleph One stopped" + "debug-fatal mode 1: vhalt() on the main thread"), not
+    Luma's exception screen; (c) modes 2, 3, 4 (the three second-thread runs of G0-b): the
+    port's screen, A, then the launcher returns and Aleph One launches again; (d) modes 6 and
+    6b: the same, and **the DSP falls silent** (the audio variant and the fallback end in `_Exit`
+    / `svcExitProcess`, which do not run `ndspExit`, and SDL's audio close is skipped: the DSP
+    may keep reading wave buffers from freed linear memory; also listen after relaunching);
+    (e) mode 7 only if the user wants the fallback's `svcExitProcess` tried, with the same silence
+    check. After each run read the raw lines in `log.txt` on the card. Every "process ended"
+    claim is a console check (see above).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its

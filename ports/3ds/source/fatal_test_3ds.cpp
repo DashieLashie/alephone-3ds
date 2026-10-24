@@ -15,6 +15,14 @@
 	            7 a second thread takes a LightLock the main thread takes at every
 	              present, then fails: main never serves, the fallback runs
 	            8 two fatal errors 1 ms apart: the audio callback and a second thread
+	            9 error_screen() on the main thread, then abort(): the screen is shown
+	              already, so __wrap_abort ends the process with no second screen
+	           10 as 4, but main sleeps 7 s at the failure: the requester takes its request
+	              back after 5 s and draws the fallback, main must then block at its next
+	              service point and not draw over it
+	           11 the audio callback fails (parked) while main shows its own error_screen()
+	              and then calls exit(1) like alert_user()'s callers: main must end in
+	              fatal_exit(), not run the atexit handlers (SDL_CloseAudio would deadlock)
 	  delay S   seconds after the first present (default 20); modes 1-4, 6-8
 	  lock 1    mode 6: the main thread takes SDL's audio lock in a loop (the engine
 	            does on volume changes and level transitions), so an audio-thread
@@ -160,8 +168,11 @@ void fire(const Config& c)
 	                                   "error_screen() on a second thread, in a game",
 	                                   "vhalt() inside the SDL audio callback",
 	                                   "a second thread fails holding a lock main needs",
-	                                   "two fatal errors at once (audio callback and a second thread)"};
-	if (c.mode < 1 || c.mode > 8)
+	                                   "two fatal errors at once (audio callback and a second thread)",
+	                                   "error_screen() on main, then abort()",
+	                                   "error_screen() on a second thread, main asleep 7 s",
+	                                   "audio callback fails while main shows its own error_screen()"};
+	if (c.mode < 1 || c.mode > 11)
 	{
 		printf("[3ds] debug-fatal: unknown mode %d\n", c.mode);
 		fflush(stdout);
@@ -200,6 +211,19 @@ void fire(const Config& c)
 				}
 			}
 			break;
+		case 9:
+			error_screen("debug-fatal mode 9", "error_screen() on the main thread, then abort().");
+			abort();   // __wrap_abort: a screen was shown, so no second one
+		case 10:
+			start_thread(4);
+			svcSleepThread(7000000000LL);   // no service point: the request is not acknowledged
+			break;
+		case 11:
+			s_audio_fire = true;
+			error_screen("debug-fatal mode 11", "error_screen() on main while the audio thread fails.");
+			printf("[3ds] debug-fatal mode 11: error_screen() returned: exit(1) as alert_user()'s callers do\n");
+			fflush(stdout);
+			exit(1);
 		case 8:
 			if (c.audio_first)
 			{

@@ -940,7 +940,8 @@ item 14 in `NEXT-SPRINT.md`).
     `hidScanInput` (Luma dump 4). The hook comes first. On a thread other than main it
     hands the whole fatal path to the main thread (`fatal_from_other_thread()`, port code
     in `a1_3ds_platform.cpp`) and never returns; on main it records that a fatal path is
-    running (`s_fatal_active`) and returns, and upstream's `vhalt()` goes on as before (with
+    running (`s_fatal_active`) and keeps the message for `__wrap_abort` (upstream's `vhalt()`
+    only logs it on the 3DS, then ends in `abort()`), and upstream's `vhalt()` goes on as before (with
     the SDL audio thread parked it shows the error and ends the process itself: upstream's
     `shutdown_application()` would deadlock on the audio lock). Declared in
     `a1_3ds_platform.h`, which the file already includes under the same `#ifdef`. Port side

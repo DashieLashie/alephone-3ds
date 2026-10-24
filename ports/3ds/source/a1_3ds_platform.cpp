@@ -319,8 +319,13 @@ std::atomic<u32> s_audio_tid{0};          // the SDL audio thread (first timed_c
 std::atomic<int> s_hook_depth{0};         // inside apt_hook / the SDL event filter: no serving
 Handle s_fatal_never = 0;                 // an event that is never signalled
 void* s_main_tls = nullptr;               // the main thread's TLS block
+std::atomic<bool> s_fatal_main_took{false};  // main acknowledged the request (it did not get reclaimed)
 char s_fatal_title[128];
 char s_fatal_body[1024];
+// vhalt() on main: the message, kept for __wrap_abort (upstream's vhalt() ends in abort(),
+// and its own system_alert_user() only logs on the 3DS, so no screen is shown before that).
+std::atomic<bool> s_vhalt_pending{false};
+char s_vhalt_message[1024];
 
 bool on_main_thread()
 {
@@ -1227,6 +1232,10 @@ void error_screen(const std::string& title, const std::string& body)
 		fatal_from_other_thread(title.c_str(), body.c_str());
 	s_fatal_active = true;
 	error_screen_here(title, body, false);
+	// With the SDL audio thread parked the callers' exit(1) would run the atexit handlers
+	// (SoundManager::Shutdown -> SDL_CloseAudio) and block on the parked thread's mixer lock.
+	if (s_audio_parked)
+		fatal_exit();
 }
 
 namespace {
@@ -1404,6 +1413,11 @@ void fatal_from_other_thread(const char* title, const char* body)
 	// launcher and the DSP survive svcExitProcess is UNVERIFIED (5.6.4 item 5).
 	// Merge note (piece 4): in the c3d build error_screen_here() logs only and
 	// returns at once when a1_c3d_release_top() fails (citro3d still up).
+	// std::string and the console use the heap here, unlike step 1's request (static
+	// buffers): in the fallback main is blocked on a lock this thread holds or on one
+	// of the engine's, never inside newlib's malloc (malloc calls out to nothing), so the
+	// heap is usable; the remaining risk is a corrupted heap faulting the fallback,
+	// acceptable for a last resort.
 	error_screen_here(s_fatal_title, s_fatal_body, true);
 	log_raw("[3ds] fallback error screen left; svcExitProcess\n");
 	svcExitProcess();
@@ -1421,7 +1435,19 @@ void fatal_service_point()
 	if (s_hook_depth.load() != 0 || !s_fatal_ready.load(std::memory_order_acquire))
 		return;
 	if (s_fatal_acked.exchange(true))
-		return;   // already served or taken back
+	{
+		// Acknowledged by main earlier (it is in its own fatal path): carry on. Otherwise
+		// the requester took the request back and is drawing the fallback screen: main must
+		// not run on and draw over it (present_bottom redraws the HUD), it waits for the
+		// requester's svcExitProcess.
+		if (!s_fatal_main_took.load())
+		{
+			log_raw("[3ds] main thread: the request was taken back by its thread (fallback screen); blocking\n");
+			block_forever();
+		}
+		return;
+	}
+	s_fatal_main_took = true;
 	// Main is in a fatal path of its own (or serving): acknowledge, do not nest.
 	if (s_fatal_active.exchange(true))
 		return;
@@ -1474,8 +1500,10 @@ void vhalt_hook(const char* message)
 		error_screen("Aleph One stopped", message);
 		fatal_exit();
 	}
-	// Upstream's vhalt() goes on as before; its error screen and abort() find
-	// s_fatal_active set.
+	// Upstream's vhalt() goes on as before (SDL_Quit, a log line, abort()); __wrap_abort then
+	// shows this message on the error screen.
+	copy_text(s_vhalt_message, sizeof s_vhalt_message, message);
+	s_vhalt_pending = true;
 	s_fatal_active = true;
 }
 
@@ -1497,6 +1525,14 @@ extern "C" void __wrap_abort(void)
 		a1_3ds::fatal_from_other_thread("Aleph One stopped", what);
 	}
 	if (a1_3ds::s_error_shown)
-		a1_3ds::fatal_exit();   // a screen was shown already (vhalt()'s): no second one
-	__real_abort();
+		a1_3ds::fatal_exit();   // a screen was shown already: no second one (debug-fatal mode 9)
+	if (a1_3ds::s_vhalt_pending)
+	{
+		// vhalt() on main ends in abort(), and its own alert shows nothing on the 3DS (the
+		// 3DS screen is in alert_user(), which vhalt() does not call): show vhalt()'s message,
+		// not on_abort's generic one.
+		a1_3ds::error_screen("Aleph One stopped", a1_3ds::s_vhalt_message);
+		a1_3ds::fatal_exit();
+	}
+	__real_abort();   // a bare abort() or halt(): on_abort -> die_with_message
 }
