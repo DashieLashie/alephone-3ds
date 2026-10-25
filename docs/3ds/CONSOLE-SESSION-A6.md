@@ -22,6 +22,37 @@ console the whole time.
 4. For background only, if a result is surprising: `docs/3ds/CITRO3D_DESIGN.md` 5.6.1
    (HOME > Close), 5.6.3 (the fatal hand-off) and 5.6.4 (the claims this session verifies).
 
+## Progress: session 2 (2026-10-25), stopped after B5 and the start of B6
+
+Console (New 3DS), `build-3ds-c3d`, 192.168.100.72, HUD + Map @60, every run started from the
+Homebrew Launcher, logs read from the card after each run (raw logs in
+`/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw/a6/B1.log` .. `B5.log`, outside git). Not yet
+written into `NEXT-SPRINT.md` / `CITRO3D_DESIGN.md` 5.6.4: do that in the final recording step.
+
+| Run | Result |
+| --- | --- |
+| B1, mode 1 | PASS. Bottom screen "Aleph One stopped / debug-fatal mode 1: vhalt() on the main thread", not Luma's. Log: `[c3d] gfxExit call #1 (citro3d up: release first)`, release (queue retired after 0 ms, `C3D_Fini` returned), `FATAL:`, `ERROR: Aleph One stopped`, `error screen d6: thread main`, `gfxExit call #2 (citro3d down)`, `exit`. The relaunch hit mode 1 again (flag still set): launcher round trip works. |
+| B2, mode 2 | PASS. Screen "abort() was called on thread 1781 ..."; log: `fatal error on thread 1781: handed to the main thread`, then the same release and error screen on main, `exit` (+103 s: the user read it). |
+| B3, mode 3 | PASS. vhalt() on thread 1903, handed to main, release (0 ms), error screen, `exit`. |
+| B4, mode 4 | PASS. `error_screen() on a second thread` (thread 2025) handed to main; **closes the critic's open P1 minor 4 on hardware** (a non-main thread never touches citro3d). |
+| B5, mode 5 | PASS. In a HUD + Map game (681 presents): thread 2147 handed to main, release 0 ms, one screen, text stayed, launcher back. |
+
+No new Luma dump in any run (still dumps 0-6). Each release logged `queue retired after 0 ms`
+(55-270 ms since the last frame end), `final: ... gate_skipped=0 ... gx_refused=0`.
+
+**State of the card when we stopped (clean it up first thing next time):** `debug-fatal` = mode 6
+is on the card; `/3ds/alephone.3dsx` is the GPU build (`build-3ds-c3d`); prefs were set to
+`bottom_screen=0 fps_target=60` (the user's prefs, same as before). Backups of the user's
+original: `build-3ds/hw/a6/b/alephone-user-before.3dsx` (identical to `alephone-before.3dsx`) and
+`b/prefs-before2`. B6 mode 6 was installed but **not run**.
+
+**Left, in order:** B6 (mode 6, then 6b: the DSP must fall silent after the exit and after the
+relaunch), B7 (modes 10, 11), shipping-build spot check (`build-3ds/alephone.3dsx`, repeat B1 and
+B2), part C (netloader, `kill -STOP` 3dslink ~10 s; ftpd must not run), B8 and part D only if the
+user says yes, then Cleanup and Recording (docs, `stage10: A6 console session results (part
+B/C/D)` on `stage10-c3d`, identical item 14/15/16 text on `3ds-port`, backup bundle,
+memory file).
+
 ## State at handoff
 
 | Branch | Head | Contents |
