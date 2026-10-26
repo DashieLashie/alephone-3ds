@@ -37,6 +37,9 @@ enum Zone
 	Overlay,    // this profiler's overlay, once a second; not in the frame times
 #ifdef A1_RENDER_C3D
 	C3dWait,    // C3D_FrameBegin(0): waiting for the previous citro3d frame (inside Present)
+	C3dFill,    // the present's staging fill (inside Present; design 5.7.11)
+	C3dUpload,  // two_frame: frame D's C3D_FrameBegin(0), the wait for the upload (inside Present)
+	C3dVblank,  // the present's gspWaitForVBlank() (inside Present)
 #endif
 	kZoneCount
 };

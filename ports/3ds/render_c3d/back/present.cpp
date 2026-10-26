@@ -16,6 +16,10 @@
 	     the previous swap is pending), C3D_FrameEnd(GX_CMDLIST_FLUSH). citro3d transfers
 	     the target to the framebuffer and swaps, asynchronously.
 
+	debug-c3d "two_frame 1" (plan B-a, design 5.7.4): the same steps as two C3D frames. Frame U:
+	steps 1-3 (fill, flush, upload transfer), C3D_FrameEnd(0): nothing drawn, no framebuffer
+	transfer. Frame D: C3D_FrameBegin(0) (it waits for U: zone c3d_upload), steps 4-5.
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -39,6 +43,10 @@
 #include <vector>
 
 #include "a1_c3d_shaders_shbin.h"
+
+#ifdef A1_PROFILE
+#include "a1_3ds_profile.h"
+#endif
 
 // CSeries/csalerts_sdl.cpp (test_vhalt only)
 extern void vhalt(const char* message);
@@ -294,18 +302,62 @@ void test_vhalt_thread(void* arg)
 	vhalt("debug-c3d test_vhalt 3 (second thread)");   // SDL_Quit's gfxExit, then the error screen
 }
 
+// Which picture the present texture holds, i.e. how TEV stage 0 reads it. B-a has one: plain (the
+// texel as it is, as the staging is filled). B-b adds the reordered variant of design 5.7.3.
+enum class Swizzle { Plain };
+
+// TEV stage 0 and the colour write mask, set in full before every draw of the present texture
+// (design 5.7.3, critic round 1 finding 1): the texture's reading may differ from the previous
+// draw's, so nothing is left to what an earlier draw or present_init set. C3D_GetTexEnv() marks
+// the stage dirty (texenv.h:24).
+void set_present_draw(Swizzle swizzle)
+{
+	C3D_TexEnv* env = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(env);
+	switch (swizzle)
+	{
+		case Swizzle::Plain:
+			// RGB and alpha: texture 0 as it is (REPLACE of source 1; sources 2 and 3 unused).
+			C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+			C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+			C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+			C3D_TexEnvColor(env, 0xFFFFFFFF);   // C3D_TexEnvInit's value; no source reads it
+			C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+			break;
+	}
+}
+
 // The GPU state of a present and its one quad into the screen target (step 4 below; also the
 // close_frame forced frame).
 void draw_present_quad()
 {
+	set_present_draw(Swizzle::Plain);
 	C3D_CullFace(GPU_CULL_NONE);
-	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
 	C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	C3D_FrameDrawOn(s_target);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
 	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+}
+
+// frame_begin() for a present, and what a failed one means for the caller (the same handling for
+// the one frame of a P1 present and for each of the two of two_frame).
+enum class Begin { Ok, ReturnTrue, ReturnFalse };
+
+Begin begin_present_frame(FrameZone zone)
+{
+	const FrameStart fs = frame_begin(zone);
+	if (fs == FrameStart::Abandoned)
+		return Begin::ReturnTrue;   // citro3d abandoned (top surrendered): draw nothing, and no CPU present (5.6.1 b)
+	if (fs != FrameStart::Ok)
+	{
+		printf("[c3d] C3D_FrameBegin(0) returned false (already inside a frame): giving the top screen back\n");
+		release_and_fini();
+		return Begin::ReturnFalse;
+	}
+	return Begin::Ok;
 }
 
 } // namespace
@@ -398,10 +450,7 @@ bool present_init()
 	BufInfo_Add(buf, s_vbo, sizeof(Vertex), 2, 0x10);
 
 	C3D_TexBind(0, &s_tex);
-	C3D_TexEnv* env = C3D_GetTexEnv(0);
-	C3D_TexEnvInit(env);
-	C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-	C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	set_present_draw(Swizzle::Plain);   // and again before every draw
 	return true;
 }
 
@@ -541,16 +590,27 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		src_pitch = src_w * 4;
 	}
 
-	// 1. The previous C3D frame has retired when this returns.
-	const FrameStart fs = frame_begin();
-	if (fs == FrameStart::Abandoned)
-		return true;   // citro3d abandoned (top surrendered): draw nothing, and no CPU present (5.6.1 b)
-	if (fs != FrameStart::Ok)
+	// Design 5.7.4 (plan B-a): with two_frame the staging upload is a C3D frame of its own (U),
+	// and the draw another (D), which begins only when U has retired.
+	const bool two = cfg.two_frame;
+	static bool logged_two = false;
+	if (two && !logged_two)
 	{
-		printf("[c3d] C3D_FrameBegin(0) returned false (already inside a frame): giving the top screen back\n");
-		release_and_fini();
-		return false;
+		logged_two = true;
+		printf("[c3d] present: two_frame 1: frame U (fill, flush, upload) and frame D (draw) per present\n");
 	}
+
+	// 1. The previous C3D frame has retired when this returns.
+	switch (begin_present_frame(FrameZone::Wait))
+	{
+		case Begin::Ok:
+			break;
+		case Begin::ReturnTrue:
+			return true;
+		case Begin::ReturnFalse:
+			return false;
+	}
+	sample_drawing_time(GpuTime::Draw);   // the previous present's draw (and framebuffer transfer)
 
 	// present_diff: the previous checked present has reached its framebuffer now.
 	if (s_diff_fb)
@@ -565,24 +625,33 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 	}
 
 	// 2. Staging, written only now that the previous transfer has read the old one.
-	if (src_w == kSrcW && src_h == kSrcH)
 	{
-		if (!s_logged_half)
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dFill);
+#endif
+		if (src_w == kSrcW && src_h == kSrcH)
 		{
-			s_logged_half = true;
-			printf("[c3d] present: 640x480 -> 320x240 (UHADD8 box, << 8) centred, GPU upload\n");
+			if (!s_logged_half)
+			{
+				s_logged_half = true;
+				printf("[c3d] present: 640x480 -> 320x240 (UHADD8 box, << 8) centred, GPU upload\n");
+			}
+			fill_half(static_cast<const u8*>(src), src_pitch);
 		}
-		fill_half(static_cast<const u8*>(src), src_pitch);
-	}
-	else
-	{
-		if (src_w == kScreenW && src_h == kScreenH && !s_logged_native)
+		else
 		{
-			s_logged_native = true;
-			printf("[c3d] present: 400x240 -> staging 1:1, GPU upload\n");
+			if (src_w == kScreenW && src_h == kScreenH && !s_logged_native)
+			{
+				s_logged_native = true;
+				printf("[c3d] present: 400x240 -> staging 1:1, GPU upload\n");
+			}
+			fill_other(static_cast<const u8*>(src), src_pitch, src_w, src_h);
 		}
-		fill_other(static_cast<const u8*>(src), src_pitch, src_w, src_h);
 	}
+	// two_frame: the staging is flushed before frame U ends (the transfer starts at its C3D_FrameEnd);
+	// otherwise at step 5, as in P1.
+	if (two)
+		GSPGPU_FlushDataCache(s_staging, kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
 
 	// 3. Linear -> tiled into the present texture: the first GX operation of the frame.
 	if (!gx_op([&] {
@@ -590,6 +659,42 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		                            GX_BUFFER_DIM(kTexW, kTexH), kUploadTransferFlags);
 	    }))
 		printf("[c3d] GX budget: present upload refused\n");
+
+	if (two)
+	{
+		// End of frame U: the upload only, no linked target drawn (no framebuffer transfer, no swap).
+		frame_end(0, trace);
+		// 5.7.6: aptShouldClose() (and the GPU right) can change between the frames. Do not draw while
+		// the gate condition holds; retire U (bounded: frame_begin() sees the gate closed) and end an
+		// empty frame. Only with suspend_gate 1 (0 is the deliberate reproduction: D draws as today).
+		if (cfg.suspend_gate && gate_closed())
+		{
+			printf("[c3d] two_frame: the gate closed between frames U and D: frame D not drawn\n");
+			fflush(stdout);
+			switch (begin_present_frame(FrameZone::Wait))
+			{
+				case Begin::Ok:
+					break;
+				case Begin::ReturnTrue:
+					return true;
+				case Begin::ReturnFalse:
+					return false;
+			}
+			frame_end(0, true);
+			return true;
+		}
+		// Frame D: begins when U has retired, i.e. the upload has read the staging.
+		switch (begin_present_frame(FrameZone::Upload))
+		{
+			case Begin::Ok:
+				break;
+			case Begin::ReturnTrue:
+				return true;
+			case Begin::ReturnFalse:
+				return false;
+		}
+		sample_drawing_time(GpuTime::Upload);   // frame U's upload
+	}
 
 	// 4. One quad into the screen target (or, calibrating, a flat frame-indexed colour).
 	if (cfg.calibrate)
@@ -609,11 +714,17 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 	// 5. The transfer's destination is taken at C3D_FrameEnd, and the previous queue (with
 	// its swap request) finished in step 1: if that swap has not taken effect yet (next
 	// VBlank), the buffer gfxGetFramebuffer() would return is still on screen. Wait.
-	GSPGPU_FlushDataCache(s_staging, kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
+	if (!two)
+		GSPGPU_FlushDataCache(s_staging, kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
 	if (trace)
 		crumb("before the VBlank wait");
 	if (gspIsPresentPending(GSP_SCREEN_TOP))
+	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dVblank);
+#endif
 		gspWaitForVBlank();
+	}
 	if (s_odd_capture_pending)
 	{
 		// The previous present was the odd picture; its swap has taken effect (above):

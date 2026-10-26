@@ -43,9 +43,15 @@ GatePresent gate_present();
 // Diagnostic d3: one "[c3d] d3 ..." line (the caller decides whether the gate condition holds).
 void crumb(const char* what);
 
-// C3D_FrameBegin(0) (zone c3d_wait). With the gate condition true (only reachable with
-// suspend_gate 0) the wait is bounded: retire_wait(), and on timeout citro3d is abandoned.
-FrameStart frame_begin();
+// Which profiler zone (A1_PROFILE builds; no effect otherwise) a frame_begin() is timed in:
+// Wait = c3d_wait (the default: the previous frame's retirement), Upload = c3d_upload (two_frame's
+// frame D: the wait for frame U's upload, design 5.7.4). The zone is opened inside frame_begin()
+// itself: a wrapper around the call would hand the time to the nested c3d_wait.
+enum class FrameZone { Wait, Upload };
+// C3D_FrameBegin(0) (zone c3d_wait, or `zone`). With the gate condition true (only reachable with
+// suspend_gate 0, or between frames U and D) the wait is bounded: retire_wait(), and on timeout
+// citro3d is abandoned.
+FrameStart frame_begin(FrameZone zone = FrameZone::Wait);
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) with the queue accounting of the frame closed.
 // `gate_was_closed`: the gate condition held when the present began (diagnostic d2).
 void frame_end(int drawn_linked_targets, bool gate_was_closed = false);
@@ -83,6 +89,12 @@ bool gfx_exit_hook();
 void count_present();
 void count_odd_surface();
 void stats_tick();   // logs "[c3d] stats ..." once a second
+// C3D_GetDrawingTime() (the last *finished* queue) right after a successful frame_begin() of a
+// present, averaged into the stats line (design 5.7.3). `Draw`: the previous frame's draw and
+// framebuffer transfer (after the first or only frame's begin); `Upload`: frame U, the staging
+// upload (after two_frame's frame D's begin).
+enum class GpuTime { Draw, Upload };
+void sample_drawing_time(GpuTime which);
 
 // --- teardown, called by context.cpp; defined in present.cpp ---
 // close_frame (console run 1): one frame that draws the present quad from the present texture

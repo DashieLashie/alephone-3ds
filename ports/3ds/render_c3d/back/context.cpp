@@ -68,6 +68,8 @@ uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
 
 unsigned s_presents = 0, s_odd = 0, s_false_returns = 0, s_releases = 0, s_gfx_exits = 0;
 unsigned s_stats_presents = 0;   // presents at the previous stats line
+double s_gpu_ms[2] = {0, 0};     // C3D_GetDrawingTime() sums since the previous stats line, by GpuTime
+unsigned s_gpu_n[2] = {0, 0};
 uint64_t s_stats_tick = 0;
 
 constexpr uint64_t kTicksPerSecond = SYSCLOCK_ARM11;
@@ -85,10 +87,11 @@ void load_config()
 	std::vector<std::string> problems;
 	config_parse(s_cfg, text.str(), problems);
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
-	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d\n",
+	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
+	       "two_frame %d\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
-	       s_cfg.force_abandon, s_cfg.close_frame);
+	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame);
 	if (s_cfg.present_diff && s_cfg.calibrate)
 		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
 	for (const std::string& p : problems)
@@ -410,7 +413,7 @@ void crumb(const char* what)
 	fflush(stdout);
 }
 
-FrameStart frame_begin()
+FrameStart frame_begin(FrameZone zone)
 {
 	if (!s_up || s_in_frame)
 		return FrameStart::AlreadyInFrame;
@@ -418,7 +421,10 @@ FrameStart frame_begin()
 	bool ok;
 	{
 #ifdef A1_PROFILE
-		A1_PROF_SCOPE(C3dWait);
+		::a1_3ds::prof::Scope prof_scope(zone == FrameZone::Upload ? ::a1_3ds::prof::C3dUpload
+		                                                          : ::a1_3ds::prof::C3dWait);
+#else
+		(void)zone;
 #endif
 		// With the gate open this is the measured path, unchanged (never C3D_FRAME_SYNCDRAW, design
 		// 2.4). With the gate condition true (only reachable with suspend_gate 0, or from
@@ -491,17 +497,32 @@ void count_odd_surface()
 	++s_odd;
 }
 
+void sample_drawing_time(GpuTime which)
+{
+	const int i = which == GpuTime::Upload ? 1 : 0;
+	s_gpu_ms[i] += static_cast<double>(C3D_GetDrawingTime());
+	++s_gpu_n[i];
+}
+
 void stats_tick()
 {
 	const uint64_t now = svcGetSystemTick();
 	if (now - s_stats_tick < kTicksPerSecond)
 		return;
 	s_stats_tick = now;
+	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3): `draw` = the previous
+	// frame's draw + framebuffer transfer; `upload` (two_frame 1 only) = the staging upload.
+	char gpu[64];
+	int n = snprintf(gpu, sizeof gpu, " gpu_ms draw=%.2f", s_gpu_n[0] ? s_gpu_ms[0] / s_gpu_n[0] : 0.0);
+	if (s_cfg.two_frame)
+		snprintf(gpu + n, sizeof gpu - n, " upload=%.2f", s_gpu_n[1] ? s_gpu_ms[1] / s_gpu_n[1] : 0.0);
 	printf("[c3d] stats presents=%u (+%u) odd_surface=%u gx_high_water=%d gx_refused=%u "
-	       "cmdbuf_usage=%.4f present_screen_false_returns=%u gate_skipped=%u\n",
+	       "cmdbuf_usage=%.4f present_screen_false_returns=%u gate_skipped=%u%s\n",
 	       s_presents, s_presents - s_stats_presents, s_odd, s_gx.high_water(), s_gx.refused(),
-	       static_cast<double>(C3D_GetCmdBufUsage()), s_false_returns, s_gate.total_skipped());
+	       static_cast<double>(C3D_GetCmdBufUsage()), s_false_returns, s_gate.total_skipped(), gpu);
 	s_stats_presents = s_presents;
+	s_gpu_ms[0] = s_gpu_ms[1] = 0;
+	s_gpu_n[0] = s_gpu_n[1] = 0;
 }
 
 } // namespace back

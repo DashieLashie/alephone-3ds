@@ -75,6 +75,8 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.force_abandon);
 	if (key == "close_frame")
 		return parse_flag(value, cfg.close_frame);
+	if (key == "two_frame")
+		return parse_flag(value, cfg.two_frame);
 	if (key == "retire_wait_ms")
 	{
 		long v = 0;

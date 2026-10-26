@@ -26,6 +26,16 @@ static void test_config()
 	Config d;
 	CHECK(d.suspend_gate && d.retire_wait_ms == 500 && !d.force_abandon && !d.close_frame);
 	CHECK(d.present_gpu && d.test_vhalt == 0);
+	CHECK(!d.two_frame);   // plan B-a: off by default
+
+	// two_frame (design 5.7.11)
+	Config t;
+	std::vector<std::string> tproblems;
+	config_parse(t, "present gpu\ntwo_frame 1   # frames U and D\npresent_diff 30\n", tproblems);
+	CHECK(tproblems.empty() && t.two_frame && t.present_gpu && t.present_diff == 30);
+	CHECK(config_apply(t, "two_frame", "0") && !t.two_frame);
+	CHECK(!config_apply(t, "two_frame", "2") && !t.two_frame);
+	CHECK(!config_apply(t, "two_frame", "yes") && !config_apply(t, "two_frame", ""));
 
 	Config c;
 	std::vector<std::string> problems;

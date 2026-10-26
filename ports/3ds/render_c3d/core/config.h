@@ -33,6 +33,13 @@
 	  close_frame 0|1   the release, when the gate condition holds, first ends one frame that draws
 	                    the present quad (the GPU work of a present), console run 1
 
+	Key of plan B-a (design 5.7.4 and 5.7.11, the zero-copy present's pre-measurement):
+
+	  two_frame 0|1     default 0 = one C3D frame per present, as in P1. 1 = the present runs as two
+	                    C3D frames: U (staging fill, flush, upload transfer, no draw) and D (wait for
+	                    U, then the quad); only to measure the cost structure of plan B-b. With
+	                    suspend_gate 1 the gate is checked again between U and D
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -58,6 +65,7 @@ struct Config
 	unsigned retire_wait_ms = 500;   // 0 = unbounded
 	bool force_abandon = false;
 	bool close_frame = false;
+	bool two_frame = false;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
