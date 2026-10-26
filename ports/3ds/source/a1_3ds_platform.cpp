@@ -106,6 +106,12 @@ extern "C" void __system_allocateHeaps(void)
 #define A1_3DS_DEFAULT_SCENARIO "Marathon2"
 #endif
 
+// libctru's exit path (system/ctru_init.c, services/apt.c): what __libctru_exit() calls
+// last (the loader's return address, or aptExitProcess = APT_CloseApplication after
+// aptExit()'s close branch). Not in a header. Read by d7 and the fallback's exit
+// (docs/3ds/CITRO3D_DESIGN.md 5.6.3 step 3a).
+extern "C" void (*__system_retAddr)(void);
+
 namespace a1_3ds {
 
 // source/selftest.cpp (engine headers; kept apart from <3ds.h>)
@@ -307,7 +313,10 @@ double ms_since_boot();
 // top-level service point (fatal_service_point(): present_screen(), present_bottom(),
 // __wrap_hidScanInput on main), draws the error screen and ends the process
 // (fatal_exit()). If main does not acknowledge in 5 s the requester draws the
-// screen itself (the fallback) and ends the process without __appExit.
+// screen itself (the fallback) and ends the process through aptExit() and
+// APT_CloseApplication, without __appExit's teardown and without freeing the heap
+// (step 3a, behind a 5 s watchdog; the bare svcExitProcess() it replaced made the
+// system restart the console).
 //
 // Invariant: no fatal error may be raised from inside tee_write() or newlib's
 // malloc. The raw log writes and the static buffers below assume that the
@@ -319,6 +328,8 @@ std::atomic<bool> s_fatal_acked{false};   // main took the request, or the reque
 std::atomic<bool> s_audio_parked{false};  // the SDL audio thread failed (or lost): see fatal_exit()
 std::atomic<bool> s_fatal_active{false};  // main is in a fatal path of its own, or serving one
 std::atomic<u32> s_audio_tid{0};          // the SDL audio thread (first timed_callback call)
+std::atomic<bool> s_fatal_fallback{false};   // the requester runs the fallback (step 3a): apt_hook stays quiet
+std::atomic<const char*> s_exit_step{"fallback start"};   // the fallback's current step, named by the watchdog
 std::atomic<int> s_hook_depth{0};         // inside apt_hook / the SDL event filter: no serving
 Handle s_fatal_never = 0;                 // an event that is never signalled
 void* s_main_tls = nullptr;               // the main thread's TLS block
@@ -1070,6 +1081,16 @@ bool boot_begin(int& argc, char**& argv)
 	bool is_new3ds = false;
 	APT_CheckNew3DS(&is_new3ds);
 	printf("[3ds] Aleph One 3DS boot (%s 3DS)\n", is_new3ds ? "New" : "Old");
+	// d7 (docs/3ds/CITRO3D_DESIGN.md 5.6.3 step 3a): which aptExit() branch the launcher's run
+	// flags select, and what libctru will call last.
+	{
+		const u32 flags = envGetSystemRunFlags();
+		printf("[3ds] env: homebrew %d, run flags 0x%lX (aptworkaround %d, aptreinit %d, aptchainload %d), "
+		       "return address %s\n",
+		       envIsHomebrew() ? 1 : 0, static_cast<unsigned long>(flags),
+		       (flags & RUNFLAG_APTWORKAROUND) ? 1 : 0, (flags & RUNFLAG_APTREINIT) ? 1 : 0,
+		       (flags & RUNFLAG_APTCHAINLOAD) ? 1 : 0, __system_retAddr ? "set" : "null");
+	}
 	if (s_link_fd >= 0)
 		printf("[3ds] launched via 3dslink from %s; output mirrored to the host\n",
 		       inet_ntoa(__3dslink_host));
@@ -1386,6 +1407,26 @@ void copy_text(char* dst, size_t size, const char* src)
 		dst[i] = src[i];
 	dst[i] = 0;
 }
+
+// 5.6.3 step 3a: the fallback's exit watchdog. If a step of the exit hangs (aptExit joins
+// the APT event thread, gfxExit waits for a VBlank), the process still ends the way the
+// bare svcExitProcess() did. A small stack: no printf here, the line is built by hand.
+void fallback_watchdog(void*)
+{
+	svcSleepThread(5000000000LL);
+	char line[160] = "[3ds] fallback exit: watchdog fired (stuck in ";
+	strncat(line, s_exit_step.load(), 60);
+	strcat(line, "); svcExitProcess\n");
+	log_raw(line);
+	svcExitProcess();
+}
+
+// Logs the step raw and publishes it for the watchdog.
+void fallback_step(const char* step, const char* text)
+{
+	s_exit_step.store(step);
+	log_raw(text);
+}
 } // namespace
 
 // 5.6.3 step 1-3: a fatal error on a thread other than main.
@@ -1431,9 +1472,11 @@ void fatal_from_other_thread(const char* title, const char* body)
 	snprintf(line, sizeof line, "[3ds] fatal error on thread %lu: not acknowledged in 5 s; shown on this thread\n",
 	         static_cast<unsigned long>(tid));
 	log_raw(line);
-	// The fallback (main is blocked): this thread draws and ends the process
-	// without __appExit's teardown under a live main thread. Whether HOME, the
-	// launcher and the DSP survive svcExitProcess is UNVERIFIED (5.6.4 item 5).
+	// The fallback (main is blocked): this thread draws and ends the process through
+	// aptExit() and APT_CloseApplication (step 3a), not __appExit's teardown under a live
+	// main thread, and without the heap frees that come before them in __libctru_exit.
+	// The bare svcExitProcess() this replaced made the system restart the console
+	// (A6, 2026-10-26); whether the missing APT close was the cause is UNVERIFIED (5.6.4 item 5).
 	// In the c3d build error_screen_here() logs only and returns at once when
 	// a1_c3d_release_top() fails (citro3d still up).
 	// std::string and the console use the heap here, unlike step 1's request (static
@@ -1441,8 +1484,52 @@ void fatal_from_other_thread(const char* title, const char* body)
 	// of the engine's, never inside newlib's malloc (malloc calls out to nothing), so the
 	// heap is usable; the remaining risk is a corrupted heap faulting the fallback,
 	// acceptable for a last resort.
+	s_fatal_fallback.store(true);   // before the screen: apt_hook (HOME, a close order) stays quiet
 	error_screen_here(s_fatal_title, s_fatal_body, true);
-	log_raw("[3ds] fallback error screen left; svcExitProcess\n");
+
+	// Step 3a.1: the watchdog starts after the screen (which waits for A/START), so only
+	// the exit below is timed. 4 KiB stack, priority 0x18, detached.
+	fallback_step("watchdog start", "[3ds] fallback exit: starting the 5 s watchdog\n");
+	if (!threadCreate(fallback_watchdog, nullptr, 4 * 1024, 0x18, -2, true))
+		log_raw("[3ds] fallback exit: watchdog thread could not be created; going on without it\n");
+
+#ifndef A1_RENDER_C3D
+	// Step 3a.2 (software build only): what every clean exit did before its APT close. With
+	// citro3d up (the c3d build) this thread must not touch the GPU state (5.6.2 a): gspExit
+	// joins the thread that runs citro3d's callbacks and main may be inside a C3D frame, and
+	// the only gfxExit reachable there, __wrap_gfxExit, printf's through the tee lock main
+	// may hold. So mode 7 (software) vs 6b/10 (GPU) also tells whether gspExit matters.
+	fallback_step("gfxExit", "[3ds] fallback exit: gfxExit\n");
+	gfxExit();
+#endif
+
+	// Step 3a.3: aptExit() once. Its branch depends on the launcher's run flags (d7).
+	{
+		char line[200];
+		const u32 flags = envGetSystemRunFlags();
+		snprintf(line, sizeof line,
+		         "[3ds] fallback exit: should close %d, run flags 0x%lX (aptworkaround %d, aptreinit %d, "
+		         "aptchainload %d), return address %s; aptExit\n",
+		         aptShouldClose() ? 1 : 0, static_cast<unsigned long>(flags),
+		         (flags & RUNFLAG_APTWORKAROUND) ? 1 : 0, (flags & RUNFLAG_APTREINIT) ? 1 : 0,
+		         (flags & RUNFLAG_APTCHAINLOAD) ? 1 : 0, __system_retAddr ? "set" : "null");
+		fallback_step("aptExit", line);
+	}
+	void (*const ret_before)(void) = __system_retAddr;
+	aptExit();
+
+	// Step 3a.4: the close branch set __system_retAddr to aptExitProcess (APT_CloseApplication,
+	// "kills us"): call it, as __libctru_exit() would, minus the heap frees. Any other branch
+	// (reinit, chainload, crippled, or aptExit not the last reference) leaves it alone; the
+	// loader's own return address expects a freed heap, so end with svcExitProcess().
+	if (__system_retAddr && __system_retAddr != ret_before)
+	{
+		fallback_step("APT_CloseApplication", "[3ds] fallback exit: APT_CloseApplication via __system_retAddr\n");
+		__system_retAddr();
+		log_raw("[3ds] fallback exit: APT_CloseApplication returned; svcExitProcess\n");
+	}
+	else
+		log_raw("[3ds] fallback exit: svcExitProcess (aptExit branch: reinit/chainload/crippled: retAddr unchanged)\n");
 	svcExitProcess();
 }
 
@@ -1536,6 +1623,16 @@ void vhalt_hook(const char* message)
 	copy_text(s_vhalt_message, sizeof s_vhalt_message, message);
 	s_vhalt_pending = true;
 	s_fatal_active = true;
+}
+
+bool fatal_fallback_active()
+{
+	return s_fatal_fallback.load();
+}
+
+void fatal_log_raw(const char* text)
+{
+	log_raw(text);
 }
 
 unsigned long main_thread_id()

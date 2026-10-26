@@ -692,6 +692,26 @@ void on_resume(const char* why)
 // thread) and around library applets such as the keyboard.
 void apt_hook(APT_HookType hook, void*)
 {
+	// The fatal fallback (5.6.3 step 3a) runs on the requesting thread: its error screen
+	// pumps aptMainLoop() (HOME) and its exit runs aptExit() (ONEXIT under a close order),
+	// so hooks arrive off main. No printf (the tee lock may be main's), no SDL call (the
+	// mixer lock may be too): one raw line and out.
+	if (fatal_fallback_active())
+	{
+		u32 tid = 0;
+		svcGetThreadId(&tid, CUR_THREAD_HANDLE);
+		if (tid != main_thread_id())
+		{
+			const char* name = hook == APTHOOK_ONSUSPEND ? "ONSUSPEND" : hook == APTHOOK_ONRESTORE ? "ONRESTORE"
+			                   : hook == APTHOOK_ONSLEEP ? "ONSLEEP" : hook == APTHOOK_ONWAKEUP ? "ONWAKEUP"
+			                   : hook == APTHOOK_ONEXIT ? "ONEXIT" : "?";
+			char line[96] = "[3ds] apt hook ";
+			strcat(line, name);
+			strcat(line, " on the fallback thread: ignored\n");
+			fatal_log_raw(line);
+			return;
+		}
+	}
 	FatalGuard guard;   // no fatal hand-off served inside libctru's APT hook loop
 	// d1 (docs/3ds/CITRO3D_DESIGN.md 5.6.1): every hook, the thread it runs on and the
 	// rights state. Expected: the main thread, gpu right 1 at ONSUSPEND and ONRESTORE, and
