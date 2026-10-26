@@ -1133,6 +1133,10 @@ B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    `two_frame 1` would raise it to ~0.7-0.9 ms if it carried over). Functional run passes. **Next: the
    user's choice: build B-b anyway, stop B at the design (B-a stays as an off-by-default
    diagnostic), or revert B-a.**
+   **Decision (user, 2026-10-26): build B-b, but on its own branch `stage10-bb` (worktree
+   `.claude/worktrees/stage10-bb`, from `8626f3065`), not merged into `stage10-c3d`. The renderer
+   (plan C, M0 first) goes on `stage10-c3d` meanwhile. B-b is re-measured at 60 fps once the
+   renderer exists, and merged only if it helps there.**
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
