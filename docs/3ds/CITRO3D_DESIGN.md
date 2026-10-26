@@ -1710,6 +1710,11 @@ VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
 
 1. The console's fill share of the 2.03 ms `present` (estimate 1.0-1.5 ms) and the upload's GPU
    time (estimate 0.2-0.6 ms): the `zero_copy` A/B series and `c3d_wait`.
+   *Console (New 3DS), 2026-10-26 (B-a series, `PERF.md` "Stage 10 B-a"): **VERIFIED**: fill 1.11-1.15 ms
+   (inside the estimate), upload wait 0.61-0.62 ms every run (above it). The rule's saving is
+   0.435 / 0.350 / 0.355 ms on L0 / L6 / L20: **below 0.5 ms, no-go for B-b.** Not in the rule: `bottom`
+   falls ~0.4 ms with `two_frame 1`, which would raise the saving to ~0.7-0.9 ms if it carried to B-b
+   (UNVERIFIED). The decision rests with the user.*
 2. One-channel colour write masks on the PICA (read-modify-write with `COLORBUFFER_READ` 0xF):
    `present_diff` 0 on the console.
 3. The GPU time of three fills, and whether they push the swap late @60: `C3D_GetDrawingTime()`
@@ -2078,7 +2083,9 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     modes 1-4, 6, 6b), shown by the main thread, exactly one screen each; the
     launcher starts again after each.
     Optional: mode 7 (the fallback's `svcExitProcess` without `aptExit`).
-16. 5.7 (plan B): B-a's `two_frame 0`/`1` series @30 decides B-b (5.7.11); then B-b's one-channel
+16. 5.7 (plan B): B-a's `two_frame 0`/`1` series @30 decides B-b (5.7.11) (*run on the console
+    2026-10-26: saving 0.435 / 0.350 / 0.355 ms, below the 0.5 ms rule; `present_diff` 0 with
+    `two_frame 1` over 151 checks; see 5.7.10 item 1*); then B-b's one-channel
     write masks and TEV operands give `present_diff` 0; the upload wait (`c3d_upload`) and the three
     fills' drawing time; the `zero_copy 0`/`1` series decide whether B-b is kept (5.7.9, 5.7.10).
 

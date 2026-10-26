@@ -1208,6 +1208,45 @@ stats line's `gpu_ms` are not meaningful), so **the go / no-go for B-b is the co
 present total `two_frame 0`) ≥ 0.5 ms @30 on L0, L6 and L20). Not exercised in Azahar: the gate
 closing between frames U and D (a real Close landing there).
 
+### Console (New 3DS), 2026-10-26: the B-a series
+
+HUD + Map @30, `build-3ds-c3d-prof`, 2 runs per cell, `two_frame 0` and `1` interleaved (L0 tf0 a, tf1 a,
+tf0 b, tf1 b; then L6, L20). All 12 runs `gaps=0`, fps 30.63-30.67; every transcript's `[c3d] debug-c3d:`
+line shows the intended `two_frame`. Raw transcripts: `build-3ds/hw/b0/` (not in git). Means of the two
+runs, ms per frame (present total = `present` + `c3d_wait` + `c3d_fill` + `c3d_upload` + `c3d_vblank`):
+
+| Level | two_frame | present | c3d_fill | c3d_upload | c3d_vblank | present total | bottom | blit | busy | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| L0 | 0 | 0.93 | 1.14 | 0.00 | 0.00 | 2.065 | 2.96 | 0.96 | 12.82 | 50.7-53.0 |
+| L0 | 1 | 1.01 | 1.15 | 0.61 | 0.00 | 2.770 | 2.54 | 0.96 | 13.08 | 51.0-60.0 |
+| L6 | 0 | 0.90 | 1.12 | 0.00 | 0.00 | 2.015 | 2.88 | 0.96 | 11.97 | 47.2-50.1 |
+| L6 | 1 | 1.05 | 1.13 | 0.62 | 0.00 | 2.785 | 2.46 | 0.95 | 12.31 | 51.5-63.5 |
+| L20 | 0 | 0.94 | 1.12 | 0.00 | 0.00 | 2.055 | 2.97 | 0.95 | 11.96 | 47.6-50.5 |
+| L20 | 1 | 1.08 | 1.13 | 0.62 | 0.00 | 2.820 | 2.61 | 0.94 | 12.35 | 50.2-55.3 |
+
+**Verdict by the 5.7.11 rule** (saving = `c3d_fill` of the tf0 runs − (present total tf1 − present total
+tf0); go iff >= 0.5 ms on L0, L6 and L20): L0 1.14 − 0.705 = **0.435 ms**, L6 1.12 − 0.770 = **0.350 ms**,
+L20 1.12 − 0.765 = **0.355 ms**. **NO-GO on all three levels.** The repeats agree within 0.01-0.05 ms (the
+~1 ms noise assumed in 5.7.1 was pessimistic), so the shortfall is not noise. Sanity: tf0 present total
+2.01-2.08 ms against G0-b's 2.03; `c3d_fill` agrees on both sides (1.11-1.15). `c3d_vblank` reads 0.00 @30.
+`gpu_ms` (stats lines, tf1): draw 1.3-1.5, upload 0.61-0.66 (tf0: draw 2.34, no upload split). The upload
+wait, 0.61-0.62 ms in every run, is most of B's remaining cost.
+**Not in the rule: `bottom` falls ~0.4 ms with `two_frame 1`** (2.96 -> 2.54, 2.88 -> 2.46, 2.97 -> 2.61),
+so busy time rises only 0.25-0.40 ms, not the 0.70-0.77 ms of the present total. If that move carried over
+to B-b (unexplained, UNVERIFIED), the saving would read fill − busy delta = 0.9 / 0.8 / 0.7 ms. It is not
+the rule the design fixed, and no engine edit is built on it.
+
+**@60, L0, one pair** (`two_frame 0` / `1`): fps 60.17 / 60.26, frame 16.62 / 16.60, max 34.78 / 35.33,
+`gaps=0` both; present total 3.01 / 3.33 (`c3d_vblank` 1.08 / 0.70, `c3d_upload` 0 / 0.61), busy 14.23 /
+14.17. No regression; at 60 the VBlank wait absorbs most of the extra present cost, so a CPU saving would
+turn mostly into VBlank wait (the effect 5.7.1 warns about).
+
+**Functional run** (`build-3ds-c3d`, `b-diff.cfg`; HUD + Map, HOME round trip, lid closed ~5 s, Classic via
+Preferences, new game, HOME > Close): PASS. `present_diff final: 151 checks, 0 with RGB differences` (max
+|diff| 0), `present_screen_false_returns=0`, `gx_high_water=2`, `gx_refused=0`, `release done`, `real gfxExit
+returned`, exit; the launcher came back, no Luma screen, dumps unchanged (0-6). The 3dslink transcript ends
+at the lid ("Connection reset by peer"); the rest is in the card's `log.txt` (`b0/fn-b-log.txt`).
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

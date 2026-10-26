@@ -1127,15 +1127,21 @@ B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    engine edit is **not** built on it: B is split into **B-a** (port only, `two_frame` behind
    `debug-c3d`, off by default; built, `a35aa79f4`, Azahar passes: `PERF.md` "Stage 10 B-a") and
    **B-b** (the engine edit and the channel reorder), built only if the **"B-a console runbook"**
-   below shows a saving of ≥ 0.5 ms per frame @30 on L0, L6 and L20. **Next: that console session,
-   then the user's go / no-go for B-b.**
+   below shows a saving of ≥ 0.5 ms per frame @30 on L0, L6 and L20. **Console session run on
+   2026-10-26: saving 0.435 / 0.350 / 0.355 ms on L0 / L6 / L20, i.e. NO-GO by the rule** (`PERF.md`
+   "Stage 10 B-a"; the upload wait costs 0.61 ms; the unexplained `bottom` drop of ~0.4 ms with
+   `two_frame 1` would raise it to ~0.7-0.9 ms if it carried over). Functional run passes. **Next: the
+   user's choice: build B-b anyway, stop B at the design (B-a stays as an off-by-default
+   diagnostic), or revert B-a.**
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
 
 ## B-a console runbook (plan B's go / no-go; when the user is at the console)
 
-**Not run yet.** Written 2026-10-26. Decides whether B-b (the zero-copy present's engine edit) is
+**Run on 2026-10-26: 12 benchmark runs @30, one pair @60 and the functional run all passed; saving 0.435 /
+0.350 / 0.355 ms on L0 / L6 / L20, below the 0.5 ms rule (results: `PERF.md` "Stage 10 B-a").**
+Written 2026-10-26. Decides whether B-b (the zero-copy present's engine edit) is
 built: design `CITRO3D_DESIGN.md` 5.7.1 and 5.7.11. Driving as in "How to drive the console"
 (ask the IP: it was 192.168.100.72; the helpers below have it written in, edit if it changed).
 Tell the user each time whether you need **ftpd** (card files) or the **Homebrew Launcher
