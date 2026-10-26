@@ -498,6 +498,40 @@ Azahar) [PERF "Next candidates"]
     6b and 10. Candidates to weigh: end the fallback through the normal exit (`aptExit` first, if it
     is safe off the main thread), or stop using the fallback exit when it can be avoided.
     The card was cleaned up (no `debug-fatal`).
+    **Fix built 2026-10-26 (overnight, no console): piece A7 on `stage10-c3d`, UNVERIFIED on the
+    console** (design `CITRO3D_DESIGN.md` 5.6.3 step 3a; `stage10-c3d` NEXT-SPRINT plan A item 7;
+    commits `4981782`, `db10ade`, `5da39e0`, `5bd0867`; critic round 1 REVISE (docs), round 2
+    APPROVE, medium effort). libctru 2.7.0's normal end sends `APT_PrepareToCloseApplication`
+    (in `aptExit()`) and then `APT_CloseApplication` (`aptExitProcess`, called through
+    `__system_retAddr` at the end of `__libctru_exit`, instead of `svcExitProcess`); the fallback
+    sent neither, the best-supported cause of the restarts (UNVERIFIED: the system's side is not
+    in libctru). The fallback now ends with `gfxExit()` (software build only; the GPU build must
+    not touch the GPU state off main), `aptExit()` and `APT_CloseApplication`, without the heap
+    frees (all thread stacks are in the heap: dump 6's class), behind a 5 s watchdog that ends in
+    `svcExitProcess` (the old behaviour) if a step hangs; `apt_hook` on the fallback thread logs
+    one raw line and returns (piece 2 review, deferred item 4); d7 logs the launcher's run flags
+    at boot. Rejected: the full libctru exit on the requesting thread (frees the heap under live
+    threads), direct `APT_*` calls, parking every thread, and making main serve more often (still
+    needs a clean fallback). Port code only (no `PATCHES.md` entry), in files shared with
+    `3ds-port`: **`3ds-port` still has the old fallback** until the user decides how to carry A7
+    over. **Azahar — non-authoritative, 2026-10-26** (`build-3ds` and `build-3ds-c3d` of
+    `stage10-c3d` at `5bd0867`; four builds 0 warnings; `arm-none-eabi-nm` OFF builds 0 citro3d
+    symbols, ON 132): d7 `env: homebrew 0, run flags 0x0 (aptworkaround 0, aptreinit 0,
+    aptchainload 0), return address null` (so `aptExit` takes its close branch); modes 6b, 7, 10 in
+    both builds: `not acknowledged in 5 s; shown on this thread`, the screen (software; with the
+    GPU present `citro3d still up (fallback off main): logged only`), `fallback exit: starting the
+    5 s watchdog`, `fallback exit: gfxExit` (software only), `fallback exit: should close 0, run
+    flags 0x0 (...), return address null; aptExit`, `fallback exit: APT_CloseApplication via
+    __system_retAddr`; software mode 10 also logs `main thread: the request was taken back by its
+    thread (fallback screen); blocking` (main woke during the screen); no `watchdog fired` (a
+    temporary build with a 60 s sleep before `aptExit` showed `watchdog fired (stuck in aptExit);
+    svcExitProcess`). Modes 1-5, 6, 8a, 8t, 9, 11 in both builds unchanged (one `[3ds] ERROR`, one
+    screen, `exit`); scripts `22-c3d-home-close.txt` (the dialog frame, `exit without
+    shutdown_application`) and `-fast` (no dialog frame, `finish_game` 23 ms after the hook) in both
+    builds as before; 0 null reads in every run's `azahar_log.txt`. Azahar ended every run before;
+    it proves the order of the steps, not the console's reaction. **Console:** the "Fallback exit
+    runbook" at the end of `stage10-c3d`'s NEXT-SPRINT.md (modes 7 software, 6b and 10 GPU, with
+    A7's builds from the `stage10-c3d` worktree).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -527,6 +561,21 @@ Azahar) [PERF "Next candidates"]
     freeze. Also: a 3dslink launch **overwrites `sdmc:/3ds/alephone.3dsx` on the card** with the
     file it sends (the shipping build was replaced by the GPU build); put the wanted `.3dsx` back
     afterwards.
+    **Revised check (2026-10-26, overnight, no console; the steps are part C of the "Fallback exit
+    runbook" at the end of `stage10-c3d`'s NEXT-SPRINT.md).** Host-side reproduction,
+    `scripts/3ds/tests/link-stall/` on `stage10-c3d`
+    (`run.sh` builds `stall-repro.c`: `tee_write()`'s send loop copied, over a loopback TCP
+    connection whose reader never reads, like a stopped 3dslink; macOS, not the console): the
+    stall path runs 0.5 s after the buffers fill, as designed, but the buffers take **388-550 KB**
+    first (send 65-147 KB plus receive 327-408 KB, whatever sizes were asked for: the kernel
+    raises small requests). At the in-game ~170 B/s that is 38-54 min, which is why the 10 s and
+    150 s freezes showed nothing. `debug-input` with both sticks moving logs about **16 KB/s**
+    (Azahar — non-authoritative, 2026-10-26, a scripted stick wiggle: 4796 `input` lines, 241 KB
+    in 15.1 s), so 25-35 s of freeze would be enough at the host's loopback sizes. New steps: C1
+    `debug-input` + `kill -STOP` + both sticks moving for 60 s (up to 4 min); C2, if C1 shows
+    nothing, a `pfctl` drop rule for the console's address on the Mac (sudo, Terminal.app): no
+    ACKs at all, so only the console's send buffer has to fill. The Wi-Fi path's and the 3DS soc
+    service's buffer sizes are UNVERIFIED. No code change.
 
 16. **HOME > Close in a game took the slow path: `APTHOOK_ONEXIT` fires too late**
     (design `CITRO3D_DESIGN.md` 5.6.1 c, piece 3, branch `stage10-c3d`). `exit_requested()` read
@@ -958,6 +1007,23 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       check (item 15: `kill -STOP` the host 3dslink), and read the card's `log.txt`
       (raw fatal lines are not mirrored). Workflow per piece: implementer, then critic
       (max 2 revise rounds); design: architect then critic.
+      **The fallback exit fix is piece 7 (built overnight 2026-10-26, Azahar only, UNVERIFIED on
+      the console).**
+   7. **A7, the fallback's exit (built 2026-10-26; Azahar passes; console check pending):**
+      design `CITRO3D_DESIGN.md` 5.6.3 step 3a (decision and rejected options), commits
+      `4981782` (decision), `db10ade` (code), `5da39e0` + `5bd0867` (review round 1), critic
+      round 2 APPROVE (medium effort). The fallback now ends through `gfxExit` (software build
+      only), `aptExit()` and `APT_CloseApplication` (libctru's deferred close, through
+      `__system_retAddr`), without the heap frees, behind a 5 s watchdog; `apt_hook` on the
+      fallback thread logs one raw line and returns; d7 logs the launcher's run flags at boot.
+      Port code only (`ports/3ds/source/a1_3ds_platform.cpp`, `input_3ds.cpp`,
+      `ports/3ds/include/a1_3ds_platform.h`, `scripts/3ds/run-azahar.sh`): no engine edit, no
+      `PATCHES.md` entry. **These files are shared with `3ds-port`, which still has the old
+      fallback** (the shipping build restarts the console in mode 7); A7 is on `stage10-c3d`
+      only, by the user's instruction for this task (design 5.6.0 row A7); carrying it over is
+      the user's decision once the console passes. Results: item 14. Next: the "Fallback exit
+      runbook" at the end of this file (F0-F3, optional F4/F5, then part C; part D only if the
+      user says yes).
 B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
    Measured on the console against the current GPU present.
@@ -1055,7 +1121,8 @@ if it hangs).**
    fallback screen is up. The only way to reach `aptExit()`'s close-order branch and its ONEXIT
    hook off main: expected `apt hook ONSUSPEND on the fallback thread: ignored`, the screen's
    loop ends (`aptMainLoop()` false), then the exit lines with `should close 1`, `apt hook ONEXIT
-   on the fallback thread: ignored` (may be lost if the log closes first), `APT_CloseApplication
+   on the fallback thread: ignored` (expected: the fallback never closes the log fd; its absence
+   is a finding), `APT_CloseApplication
    via __system_retAddr`, then the launcher (as every HOME > Close in A6, item 16), no restart.
 
 **Then part C (3dslink mirror, item 15) with the new step, and part D only if the user says
@@ -1076,7 +1143,9 @@ yes.** Part C (`build-3ds-c3d`, over 3dslink this time, HUD + Map @60):
 - **C2 (if C1 shows no stall line; needs sudo, so the user runs it in Terminal.app):** drop the
   console's packets on the Mac, a real "stalled link" (no ACKs, so only the console's send
   buffer has to fill):
-  `printf 'block drop quick from 192.168.100.72 to any\nblock drop quick from any to 192.168.100.72\n' | sudo pfctl -a com.apple/a1-stall -f -`
+  `printf 'block drop quick from IP to any\nblock drop quick from any to IP\n' | sudo pfctl -a com.apple/a1-stall -f -`
+  with `IP` replaced by the console's address the user gave this session (it was
+  192.168.100.72; a stale address blocks nothing and C2 would read as "no stall")
   then `sudo pfctl -E` (note the token it prints); keep the sticks moving for 60 s; then
   `sudo pfctl -a com.apple/a1-stall -F rules` and `sudo pfctl -X <token>`. Check with
   `sudo pfctl -a com.apple/a1-stall -s rules` (empty afterwards). The rule also blocks ftpd: remove
