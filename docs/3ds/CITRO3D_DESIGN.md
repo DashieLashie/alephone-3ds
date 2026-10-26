@@ -1599,7 +1599,11 @@ In B-a the same two frames carry today's staging (filled before frame U's flush)
 measures exactly the cost structure of B-b with the fill still in place (5.7.11). Zones (profile
 builds): `c3d_fill` (the staging fill), `c3d_upload` (frame D's `frame_begin()`: the upload wait),
 `c3d_vblank` (the VBlank guard's `gspWaitForVBlank()`), `c3d_wait` stays frame U's (or the one-frame
-present's) `frame_begin()`.
+present's) `frame_begin()`. `frame_begin()` opens its own zone (`back/context.cpp`:420-422), so it
+takes the zone as a parameter (`frame_begin(Zone z = C3dWait)`) and frame D passes `C3dUpload`;
+wrapping the call instead would hand the time to the nested `c3d_wait` (critic round 2, 1). The new
+zones sit inside the same `#ifdef A1_RENDER_C3D` fence as `C3dWait` (`a1_3ds_profile.h`:38-40,
+`profile_3ds.cpp`:56-58), so the OFF-prof build and its BENCH line do not change (round 2, 3).
 
 Queue entries: frame U 1 (transfer; `C3Di_SplitFrame` adds nothing when `gpuCmdBufOffset == 0`,
 base.o +0x0-0xc, which `C3D_FrameBegin` resets) + 1 (`C3D_FrameEnd`) ≤ 3;
@@ -1637,7 +1641,8 @@ unchanged (only the staging path writes the staging).
   and frame D: the APT hooks run only inside `aptMainLoop()` on the main thread (`aptHandleSleep`,
   `aptJumpToHomeMenu`, `aptWaitForWakeUp`; `aptEventHandler` calls no hook, apt.o, critic round 1, 4).
   **`aptShouldClose()` can flip in between** (`aptEventHandler` sets the close flags on its own
-  thread), so **`gate_closed()` is checked again after frame U**: if it now holds, frame D is not
+  thread), so **`gate_closed()` is checked again after frame U** (only with `suspend_gate 1`; with
+`suspend_gate 0`, the deliberate-reproduction mode, frame D draws as today: round 2, 2): if it now holds, frame D is not
   drawn; the present finishes with a bounded retire of frame U (`frame_begin()` takes the bounded
   path because the gate condition holds; `Abandoned` -> return true) and ends that frame empty
   (`frame_end(0)`), so nothing is drawn while the gate condition holds (5.6.1 a). Otherwise both
@@ -1726,6 +1731,10 @@ VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
   L0/L6/L20, `two_frame 0` and `1`, 2 runs each; **go for B-b iff `c3d_fill` − (`present` total with
   `two_frame 1` − `present` total with `two_frame 0`) ≥ 0.5 ms on every level** (present total =
   `present` + `c3d_wait` + `c3d_fill` + `c3d_upload` + `c3d_vblank`, the zones being exclusive).
+  `c3d_fill` is the mean of the `two_frame 0` runs per level; both sides' `c3d_fill` are recorded
+  and must agree (a sanity check). Against G0-b's 2.03 ms only the present total compares (`present`
+  alone drops by the fill once it is split out). `scripts/3ds/tests/perf-table.py` gets the columns
+  `c3d_wait`, `c3d_fill`, `c3d_upload`, `c3d_vblank` and "present total" (round 2, 4, 5).
   The user decides on the result.
 - **B-b (on the go):** the engine edit (5.7.2, `PATCHES.md` 55), the reorder draws (5.7.3), the
   zero-copy path selection (5.7.5), `zero_copy` (5.7.7); B-a's `two_frame` becomes the zero-copy
@@ -2369,3 +2378,10 @@ gate text corrected, and `gate_closed()` re-checked between frames U and D (`apt
 flip off the main thread); (5) the OFF check adds `main_surface_pixels` to the `nm` pattern and an
 `objdump -d` comparison; (6) `blit` and `bottom` in the A/B metrics; (7) the buffer reuse is checked
 (one log line, same linear free); (8) the TEV operand semantics marked UNVERIFIED.
+
+### B design, round 2 (critic: APPROVE, 5 minor, folded; 2026-10-26)
+
+(1) `frame_begin()` takes its zone as a parameter so the upload wait lands in `c3d_upload`; (2) the
+gate re-check only with `suspend_gate 1`; (3) the new zones inside the `A1_RENDER_C3D` fence; (4)
+`c3d_fill` of the go formula from the `two_frame 0` runs; (5) `perf-table.py` columns and the
+present-total comparison with G0-b.
