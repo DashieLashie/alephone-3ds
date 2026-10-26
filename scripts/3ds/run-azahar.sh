@@ -50,7 +50,7 @@
 #                  given; default --timeout 240. Prints the "[prof] BENCH" line at the end
 #   --fatal FILE   copy FILE to sdmc:/3ds/alephone/debug-fatal (source/fatal_test_3ds.cpp: "mode N", "delay S",
 #                  "lock 1", "first 0|1"); the run stops by itself, 2 s after the log's "exit" or
-#                  "svcExitProcess" line (or the fallback's last lines, "svcExitProcess (aptExit branch...)" and
+#                  "svcExitProcess" line (or the fallback's last lines, "svcExitProcess (aptExit left ...)" and
 #                  "APT_CloseApplication via __system_retAddr"). They are printed BEFORE steps that could
 #                  still hang (_Exit's __appExit, svcExitProcess): this is not proof that the guest ended
 #                  (docs/3ds/CITRO3D_DESIGN.md 5.6.3 tests)
@@ -289,7 +289,7 @@ while kill -0 "$pid" 2>/dev/null; do
 		break
 	fi
 	if { [ -n "$perf_level" ] && grep -q ' ms: exit$' "$userdir/log.txt" 2>/dev/null; } ||
-	   { [ -n "$fatal_file" ] && grep -Eq ' ms: exit$|svcExitProcess$|svcExitProcess \(aptExit branch.*\)$|via __system_retAddr$' "$userdir/log.txt" 2>/dev/null; }; then
+	   { [ -n "$fatal_file" ] && grep -Eq ' ms: exit$|svcExitProcess$|svcExitProcess \(aptExit left .*\)$|via __system_retAddr$' "$userdir/log.txt" 2>/dev/null; }; then
 		sleep 2
 		kill "$pid" 2>/dev/null || true
 		sleep 3

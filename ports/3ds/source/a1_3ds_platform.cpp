@@ -1529,7 +1529,7 @@ void fatal_from_other_thread(const char* title, const char* body)
 		log_raw("[3ds] fallback exit: APT_CloseApplication returned; svcExitProcess\n");
 	}
 	else
-		log_raw("[3ds] fallback exit: svcExitProcess (aptExit branch: reinit/chainload/crippled: retAddr unchanged)\n");
+		log_raw("[3ds] fallback exit: svcExitProcess (aptExit left __system_retAddr unchanged: reinit, chainload, crippled, or not the last APT reference)\n");
 	svcExitProcess();
 }
 
