@@ -1424,6 +1424,245 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
    (`aptreinit 0`); the close branch is reached only by a close order (F5, which also
    returns cleanly). Azahar's `homebrew 0, run flags 0x0` differs from the console.*
 
+### 5.7 B: the zero-copy present (HUD + Map game surface)
+
+Plan B of `NEXT-SPRINT.md` (critic P1 finding 3; the user's go is the 2026-10-19 decision, 0.5).
+Written 2026-10-26. The idea: the 400x240 `main_surface` of a HUD + Map game lives in linear
+memory, the GPU's display transfer reads it directly, and the channel order is fixed on the GPU,
+so the present's CPU copy into the staging image (5.1 step 2) disappears.
+
+#### 5.7.1 Baseline and goal (before any code)
+
+Console (New 3DS), `PERF.md` "Console G0-b" (both sessions), GPU present (P1) per frame, L0 / L6 / L20:
+
+| Series | `present` | `bottom` | `max` | fps |
+| --- | --- | --- | --- | --- |
+| HUD + Map @30 | 2.03 / 2.03 / 2.03 | 2.93 / 2.89 / 2.95 | 49.7-61.9 | 30.62-30.65 |
+| HUD + Map @60 | 2.75 / 3.43 / 3.27 | 2.37 / 2.33 / 2.40 | 33.8-35.3 | 60.20-60.41 |
+| Classic @30 | 6.35 / 6.22 / 6.31 | — | 54.8-63.0 | 30.82-30.86 |
+| Classic @60 | 5.93 / 6.22 / 6.37 | — | 38.6-46.6 | 53.07-53.24 |
+
+**What B can save:** in HUD + Map only, the staging fill (`fill_other`: 400x240 read, `<< 8`,
+written into staging). Its console share of the 2.03 ms is **not measured** (the per-step timers
+were Azahar only: fill 1.34 of 1.74 ms, `PERF.md` "Stage 10 P1"); estimate 1.0-1.5 ms. B adds a
+CPU wait for the upload transfer (5.7.4; GPU time of a 512 KiB linear -> tiled transfer,
+**UNVERIFIED**, estimate 0.2-0.6 ms) and one more `C3D_FrameBegin`/`C3D_FrameEnd` pair (small).
+**Expected net: about 0.4-1.3 ms per HUD + Map frame.** The console's `present` zone repeats
+within about 0.05 ms across levels and sessions (2.03 x3; software 4.27-4.33 against `STAGE7.md`'s
+4.33), so a change of that size is measurable, not noise: B is built and measured, and kept only if
+the console shows the gain (rule 1). If the console's upload wait turns out close to the fill time,
+B is dropped (the switch of 5.7.7 makes that a one-line config change, then a revert).
+
+**What B cannot save:** Classic and every menu/dialog (640x480 is still halved on the CPU into
+staging: the UHADD8 box is what keeps them byte-identical, `present_diff` 0); the ranged cache
+flush (the surface must be flushed instead of the staging: the same 480 KiB); `C3D_FrameEnd`; the
+VBlank wait that @60 adds to `present` (2.75-3.43 against 2.03 @30, design 5.1 step 5); the
+unexplained move of ~0.5-1 ms into `bottom` with the GPU present. The stage 10 target is already met
+by the software renderer on the console (0.5), so B is an efficiency piece, not a target fix.
+
+**How long B matters:** for the P1 present and readback mode (M0-M5). In M6 direct mode the world
+view no longer passes through `main_surface` (5.3), so there B's saving is limited to HUD + Map
+frames that are not direct-eligible (5.4); Classic is never zero-copy. The mechanism (a linear engine surface the GPU reads, an exact channel
+reorder) is the one M6's overlay upload (5.3) can reuse; that is M6's decision.
+
+#### 5.7.2 Where the surface is allocated (the engine edit, `PATCHES.md` 55)
+
+`main_surface` has one creation site, `screen.cpp`:1140-1142 (`if (!main_surface)
+main_surface = SDL_CreateRGBSurface(...)`); every other path frees it and sets it to NULL first
+(:864-867, :975-978). The edit, fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)`:
+
+```cpp
+	if (!main_surface) {
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+		// Stage 10 B (docs/3ds/CITRO3D_DESIGN.md 5.7): the GPU present reads this surface.
+		int a1_pitch = 0;
+		if (void* a1_px = a1_3ds::main_surface_pixels(vmode_width, vmode_height, a1_pitch))
+			main_surface = SDL_CreateRGBSurfaceFrom(a1_px, vmode_width, vmode_height, 32, a1_pitch,
+				pixel_format_32.Rmask, pixel_format_32.Gmask, pixel_format_32.Bmask, 0);
+		if (!main_surface)
+#endif
+		main_surface = SDL_CreateRGBSurface(...as today...);
+	}
+```
+
+`a1_3ds::main_surface_pixels(int w, int h, int& pitch)` is declared in `a1_3ds_platform.h` (engine-safe,
+already included by `screen.cpp` under `A1_PLATFORM_3DS`, :76-78) under `#ifdef A1_RENDER_C3D`, and
+defined in `render_c3d/back/present.cpp`. It returns `nullptr` (the engine allocates as before)
+unless `w == 400 && h == 240`, `debug-c3d` says `present gpu` and `zero_copy 1` (config() loads the
+file lazily, so it can be asked at screen setup, before citro3d is up), and the allocation succeeds.
+Otherwise it returns one buffer:
+
+- `linearAlloc(512 * 256 * 4)` = 512 KiB, 0x80-aligned (`allocator/linear.h`:10-14), pitch
+  **2048 bytes (512 px)**: exactly the staging's shape (5.1, "P1 calibration record"), so the
+  transfer is unchanged: `GX_BUFFER_DIM(512, 256)` on both sides, same flags. Rows 240-255 and
+  columns 400-511 are never written by the engine (SDL clips to `w`, `h`); they are zeroed and
+  flushed once at allocation, and the quad never samples them (u < 400/512, v < 240/256).
+- **Allocated once, never freed** (process lifetime). `SDL_CreateRGBSurfaceFrom` marks the surface
+  `SDL_PREALLOC`, so `SDL_FreeSurface` leaves the pixels alone, and the next 400x240 `main_surface`
+  gets the same buffer. This relies on the invariant above (one live `main_surface` at a time: one
+  creation site, guarded by `!main_surface`). Never freeing it also means a queue abandoned by the
+  release (5.6.1 b) can never read freed memory.
+- Every engine user of the surface is pitch-aware: `screen.cpp` (`quadruple_surface`,
+  `draw_pattern_rect`, the present seam :2581, all with `->pitch`), SDL blits and fills elsewhere
+  (`MainScreenSurface()` users: `interface.cpp`:3884, `screen_drawing.cpp`, `sdl_dialogs.cpp`,
+  `shell.cpp`:1610 screenshots), and the port's CPU present (`video_3ds.cpp` `rotate_copy`,
+  `half_rotate`, `present_reference`: all take `pitch`). So after a release (CPU present) the same
+  linear surface is presented by the CPU unchanged.
+
+#### 5.7.3 Format and the channel reorder
+
+`main_surface` is ARGB8888 (`Amask` 0: `SDL_PIXELFORMAT_RGB888`; 0.1): the u32 `0xXXRRGGBB`, bytes
+B, G, R, X in memory. The PICA RGBA8 texel is the u32 `0xRRGGBBAA` (P1: staging pixels `xrgb << 8`
+display correctly and byte-identically, `PERF.md` "Console G0-b" `present_diff` 153 checks 0
+differences). The display transfer with `IN/OUT_FORMAT(RGBA8)` moves whole 32-bit pixels, so the
+surface's pixel reaches the texture as **R = X, G = surface R, B = surface G, A = surface B**.
+
+**Reorder: three draws of the present quad, each with TEV stage 0 `GPU_REPLACE` and a one-channel
+colour write mask** (`C3D_DepthTest(false, GPU_ALWAYS, mask)`, `effect.h`:10; masks
+`enums.h`:224-230; RGB operands `enums.h`:331-346):
+
+| Draw | RGB operand of `GPU_TEXTURE0` | write mask | result |
+| --- | --- | --- | --- |
+| 1 | `GPU_TEVOP_RGB_SRC_G` | `GPU_WRITE_RED \| GPU_WRITE_ALPHA` | red = surface R; alpha = 0 (alpha source `GPU_CONSTANT`, `C3D_TexEnvColor(env, 0)`) |
+| 2 | `GPU_TEVOP_RGB_SRC_B` | `GPU_WRITE_GREEN` | green = surface G |
+| 3 | `GPU_TEVOP_RGB_SRC_ALPHA` | `GPU_WRITE_BLUE` | blue = surface B |
+
+Blending stays `ONE, ZERO`. The framebuffer word then equals the CPU present's (`to_fb`: A = 0), so
+`present_diff` should report 0 RGB and 0 alpha-only differences. **Exact by construction**: REPLACE
+passes the operand unchanged, and nearest sampling at texel centres is exact (P1's byte-identical
+result used the same quad, filter and REPLACE). A partial write mask is a read-modify-write of the
+colour buffer, which needs colour-buffer reads enabled: citro3d writes the target's `colorMask`
+(0xF for a colour target, `framebuffer.h`:13, :47) to `GPUREG_COLORBUFFER_READ` and `_WRITE`
+(`registers.h`:295; `framebuffer.o` `C3Di_FrameBufBind`+0x100-0x13c, one 4-word write to 0x112).
+That the PICA honours a one-channel mask this way is **UNVERIFIED** on hardware: `present_diff`
+settles it on the console (5.7.9).
+
+GPU cost: three 400x240 fills instead of one, asynchronous (the CPU does not wait for them; they
+delay the framebuffer transfer and swap of the same frame). Size **UNVERIFIED**; the `[c3d] stats`
+line logs `C3D_GetDrawingTime()` (`renderqueue.h`:38) so the console shows it.
+
+**Rejected:**
+- One draw, three TEV stages (`MODULATE` by constant (255,0,0), then `MULTIPLY_ADD`...): one fill,
+  but the hardware's rounding of `x * 255 / 255` is **UNVERIFIED** and Classic/menus' byte identity
+  is a standing requirement; the masked draws need no arithmetic. A candidate only if the console
+  shows the three fills cost real time.
+- `main_surface` as `SDL_PIXELFORMAT_RGBX8888` (bytes matching RGBA8): the world blit
+  (`world_pixels`, `pixel_format_32`, 0.96 ms on the console) becomes a converting blit.
+- A reorder in the transfer: it converts formats, it does not swizzle; `RGBA8 -> RGB8` drops byte 0
+  (here surface B).
+- Sampling the surface as a linear texture: PICA textures are tiled whatever memory they are in
+  (`C3D_TexLoadImage` uses a TextureCopy for VRAM and a memcpy of already-tiled data for linear, 0.3);
+  a display transfer is the only linear -> tiled step.
+
+#### 5.7.4 Synchronisation: the present waits for the upload
+
+The engine writes `main_surface` again after the present returns (the next frame's world blit;
+in loops such as `screen_drawing.cpp`'s per-draw `MainScreenUpdateRect`, immediately). A transfer
+queued inside a frame starts only at `C3D_FrameEnd` (0.3) and runs asynchronously, so the present
+must not return before the upload has read the surface. **A zero-copy present is two C3D frames:**
+
+1. **Frame U** (upload): `frame_begin()` (as today: every earlier frame has retired), the
+   `present_diff` reference (it reads the surface), the ranged flush
+   `GSPGPU_FlushDataCache(surface, 240 * 2048)` (480 KiB, the same range as today's
+   `kStagingWrittenBytes`), `gx_op(C3D_SyncDisplayTransfer(surface -> present texture))`,
+   `frame_end(0)` (no linked target drawn: no framebuffer transfer, no swap). `C3D_FrameEnd` runs
+   the queue unconditionally (`renderqueue.o` `C3D_FrameEnd`+0x130, `gxCmdQueueRun`; the linked-target
+   transfer only for targets drawn on, +0xa8-0xd4).
+2. **Frame D** (draw): `frame_begin()` = `C3D_FrameBegin(0)`, which waits for frame U's whole queue
+   (0.3): when it returns the upload has read the surface, and the engine may write it. Zone
+   `c3d_wait` therefore now also holds the upload's GPU time (the console figure we want). Then the
+   three draws (or the `calibrate` clear), the VBlank guard, the `present_diff` framebuffer note,
+   `frame_end(1)`, exactly as 5.1 steps 4-5.
+
+Queue entries: frame U 1 (transfer) + 1 split if `gpuCmdBufOffset != 0` + 1 (`C3D_FrameEnd`) ≤ 3;
+frame D 1 + 1 linked target = 2; each frame within the budget of 4 (2.4), counted per frame as today.
+
+**Rejected:**
+- An out-of-frame `C3D_SyncDisplayTransfer`: it waits for the queue, issues the transfer, runs the
+  queue, then `gspWaitForEvent(GSPGPU_EVENT_PPF, false)` (`renderqueue.o`+0x60-0xb4), i.e. *wait,
+  then clear* (`gspgpu.o` `gspWaitForEvent`+0x18-0x34). The GSP event thread signals that light event
+  for **every** PPF (`gspEventThreadMain`+0xd0-0x108: `gxCmdQueueInterrupt`, the callback, then
+  `LightEvent_Signal`), and nobody clears the one left by the previous frame's framebuffer transfer,
+  so the wait can return at once, before this transfer has run.
+- Waiting for PPF after `frame_end`: `gspWaitForEvent(PPF, true)` clears then waits; if both of the
+  frame's PPFs (upload, framebuffer transfer) fired before the clear, it waits forever (no timeout
+  in that API).
+- Deferring the wait (into the bottom present, to overlap the upload with the bottom screen's CPU
+  work): it needs a proof that nothing writes `main_surface` between the top and the bottom
+  present, on every path. A follow-up only if the console's `c3d_wait` shows the upload wait is large.
+
+#### 5.7.5 Which presents are zero-copy
+
+Zero-copy iff `zero_copy` is on, `pixels` is the buffer of 5.7.2, 400x240, pitch 2048, format
+`SDL_PIXELFORMAT_RGB888` or `ARGB8888`, and not an `odd_surface` present. Everything else (640x480
+menus, dialogs and Classic, odd surfaces, a 400x240 surface that did not get the buffer) takes the
+staging path of 5.1 unchanged, so **Classic and menus are untouched** (same code, same bytes). Each
+upload rewrites the whole 512x256 texture, so switching between the paths needs nothing but a flag
+saying what the texture holds (`s_tex_reordered`): `present_close_frame()` (5.6.1, a diagnostic
+frame that redraws the texture) draws it the matching way. The staging's `s_layout` logic is
+unchanged (only the staging path writes the staging).
+
+#### 5.7.6 The gate, the release and the fatal paths (5.6: not to be broken)
+
+- The gate is evaluated once at the top of `a1_c3d_present()`, as now. Both `frame_begin()` calls
+  go through the existing function: bounded when the gate condition holds, `Abandoned` -> return true
+  (draw nothing), `AlreadyInFrame` -> the existing release path. If HOME arrives between frame U and
+  frame D, frame D's `frame_begin()` takes the bounded path like any present's.
+- All citro3d calls stay in `a1_c3d_present()` on the main thread; nothing new runs elsewhere.
+- `present_free()` does not free the surface buffer (the engine's surface uses it; 5.7.2). After a
+  release or abandon the engine keeps drawing into it and the CPU present (if any) reads it.
+- `a1_3ds::main_surface_pixels()` makes no citro3d call (`linearAlloc`, `memset`,
+  `GSPGPU_FlushDataCache` only), so it is safe at screen setup whether citro3d is up or not.
+
+#### 5.7.7 How it is switched off
+
+- `debug-c3d zero_copy 0` (new key, default 1): `main_surface_pixels()` returns `nullptr`, the
+  engine allocates with `SDL_CreateRGBSurface` as before, and every present takes the staging path:
+  exactly the P1 present. The surface is set up at the start of a game, so the key acts from the next
+  game screen setup (put the file on the card before launching). One build serves both sides of
+  the measurement.
+- `present cpu`: the same (`nullptr`).
+- The default build (`A1_RENDER_C3D=OFF`): the engine edit and the declaration are fenced with
+  `A1_RENDER_C3D`, so `screen.cpp` and every other TU compile as before; the OFF `alephone.elf` must
+  give `arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'` = 0, with 0 warnings.
+  The host build defines neither macro: `ppcheck.sh` IDENTICAL expected (or DIFFER with 0
+  normalised lines).
+
+#### 5.7.8 Memory
+
++512 KiB of linear heap from the first HUD + Map game on, for the rest of the run (the staging stays:
+640x480 still needs it). 9.2's total grows by 512 KiB, still far inside the ~17.8 MiB free in game.
+The `[c3d] init ok` line and a one-time `[c3d] zero_copy: surface buffer ...` line log linear free
+before/after.
+
+#### 5.7.9 Tests
+
+Azahar (non-authoritative; it completes GPU work synchronously, so the upload wait is ~0 there and
+the gain is overstated):
+1. `present_diff` (`p1-diff.cfg` + `zero_copy 1`), HUD + Map @30 L0/L6/L20 (`perf-bench.sh`):
+   **0 checks with RGB differences and 0 alpha-only pixels**; script 07 (640x480 path, unchanged) too.
+2. Negative control (temporary build, not committed): draws 2 and 3 swapped -> `present_diff`
+   reports G/B differences at every check (proves the check sees the reorder).
+3. Scripts 07, 08, 13, 14 (13 and 14 in both Bottom Screen settings: the HUD + Map <-> Classic
+   switch moves the present between the two paths) and 22 (HOME > Close) pass; 0
+   `present_screen()` false returns; GX high-water ≤ 4.
+4. Profile build, same build both ways (`zero_copy 0` / `1`), HUD + Map @30 and @60, L0/L6/L20,
+   plus Classic @60 L0 (must be unchanged): `present`, `c3d_wait`, busy, `max`.
+5. `nm` on the OFF build; `ppcheck.sh` on `screen.cpp`.
+
+Console (runbook): `present_diff` with `zero_copy 1` (settles the write mask and the orientation,
+section 10 item 16), the four series A/B in one build (`zero_copy 0` / `1`), `c3d_wait` (upload time) and
+the logged drawing time; HOME, sleep, HOME > Close in a game; by eye. **Keep B only if busy drops
+in HUD + Map at 30 and 60 and Classic does not move** (rule 1).
+
+#### 5.7.10 UNVERIFIED here
+
+1. The console's fill share of the 2.03 ms `present` (estimate 1.0-1.5 ms) and the upload's GPU
+   time (estimate 0.2-0.6 ms): the `zero_copy` A/B series and `c3d_wait`.
+2. One-channel colour write masks on the PICA (read-modify-write with `COLORBUFFER_READ` 0xF):
+   `present_diff` 0 on the console.
+3. The GPU time of three fills: `C3D_GetDrawingTime()` in the stats line.
+
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 
 Two view targets, two linked screen targets (`GFX_LEFT`/`GFX_RIGHT`),
@@ -1460,7 +1699,7 @@ when ON: `add_compile_definitions(A1_RENDER_C3D)`, sources,
 `fullbright 0|1`, `dump 0|1`, `calibrate 0|1`, `alt_load 0|1`,
 `vram_cap KiB`, `cmdbuf_kib N`, `gxq_budget N`, `fail_every N`,
 `film <path>`, `ssaa 0|1`, `test_vhalt 0-4`, `odd_surface 0|1`, `present_diff N`,
-and (5.6) `suspend_gate 0|1`, `retire_wait_ms N`, `close_frame 0|1`, `force_abandon 0|1` (the
+and (5.6) `suspend_gate 0|1`, `retire_wait_ms N`, `close_frame 0|1`, `force_abandon 0|1`, (5.7) `zero_copy 0|1` (the
 fatal-path tests are `3ds-port`'s `debug-fatal`, 5.6.3). `run-azahar.sh` gets
 `--c3d FILE` (like `--script`, `run-azahar.sh`:201-206). Profiler zones (port
 only, `a1_3ds_profile.h`:28-39, `profile_3ds.cpp`:55-57): `c3d_wait`,
@@ -1507,6 +1746,16 @@ only, `a1_3ds_profile.h`:28-39, `profile_3ds.cpp`:55-57): `c3d_wait`,
     re-run with 0 skipped presents. Then the console runbook (5.6.1 runs 1-4, 5.6.2's
     control and main-thread run, 5.6.3 modes 1-4 and 6, the launcher criterion),
     written into `NEXT-SPRINT.md` for the user.
+
+### B — the zero-copy present (5.7; plan B, after the P1 follow-ups 2)
+- One piece, `stage10: B <summary>`, tag `port-stage10-B`. Engine edit `PATCHES.md` 55
+  (`screen.cpp` creation site, fenced `A1_PLATFORM_3DS && A1_RENDER_C3D`, `ppcheck.sh`);
+  port: `a1_3ds::main_surface_pixels()` (`a1_3ds_platform.h` declaration, `back/present.cpp`
+  definition), the two-frame zero-copy present and the three masked draws, `close_frame`'s
+  matching draw, `debug-c3d` `zero_copy`, `C3D_GetDrawingTime()` in the stats line, config
+  `scripts/3ds/tests/c3d/b-zero-copy.cfg` (and `b-diff.cfg` with `present_diff 30`), host test
+  of the new key.
+- Accept (Azahar): 5.7.9 items 1-5. Then the console runbook (5.7.9, section 10 item 16).
 
 ### M0 — renderer harness, calibration, null mode (after G1)
 - Add: `include/a1_c3d.h`; `front/frame.cpp` (`render_frame`, config, null
@@ -1669,11 +1918,12 @@ hold in every mode with the default caps.
 | --- | ---: |
 | command buffer (one buffer, 0.3; 512 default, up to 1 024 by M1) | 512-1 024 |
 | present staging 512x256 RGBA8 (P1 calibration, 5.1) | 512 |
+| zero-copy `main_surface` 512x256 (plan B, 5.7.8; from the first HUD + Map game) | 512 |
 | vertex ring 2 × 16 384 × 32 B (re-sized from M0) | 1 024 |
 | index ring 2 × 32 768 × 2 B | 128 |
 | readback staging 480x240 | 450 |
 | linear texture pool (cap; holds promotions pending) | 4 096 |
-| **total** | ≤ 7 234 |
+| **total** | ≤ 7 746 |
 
 No change to `__ctru_linear_heap_size` needed on the New 3DS
 (`a1_3ds_platform.cpp`:43-50 "revisit then": revisited). Azahar's split is
@@ -1744,6 +1994,9 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     modes 1-4, 6, 6b), shown by the main thread, exactly one screen each; the
     launcher starts again after each.
     Optional: mode 7 (the fallback's `svcExitProcess` without `aptExit`).
+16. 5.7 (plan B): the zero-copy present's one-channel write masks give `present_diff` 0 on
+    the console; the upload's GPU time (`c3d_wait`) and the three fills' drawing time; the
+    `zero_copy 0`/`1` series decide whether B is kept (5.7.9, 5.7.10).
 
 ## 11. Open questions
 
