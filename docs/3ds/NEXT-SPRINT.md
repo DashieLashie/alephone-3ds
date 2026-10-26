@@ -565,9 +565,10 @@ Azahar) [PERF "Next candidates"]
     `scripts/3ds/run-azahar.sh`; no `Source_Files/` edit, so no `PATCHES.md` entry), squashed into one commit;
     one comment in `a1_3ds_platform.cpp` now states the console result instead of "UNVERIFIED"; the
     design doc stays on `stage10-c3d`. `build-3ds` rebuilt: 0 warnings, `arm-none-eabi-nm` 0 citro3d
-    symbols. **The shipping build with A7 has not been run on the console** (F1-F5 used `stage10-c3d`'s
-    software build, which is the same fallback code): a console re-check of mode 7 (F1) with
-    `build-3ds/alephone.3dsx` is the remaining step.
+    symbols. **Console (New 3DS), 2026-10-26, the shipping build (`build-3ds/alephone.3dsx` of
+    `3ds-port` at `b6cc886`), mode 7: pass.** The same lines as F1 (`gfxExit`, `should close 0 ...
+    aptExit`, `svcExitProcess`), no `[c3d]` lines, the launcher came back with no restart message,
+    no new Luma dump. The shipping build no longer restarts the console in the fallback.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
