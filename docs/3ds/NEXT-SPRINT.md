@@ -467,16 +467,23 @@ Azahar) [PERF "Next candidates"]
     **Spot check, shipping build (`build-3ds/alephone.3dsx`, software): B1 and B2 pass.** No `[c3d]`
     lines; mode 1: `error screen d6: thread main`, `exit`; mode 2: thread 533 handed to main, one
     screen, `exit`; launcher back both times.
-    **Not run:** B8 (mode 7; skipped by the user's choice, 6b and mode 10 already took its
-    `svcExitProcess` path) and part D (see item 16). **Finding and next step (no code was changed
+    **Mode 7 on the shipping build (session 3, 2026-10-26, same day):
+    FAIL.** `build-3ds/alephone.3dsx` (software, no citro3d): thread 757 `handed to the main
+    thread`, `not acknowledged in 5 s; shown on this thread`, `error screen d6: thread other`, the
+    fallback screen drawn, A, `fallback error screen left; svcExitProcess`; the console showed the
+    system's "An error has occurred forcing the software to close. The system will now restart."
+    and restarted. No new dump. B8 on the GPU build was not run (6b and mode 10 took its path).
+    Part D: see item 16. **Finding and next step (no code was changed
     in these sessions):** with citro3d up, the fallback (main not serving for 5 s) ends in
     `svcExitProcess` without `aptExit`/`gspExit`, and on a New 3DS that makes the system restart the
     console instead of returning to the launcher. The fallback is only reached when main stalls
-    for 5 s (the test modes do it on purpose), but the exit must still be clean. UNVERIFIED which
-    skipped call matters. First check: mode 7 on the **shipping** build (fallback draws its screen,
-    A, then the same `svcExitProcess`): if that returns to the launcher, the cause is the citro3d-up
-    state or the GPU right; if it restarts the console too, it is the missing `aptExit`. Then a fix
-    through `c3d-implementer` and `c3d-critic` (medium), Azahar, and a console re-check of 6b and 10.
+    for 5 s (the test modes do it on purpose), but the exit must still be clean. Mode 7 on the
+    shipping build restarts the console too, so the cause is not citro3d or the GPU right: it is
+    the exit itself (`svcExitProcess` with no `aptExit`; UNVERIFIED which skipped call exactly) and
+    it affects the shipping `3ds-port` build as well, wherever the fallback is reached. Next: a fix
+    through `c3d-implementer` and `c3d-critic` (medium), Azahar, and a console re-check of mode 7,
+    6b and 10. Candidates to weigh: end the fallback through the normal exit (`aptExit` first, if it
+    is safe off the main thread), or stop using the fallback exit when it can be avoided.
     The card was cleaned up (no `debug-fatal`).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
