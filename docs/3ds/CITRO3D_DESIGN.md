@@ -766,6 +766,7 @@ change on `stage10-c3d` alone.
 | 3 | `3ds-port` | the A1 port side: `app_suspended()`, d1, `exit_requested()` with `aptShouldClose()`, script command `home-close`, script 22 | 5.6.1 a, c |
 | 4 | — | merge `3ds-port` into `stage10-c3d` (`error_screen`'s `#ifdef A1_RENDER_C3D` release call, `a1_3ds_platform.cpp`:1081-1090, survives the merge) | — |
 | 5 | `stage10-c3d` | **built, Azahar passes, console check pending** (`NEXT-SPRINT.md` plan A item 5): the gate, bounded waits, abandon, d2-d5, `debug-c3d` keys, configs; `test_vhalt` 1-4 re-run against pieces 1-2 | 5.6.1 a, b |
+| A7 | `stage10-c3d` (**exception**, user's instruction 2026-10-26: built here, no merge) | the fallback's exit through `aptExit` and `APT_CloseApplication` behind a watchdog; `apt_hook` off main during the fallback; d7. Shared files (`ports/3ds/source/`): `3ds-port` keeps the old fallback until the user decides how to carry A7 there (cherry-pick or the next merge) | 5.6.3 step 3a |
 
 Order 1 → 2 → 3 → 4 → 5; 3 may go before 1-2 (independent). Each piece: Azahar
 first, then the console runbook items of its section.
@@ -1133,7 +1134,85 @@ the first call of the port's callback, `timed_callback`, `audio_3ds.cpp`:157), a
    process **without** `__appExit`'s teardown under a live main thread (the dump 6
    class): `svcExitProcess()` directly. This skips `gspExit`, `aptExit` and
    `ndspExit`; whether HOME, the launcher and the DSP survive that is UNVERIFIED
-   (5.6.4 item 5).
+   (5.6.4 item 5). **Refuted on the console (A6, 2026-10-26): the system restarts the
+   console. Replaced by step 3a.**
+3a. **The fallback's exit (decided 2026-10-26, after A6; piece A7, `stage10-c3d`).**
+   *Facts* (libctru 2.7.0; source lines from the 2.7.0 tree, which match `libctrud.a`'s
+   DWARF line info and disassembly; research report of 2026-10-26):
+   - libctru's normal end tells APT twice that the application is closing.
+     `aptExit()` (`apt.c`:371-440), in its default branch (not crippled, no close order,
+     no `RUNFLAG_APTREINIT`, no chainload), calls `APT_PrepareToCloseApplication(true)`,
+     sets `__system_retAddr = aptExitProcess` and keeps srv up (`srvInit()`);
+     `__libctru_exit` (`ctru_exit.c`:32-36) frees both heaps and then calls
+     `__system_retAddr()`, i.e. `APT_CloseApplication(NULL, 0, 0)` (`apt.c`:366-369;
+     libctru's comment: "APT_CloseApplication kills us"), and calls `svcExitProcess()`
+     only when `__system_retAddr` is NULL. The other branches: a close order
+     (`aptShouldClose()`) runs the ONEXIT hooks on the calling thread and then the same
+     close; `RUNFLAG_APTREINIT` sends `APT_Finalize` and no close; a chainload jumps
+     (`APT_DoApplicationJump`) and clears `__system_retAddr`. Every APT command takes the
+     kernel mutex `aptLockHandle` (`aptSendCommand`), held only for one IPC; `aptExit`
+     then joins the APT event thread (released by its quit event). `aptExit` frees no
+     heap. Nothing in `aptExit` checks for the main thread (TLS command buffer only).
+   - The fallback's bare `svcExitProcess()` sends neither `APT_PrepareToCloseApplication`
+     nor `APT_CloseApplication`. The three restarts (6b, 10, and 7 on the software build)
+     share exactly this; the clean ends on the console (normal exit, mode 6's
+     `gfxExit` + `_Exit`, the abandoned citro3d's real `gfxExit` + exit) all ran it.
+     **That the missing APT close is the cause is UNVERIFIED** (the system's reaction is
+     not in libctru); it is the best-supported candidate.
+   - Which branch `aptExit` takes on this console (the launcher's run flags) is
+     UNVERIFIED: the port never logged `envGetSystemRunFlags()`. d7 logs it at boot.
+   - The main thread's stack and every `threadCreate` stack are in the application heap
+     (`stack_adjust.o` `initSystem`; `thread.o` `threadCreate` memalign). `ndspExit` joins
+     the ndsp thread, which waits untimed on the DSP interrupt (`ndsp.c`:31-47), so it can
+     hang; `gspExit` joins the GSP event thread, which runs citro3d's callbacks;
+     `gfxExit` waits for a VBlank when it holds the GPU right (`gfx.c`:165-190). citro3d's
+     own APT hook ignores ONEXIT (`libcitro3d.a` `base.o` `C3Di_AptEventHook`: only
+     types 0 and 1 are handled).
+   *Decision (option A + watchdog):* the fallback ends the way libctru does, minus the
+   heap frees and minus everything that touches citro3d, the GPU queue, the DSP or the
+   heap's owners, all on thread T, every step logged raw first:
+   1. **Watchdog.** Start a small thread (`threadCreate`, 4 KiB stack, priority 0x18,
+      detached; the fallback already uses the heap, step 3) that sleeps 5 s and then logs
+      `fallback exit: watchdog fired (stuck in <step>); svcExitProcess` raw and calls
+      `svcExitProcess()`. A hang in the steps below therefore ends exactly as before this
+      piece (the system's restart), never worse. If the thread cannot be created, log it
+      and go on without it.
+   2. **Software build only (`A1_RENDER_C3D` off): `gfxExit()`**, as every clean exit did
+      before its APT close (SDL's video quit reaches it there). The c3d build skips it:
+      with citro3d up T must not touch the GPU state (5.6.2 a; `gspExit` joins the thread
+      that runs citro3d's callbacks, and main may be between `C3D_FrameBegin` and
+      `C3D_FrameEnd`), and with citro3d down the only reachable `gfxExit` is
+      `__wrap_gfxExit`, which `printf`s through the tee lock that main may hold. This
+      split is also the diagnosis: if mode 7 (software) passes and 6b/10 (GPU) do not,
+      `gspExit` matters too.
+   3. **`aptExit()`**, once. The port's `apt_hook`, when it runs on a thread other than
+      main while the fallback is active, logs one raw line and returns: no `printf`, no
+      SDL call (an ONEXIT under a close order would otherwise `printf` through the tee
+      lock; this also closes deferred item (4) of piece 2's review, HOME during the
+      fallback). Before the call the fallback logs the branch inputs (`should close`,
+      run flags) and `__system_retAddr` (set or NULL).
+   4. **End.** If `aptExit()` changed `__system_retAddr` (the close branch set it to
+      `aptExitProcess`), call it: `APT_CloseApplication`, as `__libctru_exit` would,
+      without the heap frees before it. Otherwise (reinit or chainload branch, or the
+      loader's own return address, which expects a freed heap) `svcExitProcess()`. If the
+      call returns, `svcExitProcess()`. The log line before it says which.
+   Not run: `ndspExit` (can hang; mode 6 ended silent without it), `hidExit`, `fsExit`,
+   `archiveUnmountAll`, `srvExit` (the kernel closes their sessions; no evidence that they
+   matter; UNVERIFIED), and the heap frees (they are what faulted in dump 6: threads
+   waking on a freed heap).
+   *Rejected:* (B) the full libctru exit (`_exit` → `__ctru_exit`) on T: it frees the heap
+   under main, the SDL audio thread, the ndsp/GSP/APT threads, whose stacks are all in it
+   (dump 6's class; mode 10's main wakes after 7 s); (C3) `APT_PrepareToCloseApplication` /
+   `APT_CloseApplication` called directly: duplicates `aptExit`'s branch logic (reinit,
+   chainload) and leaves the APT thread and lock state inconsistent; (C4) parking every
+   thread first: threads in timed sleeps or in another library's lock cannot be parked, and
+   there is no per-thread terminate (`svc.h` has only `svcExitProcess`/`svcTerminateProcess`);
+   (C2) making main serve more often: does not remove the need for a clean fallback (a
+   main thread stuck for good still needs one), so it is not this piece; a longer
+   acknowledgement bound stays an option for later.
+   **d7 (boot):** `[3ds] env: homebrew <0|1>, run flags 0x<hex> (aptworkaround <0|1>,
+   aptreinit <0|1>, aptchainload <0|1>), return address <set|null>` (`env.h`:9-11, :18,
+   :70; `__system_retAddr`).
 4. **Serve (main thread)** only at **top-level** service points: `present_screen()`
    entry (`video_3ds.cpp`:229), `present_bottom()` (:267), and `__wrap_hidScanInput`
    on the main thread (:937; covers loops that pump events without drawing). Not in
@@ -1294,7 +1373,15 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
    launcher; the system shows its own fatal-error message and restarts the console. The DSP
    check could not be made after those restarts. Mode 7 on the shipping (software) build restarts the console
    too (2026-10-26): not citro3d-specific; the exit without `aptExit` is the cause (which
-   skipped call exactly is UNVERIFIED).*
+   skipped call exactly is UNVERIFIED).* *Fix (5.6.3 step 3a, piece A7, 2026-10-26):
+   the fallback now ends through `aptExit()` and `APT_CloseApplication` (and `gfxExit` in the
+   software build), behind a 5 s watchdog. Azahar only; **UNVERIFIED on the console**: that
+   the missing APT close was the cause, that `aptExit` off main ends cleanly on hardware,
+   and whether `gspExit` matters (mode 7 software vs 6b/10 GPU). Test: `NEXT-SPRINT.md`
+   "Fallback exit runbook".*
+6. Which `aptExit` branch the Homebrew Launcher's run flags select on this console (d7 at
+   boot), and whether `APT_Finalize` alone (the reinit branch) also ends cleanly if that is
+   the branch. *Status: UNVERIFIED; read d7 in any console log after piece A7.*
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 
