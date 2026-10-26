@@ -1292,8 +1292,9 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
    after the error and in the launcher. **REFUTED for the fallback**, 2026-10-26 (6b and mode
    10, citro3d up): `svcExitProcess` without `aptExit`/`gspExit` does not return to the
    launcher; the system shows its own fatal-error message and restarts the console. The DSP
-   check could not be made after those restarts. Which skipped call matters is UNVERIFIED: run
-   mode 7 on the shipping (software) build, whose fallback also ends in `svcExitProcess`.*
+   check could not be made after those restarts. Mode 7 on the shipping (software) build restarts the console
+   too (2026-10-26): not citro3d-specific; the exit without `aptExit` is the cause (which
+   skipped call exactly is UNVERIFIED).*
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 

@@ -59,7 +59,8 @@ B6 (mode 6) and B7 mode 11 pass, the shipping-build spot check (B1, B2) passes. 
 mode 10 fail on the console:** the fallback's `svcExitProcess` (citro3d up, nothing drawn) ends
 in the system's "software error, the system will now restart" message and a reboot, not in the
 launcher. Part C was inconclusive (10 s and 150 s freezes did not fill the socket buffers).
-B8 and part D were not run (the user's choice). Notes for a future run: a 3dslink launch
+Mode 7 on the shipping build, run afterwards, restarts the console too (not citro3d-specific).
+B8 on the GPU build and part D were not run (the user's choice). Notes for a future run: a 3dslink launch
 overwrites `/3ds/alephone.3dsx` on the card; the log rate in game is too low for the
 `kill -STOP` check, use a chattier flag; the card was cleaned up at the end (shipping build,
 the user's own prefs, no `debug-*`).
