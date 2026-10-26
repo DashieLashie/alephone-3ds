@@ -1444,14 +1444,24 @@ Console (New 3DS), `PERF.md` "Console G0-b" (both sessions), GPU present (P1) pe
 
 **What B can save:** in HUD + Map only, the staging fill (`fill_other`: 400x240 read, `<< 8`,
 written into staging). Its console share of the 2.03 ms is **not measured** (the per-step timers
-were Azahar only: fill 1.34 of 1.74 ms, `PERF.md` "Stage 10 P1"); estimate 1.0-1.5 ms. B adds a
-CPU wait for the upload transfer (5.7.4; GPU time of a 512 KiB linear -> tiled transfer,
-**UNVERIFIED**, estimate 0.2-0.6 ms) and one more `C3D_FrameBegin`/`C3D_FrameEnd` pair (small).
-**Expected net: about 0.4-1.3 ms per HUD + Map frame.** The console's `present` zone repeats
-within about 0.05 ms across levels and sessions (2.03 x3; software 4.27-4.33 against `STAGE7.md`'s
-4.33), so a change of that size is measurable, not noise: B is built and measured, and kept only if
-the console shows the gain (rule 1). If the console's upload wait turns out close to the fill time,
-B is dropped (the switch of 5.7.7 makes that a one-line config change, then a revert).
+were Azahar only: fill 1.34, `C3D_FrameEnd` 0.31, flush 0.06, transfer + draw 0.02 of 1.74 ms,
+`PERF.md` "Stage 10 P1"); estimate 1.0-1.5 ms. **What B adds:** a blocking CPU wait for the upload
+(the GPU time of a 512 KiB linear -> tiled transfer plus the GSP interrupt and the main thread's
+wake-up, **UNVERIFIED**, estimate 0.2-0.6 ms) and one more C3D frame (`C3D_FrameEnd` alone was 0.31
+ms in Azahar's breakdown, so not negligible). **Expected net: somewhere between ~0.1 and ~1.3 ms per
+HUD + Map frame.**
+
+**Is it within the noise? The lower end is.** The console's `present` repeats within ~0.05 ms only
+@30 (2.03 x3; software 4.27-4.33 across sessions); @60 it spreads 2.75 / 3.43 / 3.27 because it
+holds the VBlank wait, and the kickoff takes the console as ~1 ms precise for a whole-frame figure.
+A 0.1-0.4 ms gain could not be told from noise at @60 and would not justify an engine edit. So,
+**as the kickoff asks: the engine edit is not proposed on this estimate.** B is split (5.7.11):
+**B-a**, port code only and off by default, restructures today's staging present into the two-frame
+form of 5.7.4 and adds profiler zones for the fill, the upload wait and the VBlank wait, so one
+console session measures the fill and the extra cost directly; **B-b**, the engine edit and the
+channel reorder, is built only if B-a shows **fill − (upload wait + extra frame) ≥ 0.5 ms per frame
+@30 on L0, L6 and L20** (2 runs each). Otherwise B stops at the design (and B-a stays as an off-by-
+default diagnostic, or is reverted: the user's choice).
 
 **What B cannot save:** Classic and every menu/dialog (640x480 is still halved on the CPU into
 staging: the UHADD8 box is what keeps them byte-identical, `present_diff` 0); the ranged cache
@@ -1527,7 +1537,14 @@ colour write mask** (`C3D_DepthTest(false, GPU_ALWAYS, mask)`, `effect.h`:10; ma
 | 2 | `GPU_TEVOP_RGB_SRC_B` | `GPU_WRITE_GREEN` | green = surface G |
 | 3 | `GPU_TEVOP_RGB_SRC_ALPHA` | `GPU_WRITE_BLUE` | blue = surface B |
 
-Blending stays `ONE, ZERO`. The framebuffer word then equals the CPU present's (`to_fb`: A = 0), so
+Blending stays `ONE, ZERO`. **TEV stage 0 and the write mask are set in full before every draw**
+(critic round 1, 1): one helper `set_present_draw(Swizzle)` sets source, both operands, function,
+constant colour (through `C3D_GetTexEnv(0)`, which marks the stage dirty, `texenv.h`:24) and the
+`C3D_DepthTest` mask, for each reorder draw, for the staging draw (`SRC_COLOR`/`SRC_ALPHA`, REPLACE,
+`GPU_WRITE_COLOR`, as `present_init` sets it today, `back/present.cpp`:401-404) and for
+`present_close_frame()` according to `s_tex_reordered`. Today stage 0 is set once at init; without
+the helper a staging present after a zero-copy one would draw wrong colours (menus after a game,
+Classic after the Bottom Screen switch, `odd_surface`). The framebuffer word then equals the CPU present's (`to_fb`: A = 0), so
 `present_diff` should report 0 RGB and 0 alpha-only differences. **Exact by construction**: REPLACE
 passes the operand unchanged, and nearest sampling at texel centres is exact (P1's byte-identical
 result used the same quad, filter and REPLACE). A partial write mask is a read-modify-write of the
@@ -1538,8 +1555,12 @@ That the PICA honours a one-channel mask this way is **UNVERIFIED** on hardware:
 settles it on the console (5.7.9).
 
 GPU cost: three 400x240 fills instead of one, asynchronous (the CPU does not wait for them; they
-delay the framebuffer transfer and swap of the same frame). Size **UNVERIFIED**; the `[c3d] stats`
-line logs `C3D_GetDrawingTime()` (`renderqueue.h`:38) so the console shows it.
+delay the framebuffer transfer and swap of the same frame). Size **UNVERIFIED**.
+`C3D_GetDrawingTime()` (`renderqueue.h`:38) holds the last *finished* queue (the timer starts in
+`C3D_FrameEnd`+0x104-0x124 and stops in `onQueueFinish`+0x8c-0xb8), so it is sampled right after
+each `frame_begin()`: after frame U's it is the previous frame D (fills + framebuffer transfer),
+after frame D's it is frame U (the upload); both are averaged into the `[c3d] stats` line (critic
+round 1, 3).
 
 **Rejected:**
 - One draw, three TEV stages (`MODULATE` by constant (255,0,0), then `MULTIPLY_ADD`...): one fill,
@@ -1574,7 +1595,14 @@ must not return before the upload has read the surface. **A zero-copy present is
    three draws (or the `calibrate` clear), the VBlank guard, the `present_diff` framebuffer note,
    `frame_end(1)`, exactly as 5.1 steps 4-5.
 
-Queue entries: frame U 1 (transfer) + 1 split if `gpuCmdBufOffset != 0` + 1 (`C3D_FrameEnd`) ≤ 3;
+In B-a the same two frames carry today's staging (filled before frame U's flush), so the console
+measures exactly the cost structure of B-b with the fill still in place (5.7.11). Zones (profile
+builds): `c3d_fill` (the staging fill), `c3d_upload` (frame D's `frame_begin()`: the upload wait),
+`c3d_vblank` (the VBlank guard's `gspWaitForVBlank()`), `c3d_wait` stays frame U's (or the one-frame
+present's) `frame_begin()`.
+
+Queue entries: frame U 1 (transfer; `C3Di_SplitFrame` adds nothing when `gpuCmdBufOffset == 0`,
+base.o +0x0-0xc, which `C3D_FrameBegin` resets) + 1 (`C3D_FrameEnd`) ≤ 3;
 frame D 1 + 1 linked target = 2; each frame within the budget of 4 (2.4), counted per frame as today.
 
 **Rejected:**
@@ -1604,10 +1632,17 @@ unchanged (only the staging path writes the staging).
 
 #### 5.7.6 The gate, the release and the fatal paths (5.6: not to be broken)
 
-- The gate is evaluated once at the top of `a1_c3d_present()`, as now. Both `frame_begin()` calls
-  go through the existing function: bounded when the gate condition holds, `Abandoned` -> return true
-  (draw nothing), `AlreadyInFrame` -> the existing release path. If HOME arrives between frame U and
-  frame D, frame D's `frame_begin()` takes the bounded path like any present's.
+- The gate is evaluated at the top of `a1_c3d_present()`, as now (with `suspend_gate 1` a closed
+  gate returns Skip there, before any `frame_begin()`). HOME and sleep cannot arrive between frame U
+  and frame D: the APT hooks run only inside `aptMainLoop()` on the main thread (`aptHandleSleep`,
+  `aptJumpToHomeMenu`, `aptWaitForWakeUp`; `aptEventHandler` calls no hook, apt.o, critic round 1, 4).
+  **`aptShouldClose()` can flip in between** (`aptEventHandler` sets the close flags on its own
+  thread), so **`gate_closed()` is checked again after frame U**: if it now holds, frame D is not
+  drawn; the present finishes with a bounded retire of frame U (`frame_begin()` takes the bounded
+  path because the gate condition holds; `Abandoned` -> return true) and ends that frame empty
+  (`frame_end(0)`), so nothing is drawn while the gate condition holds (5.6.1 a). Otherwise both
+  `frame_begin()` calls behave as today's one: `Abandoned` -> return true, `AlreadyInFrame` -> the
+  existing release path.
 - All citro3d calls stay in `a1_c3d_present()` on the main thread; nothing new runs elsewhere.
 - `present_free()` does not free the surface buffer (the engine's surface uses it; 5.7.2). After a
   release or abandon the engine keeps drawing into it and the CPU present (if any) reads it.
@@ -1624,7 +1659,10 @@ unchanged (only the staging path writes the staging).
 - `present cpu`: the same (`nullptr`).
 - The default build (`A1_RENDER_C3D=OFF`): the engine edit and the declaration are fenced with
   `A1_RENDER_C3D`, so `screen.cpp` and every other TU compile as before; the OFF `alephone.elf` must
-  give `arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'` = 0, with 0 warnings.
+  give `arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d|main_surface_pixels'`
+  = 0, with 0 warnings, and its code must not change: `arm-none-eabi-objdump -d` of the OFF
+  `alephone.elf` (`build-3ds` and `build-3ds-prof`) before and after, identical (`ppcheck.sh` runs on
+  the host, where `A1_PLATFORM_3DS` is undefined, so it says nothing about the 3DS OFF build).
   The host build defines neither macro: `ppcheck.sh` IDENTICAL expected (or DIFFER with 0
   normalised lines).
 
@@ -1645,15 +1683,23 @@ the gain is overstated):
    reports G/B differences at every check (proves the check sees the reorder).
 3. Scripts 07, 08, 13, 14 (13 and 14 in both Bottom Screen settings: the HUD + Map <-> Classic
    switch moves the present between the two paths) and 22 (HOME > Close) pass; 0
-   `present_screen()` false returns; GX high-water ≤ 4.
+   `present_screen()` false returns; GX high-water ≤ 4. **Scripts 13 and 14 and a game -> main
+   menu run with `b-diff.cfg`: 0 differences after every path switch** (critic round 1, 1); negative
+   control: a temporary build that skips the stage-0 restore must show differences there. Exactly one
+   `[c3d] zero_copy: surface buffer` line across HUD + Map -> Classic -> HUD + Map, and the same
+   linear free after (the buffer is reused, 5.7.2).
 4. Profile build, same build both ways (`zero_copy 0` / `1`), HUD + Map @30 and @60, L0/L6/L20,
-   plus Classic @60 L0 (must be unchanged): `present`, `c3d_wait`, busy, `max`.
-5. `nm` on the OFF build; `ppcheck.sh` on `screen.cpp`.
+   plus Classic @60 L0 (must be unchanged): `present`, `c3d_wait`, `c3d_fill`, `c3d_upload`,
+   `c3d_vblank`, **`blit` and `bottom`** (the world blit now writes into lines the per-present flush
+   just cleaned; `bottom` already moved with P1: critic round 1, 6), busy, `max`.
+5. `nm` and the `objdump -d` comparison on the OFF builds (5.7.7); `ppcheck.sh` on `screen.cpp`.
 
 Console (runbook): `present_diff` with `zero_copy 1` (settles the write mask and the orientation,
 section 10 item 16), the four series A/B in one build (`zero_copy 0` / `1`), `c3d_wait` (upload time) and
-the logged drawing time; HOME, sleep, HOME > Close in a game; by eye. **Keep B only if busy drops
-in HUD + Map at 30 and 60 and Classic does not move** (rule 1).
+the logged drawing time; HOME, sleep, HOME > Close in a game; by eye. **Keep B-b only if, @30,
+HUD + Map `present` (all its zones) and busy drop on L0/L6/L20 (2 runs each)**; @60 HUD + Map and
+Classic are no-regression checks only (fps, `max`, `gaps`), because @60 a CPU saving can turn into
+VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
 
 #### 5.7.10 UNVERIFIED here
 
@@ -1661,7 +1707,29 @@ in HUD + Map at 30 and 60 and Classic does not move** (rule 1).
    time (estimate 0.2-0.6 ms): the `zero_copy` A/B series and `c3d_wait`.
 2. One-channel colour write masks on the PICA (read-modify-write with `COLORBUFFER_READ` 0xF):
    `present_diff` 0 on the console.
-3. The GPU time of three fills: `C3D_GetDrawingTime()` in the stats line.
+3. The GPU time of three fills, and whether they push the swap late @60: `C3D_GetDrawingTime()`
+   sampled after frame U's begin (5.7.3).
+4. The TEV RGB operands `GPU_TEVOP_RGB_SRC_G` / `_SRC_B` / `_SRC_ALPHA` copy that one channel into
+   R, G and B (`enums.h`:339-346 says only "Source green" etc.): `present_diff` 0 on the console
+   settles it together with item 2.
+5. Whether `blit` or `bottom` move with the surface in linear memory at a 2048-byte pitch.
+
+#### 5.7.11 Order: B-a, then B-b on the console's go
+
+- **B-a (port only, no engine edit, no `PATCHES.md` entry):** `debug-c3d two_frame 0|1` (default
+  0 = today's present, unchanged). With 1, a staging present runs as frames U and D of 5.7.4 with
+  the staging filled before frame U's flush, the gate re-check of 5.7.6, the stage-0 helper of
+  5.7.3 (one swizzle only: plain), drawing time sampled per 5.7.3; profile zones `c3d_fill`,
+  `c3d_upload`, `c3d_vblank` (also with `two_frame 0`, so both sides are measured the same way).
+  Azahar: `present_diff` 0, scripts 07/13/14/22 with `two_frame 1`; Azahar's `c3d_upload` is ~0 (it
+  completes GPU work synchronously), so the go/no-go is the console's. Console: HUD + Map @30
+  L0/L6/L20, `two_frame 0` and `1`, 2 runs each; **go for B-b iff `c3d_fill` − (`present` total with
+  `two_frame 1` − `present` total with `two_frame 0`) ≥ 0.5 ms on every level** (present total =
+  `present` + `c3d_wait` + `c3d_fill` + `c3d_upload` + `c3d_vblank`, the zones being exclusive).
+  The user decides on the result.
+- **B-b (on the go):** the engine edit (5.7.2, `PATCHES.md` 55), the reorder draws (5.7.3), the
+  zero-copy path selection (5.7.5), `zero_copy` (5.7.7); B-a's `two_frame` becomes the zero-copy
+  present's structure (zero-copy presents are always two-frame).
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 
@@ -1699,11 +1767,12 @@ when ON: `add_compile_definitions(A1_RENDER_C3D)`, sources,
 `fullbright 0|1`, `dump 0|1`, `calibrate 0|1`, `alt_load 0|1`,
 `vram_cap KiB`, `cmdbuf_kib N`, `gxq_budget N`, `fail_every N`,
 `film <path>`, `ssaa 0|1`, `test_vhalt 0-4`, `odd_surface 0|1`, `present_diff N`,
-and (5.6) `suspend_gate 0|1`, `retire_wait_ms N`, `close_frame 0|1`, `force_abandon 0|1`, (5.7) `zero_copy 0|1` (the
+and (5.6) `suspend_gate 0|1`, `retire_wait_ms N`, `close_frame 0|1`, `force_abandon 0|1`, (5.7) `two_frame 0|1`, `zero_copy 0|1` (the
 fatal-path tests are `3ds-port`'s `debug-fatal`, 5.6.3). `run-azahar.sh` gets
 `--c3d FILE` (like `--script`, `run-azahar.sh`:201-206). Profiler zones (port
 only, `a1_3ds_profile.h`:28-39, `profile_3ds.cpp`:55-57): `c3d_wait`,
-`c3d_readback`, `c3d_upload`.
+`c3d_readback`, `c3d_upload` (B-a uses it for the upload wait; M0-M5's texture uploads would get
+their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
 
 ### P0 — software baseline (no code)
 - `PREFS="fps_target=60 bottom_screen=0" RUNS=1 perf-bench.sh p0-hudmap60`,
@@ -1748,14 +1817,18 @@ only, `a1_3ds_profile.h`:28-39, `profile_3ds.cpp`:55-57): `c3d_wait`,
     written into `NEXT-SPRINT.md` for the user.
 
 ### B — the zero-copy present (5.7; plan B, after the P1 follow-ups 2)
-- One piece, `stage10: B <summary>`, tag `port-stage10-B`. Engine edit `PATCHES.md` 55
-  (`screen.cpp` creation site, fenced `A1_PLATFORM_3DS && A1_RENDER_C3D`, `ppcheck.sh`);
-  port: `a1_3ds::main_surface_pixels()` (`a1_3ds_platform.h` declaration, `back/present.cpp`
-  definition), the two-frame zero-copy present and the three masked draws, `close_frame`'s
-  matching draw, `debug-c3d` `zero_copy`, `C3D_GetDrawingTime()` in the stats line, config
-  `scripts/3ds/tests/c3d/b-zero-copy.cfg` (and `b-diff.cfg` with `present_diff 30`), host test
-  of the new key.
-- Accept (Azahar): 5.7.9 items 1-5. Then the console runbook (5.7.9, section 10 item 16).
+- **B-a** (5.7.11; commit `stage10: B-a <summary>`, no tag): port only. `back/present.cpp`
+  (two-frame staging present behind `two_frame`, `set_present_draw()`, gate re-check, drawing-time
+  sampling), `core/config.*` + host test (`two_frame`), `a1_3ds_profile.h` / `profile_3ds.cpp`
+  (zones `c3d_fill`, `c3d_upload`, `c3d_vblank`), configs `scripts/3ds/tests/c3d/b-two-frame.cfg`
+  and `b-diff.cfg`. Then a console session (runbook) and the user's go.
+- **B-b** (on the go; `stage10: B <summary>`, tag `port-stage10-B`): engine edit `PATCHES.md` 55
+  (`screen.cpp` creation site, fenced `A1_PLATFORM_3DS && A1_RENDER_C3D`, `ppcheck.sh`); port:
+  `a1_3ds::main_surface_pixels()` (`a1_3ds_platform.h` declaration, `back/present.cpp`
+  definition), the reorder draws, path selection, `close_frame`'s matching draw, `zero_copy` +
+  host test, `b-zero-copy.cfg`.
+- Accept (Azahar): 5.7.9 items 1-5 (B-a: the subset in 5.7.11). Then the console (section 10
+  item 16).
 
 ### M0 — renderer harness, calibration, null mode (after G1)
 - Add: `include/a1_c3d.h`; `front/frame.cpp` (`render_frame`, config, null
@@ -1994,9 +2067,9 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     modes 1-4, 6, 6b), shown by the main thread, exactly one screen each; the
     launcher starts again after each.
     Optional: mode 7 (the fallback's `svcExitProcess` without `aptExit`).
-16. 5.7 (plan B): the zero-copy present's one-channel write masks give `present_diff` 0 on
-    the console; the upload's GPU time (`c3d_wait`) and the three fills' drawing time; the
-    `zero_copy 0`/`1` series decide whether B is kept (5.7.9, 5.7.10).
+16. 5.7 (plan B): B-a's `two_frame 0`/`1` series @30 decides B-b (5.7.11); then B-b's one-channel
+    write masks and TEV operands give `present_diff` 0; the upload wait (`c3d_upload`) and the three
+    fills' drawing time; the `zero_copy 0`/`1` series decide whether B-b is kept (5.7.9, 5.7.10).
 
 ## 11. Open questions
 
@@ -2281,3 +2354,18 @@ From the critic's answers: 5.6.4 item 5 now lists the DSP (`ndspExit` skipped by
 fallback's `svcExitProcess`) as a console check. The round-1 note asking the
 coordinator to correct `PERF.md`/`NEXT-SPRINT.md` is replaced: done in `dcd9b55`
 and `17894b2`.
+
+### B design, round 1 (critic: REVISE, 2 major, 6 minor; 2026-10-26)
+
+Folded into 5.7: (1, major) TEV stage 0 is set once at init, so the reorder draws would leak into
+the staging path and `close_frame`: one helper sets stage 0 and the write mask before every draw,
+and `present_diff` runs across path switches (scripts 13/14, game -> menu) with a negative control;
+(2, major) the estimate was optimistic (the extra frame and the wake-up were left out; @60 is not
+0.05 ms repeatable) and the lower end is within the noise: B is split into B-a (port-only
+pre-measurement, two-frame staging present, zones `c3d_fill`/`c3d_upload`/`c3d_vblank`) and B-b
+(the engine edit) on a console go of ≥ 0.5 ms @30; the keep criterion is @30, with @60 and Classic
+as no-regression checks; (3) `C3D_GetDrawingTime()` sampled after each `frame_begin()`; (4) the
+gate text corrected, and `gate_closed()` re-checked between frames U and D (`aptShouldClose()` can
+flip off the main thread); (5) the OFF check adds `main_surface_pixels` to the `nm` pattern and an
+`objdump -d` comparison; (6) `blit` and `bottom` in the A/B metrics; (7) the buffer reuse is checked
+(one log line, same linear free); (8) the TEV operand semantics marked UNVERIFIED.
