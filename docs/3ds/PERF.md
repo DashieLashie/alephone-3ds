@@ -1168,6 +1168,11 @@ were done. Raw logs: `build-3ds/hw/a6/` (outside git).
   A3's 5000 presents (HOME, sleep and the keyboard never saw it closed), `present_diff` 0 of
   96000 pixels in 166 checks.
 - No frame-time measurement was taken in this session (no benchmark runs).
+- Part B, fatal-error releases (Console (New 3DS), 2026-10-25/26, no `debug-c3d`, GPU
+  present on): every one logged `queue retired after 0 ms` (modes 1-6, 11), 96-270 ms after
+  the last frame end, `C3D_Fini` returned, linear free back to 17776-17788 KiB, VRAM free
+  6144 KiB. Mode 6 ran 29 s from the first present to the error (+29.1 s) and exited at +49.6 s
+  (the user read the screen). The fallback runs (6b, mode 10) release nothing by design.
 
 ## Next candidates (not done)
 

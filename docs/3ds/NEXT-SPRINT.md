@@ -437,7 +437,8 @@ Azahar) [PERF "Next candidates"]
     capture shows the vhalt text; 8a/8t log the loser's text after its "blocked" line; mode 11
     logs the audio thread's text after "in its own fatal path"; 0 null reads in the last run's
     `azahar_log.txt` (it is overwritten each run).
-    **Console (New 3DS), 2026-10-24 (A6 session, partial: the session was stopped after B0):**
+    **Console (New 3DS), 2026-10-24 to 2026-10-26 (A6 sessions 1-3; `build-3ds-c3d` unless noted; 192.168.100.72; every run started
+    from the Homebrew Launcher; raw logs in `build-3ds/hw/a6/`, outside git).** Session 1, B0:
     boot-time control passes. `Marathon2` renamed to `Marathon2-x`, no `debug-c3d`/`debug-fatal`:
     the port's own screen on the console, text as the code builds it ("Aleph One cannot start /
     Scenario folder not found: sdmc:/3ds/alephone/Marathon2 (chosen by: default) / Copy a
@@ -445,9 +446,51 @@ Azahar) [PERF "Next candidates"]
     ends it, the Homebrew Launcher returns and Aleph One launches again. The log has `ERROR: Aleph
     One cannot start`, `error screen d6: thread main (id 964); stdout device after consoleInit:
     log`, `gfxExit call #1 (citro3d down)` (the error came before citro3d started, nothing to
-    release), `real gfxExit returned`, `exit`. No new Luma dump (still dumps 0-6). **Not run yet:**
-    mode 1 by eye, modes 2-4, 5, 6/6b, 10, 11, 7, and the shipping-build spot check (runbook
-    `CONSOLE-SESSION-A6.md` part B). The card was cleaned up (no `debug-fatal`).
+    release), `real gfxExit returned`, `exit`. No new Luma dump (still dumps 0-6).
+    **B1-B5 (session 2, 2026-10-25): all pass.** Mode 1: the bottom screen reads "Aleph One stopped /
+    debug-fatal mode 1: vhalt() on the main thread", not Luma's; log: `gfxExit call #1 (citro3d up:
+    release first)`, release (queue retired after 0 ms, `C3D_Fini` returned), `FATAL:`, `ERROR:
+    Aleph One stopped`, `error screen d6: thread main`, `gfxExit call #2 (citro3d down)`, `exit`.
+    Modes 2 (thread 1781), 3 (1903) and 4 (2025): handed to the main thread, the same release, one
+    screen on main, `exit`; mode 4 closes the critic's open P1 minor 4 on hardware (a second thread
+    never touches citro3d). Mode 5, in a HUD + Map game (681 presents): thread 2147 handed to main,
+    release 0 ms, one screen, the text stayed, launcher back.
+    **B6, mode 6 (session 3, 2026-10-26): pass.** vhalt() in the SDL audio callback on thread 284:
+    `fatal error on thread 284: handed to the main thread`, release (queue retired after 0 ms, 96 ms
+    since the last frame end), one screen drawn by main, `fatal exit, audio thread parked: gfxExit,
+    no SDL_Quit`, `real gfxExit returned`, `exit`. The user: the port's screen, one A, launcher
+    back; **silent** after the error and in the launcher; the sound was normal again after the game
+    closed. No new dump.
+    **B6b: FAIL on the console.** Mode 6 + lock 1 (main takes SDL's audio lock in a loop): thread 359
+    `handed to the main thread`, then `not acknowledged in 5 s; shown on this thread`, `error screen:
+    citro3d still up (fallback off main): logged only`, `fallback error screen left;
+    svcExitProcess`. The screen: no port error screen; the console went to the HOME menu with the
+    system's own fatal-error message (a software error forcing the software to close; press A and
+    the console restarted). The DSP check could not be made (the reboot). No new Luma dump. Azahar
+    ends this run cleanly; the console does not, so 5.6.3's row 6b ("accepted, as long as it ends
+    cleanly") is not met on hardware.
+    **B7, mode 10: FAIL on the console, the same way.** Thread 292 `error_screen()`, main asleep 7 s:
+    `not acknowledged in 5 s; shown on this thread`, citro3d up so nothing drawn (`logged only`),
+    `svcExitProcess` at once; the user saw "An error has occurred forcing the software to close. The
+    system will now restart." and the console restarted. The expected `the request was taken back
+    ... blocking` line never appears: with citro3d up the fallback exits without waiting, so main
+    never wakes (by design, 5.6.2 a). No new dump. **Mode 11: pass.** `error_screen()` on main first
+    (release 0 ms), the audio thread's vhalt text logged as `main thread: in its own fatal path; the
+    request's text, not shown`, `fatal exit, audio thread parked`, `exit`; launcher back, silent.
+    **Spot check, shipping build (`build-3ds/alephone.3dsx`, software): B1 and B2 pass.** No `[c3d]`
+    lines; mode 1: `error screen d6: thread main`, `exit`; mode 2: thread 533 handed to main, one
+    screen, `exit`; launcher back both times.
+    **Not run:** B8 (mode 7; skipped by the user's choice, 6b and mode 10 already took its
+    `svcExitProcess` path) and part D (see item 16). **Finding and next step (no code was changed
+    in these sessions):** with citro3d up, the fallback (main not serving for 5 s) ends in
+    `svcExitProcess` without `aptExit`/`gspExit`, and on a New 3DS that makes the system restart the
+    console instead of returning to the launcher. The fallback is only reached when main stalls
+    for 5 s (the test modes do it on purpose), but the exit must still be clean. UNVERIFIED which
+    skipped call matters. First check: mode 7 on the **shipping** build (fallback draws its screen,
+    A, then the same `svcExitProcess`): if that returns to the launcher, the cause is the citro3d-up
+    state or the GPU right; if it restarts the console too, it is the missing `aptExit`. Then a fix
+    through `c3d-implementer` and `c3d-critic` (medium), Azahar, and a console re-check of 6b and 10.
+    The card was cleaned up (no `debug-fatal`).
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -464,8 +507,19 @@ Azahar) [PERF "Next candidates"]
     mirror stopped (stalled); the SD log goes on` to the SD log. Console check: during a
     3dslink run, `kill -STOP` the host's 3dslink process for ~10 s: the game must keep
     running, the SD log must show that line, and the transcript stops there.
-    **Console (New 3DS), 2026-10-24 (A6 session):** the `kill -STOP` check (part C of
-    `CONSOLE-SESSION-A6.md`) has **not been run yet**.
+    **Console (New 3DS), 2026-10-26 (A6 session 3, `build-3ds-c3d` over 3dslink, HUD + Map @60):
+    inconclusive.** The host 3dslink was stopped with `kill -STOP` in a game, first for 10 s, then
+    for 150 s. The game kept running (60 presents per second throughout, 1220 to about 11900
+    presents), but the stall path never ran: no `3dslink mirror stopped (stalled)` line in the card
+    log, and the transcript caught up after each `kill -CONT`. Why: the code gives up only when
+    `send()` returns EAGAIN for 500 ms (`kLinkStallMs`), i.e. when the console's socket send buffer
+    is full; the in-game log is one ~170-byte stats line per second, and the host kernel keeps
+    accepting bytes while its 3dslink process is stopped, so 150 s (~26 KB) does not fill both
+    buffers. The "~10 s" step of the check cannot trigger it at this log rate. **Next step:** repeat
+    with a chattier log (a debug flag that logs per frame, such as `debug-input`) or a much longer
+    freeze. Also: a 3dslink launch **overwrites `sdmc:/3ds/alephone.3dsx` on the card** with the
+    file it sends (the shipping build was replaced by the GPU build); put the wanted `.3dsx` back
+    afterwards.
 
 16. **HOME > Close in a game took the slow path: `APTHOOK_ONEXIT` fires too late**
     (design `CITRO3D_DESIGN.md` 5.6.1 c, piece 3, branch `stage10-c3d`). `exit_requested()` read
@@ -538,7 +592,8 @@ Azahar) [PERF "Next candidates"]
     `ONRESTORE`, and the exit about 1 s later (gate closed, `queue retired after 0 ms`, `release
     done`, `exit`); the user lands on the HOME menu. So the runbook's "POWER then cancel, presents
     resume" expectation is wrong for this console: the cancel path is the same close as a Close,
-    and it is clean. **Not tested:** hold POWER > Power Off (part D), so the "no quit dialog
+    and it is clean. **Part D (hold POWER > Power Off) was not run** (2026-10-26: the user chose
+    not to power the console off), so the "no quit dialog
     after the d1 line" check for that route is still open (the POWER route above was taken at
     the main menu, so it also shows no dialog).
 
@@ -879,11 +934,16 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
         the release, `queue retired after 0 ms`, `release done`, `exit` about 1 s later; the user
         is left at the HOME menu. The earlier expectation "presents resume after the cancel"
         does not hold on this console; the close is clean.
-      **Not run in this session** (stopped by the user after B0): part B from B1 on (modes 1, 2,
-      3, 4, 5, 6, 6b, 10, 11, 7 and the shipping-build spot check), part C (the mirror stall,
-      item 15) and part D (hold POWER > Power Off). Item 14 and 15 text records what was done.
-   6. **Partly done (2026-10-24): part A and B0 pass, B1+, C and D remain** (see the console results under
-      item 5 and in items 14-16; resume with `CONSOLE-SESSION-A6.md`, from B1).
+      **Parts B and C (sessions 2-3, 2026-10-25/26):** see items 14 and 15 (B1-B5, 6, 11 and the
+      shipping spot check pass; 6b and mode 10 end in the system's restart; part C inconclusive).
+      **Not run:** B8 (mode 7, skipped by the user's choice) and part D (hold POWER > Power Off,
+      declined by the user).
+   6. **Done on the console (2026-10-26) with two findings** (see the results under item 5 and in
+      items 14-16): part A, B0-B5, 6, 11 and the shipping spot check pass; **6b and mode 10 fail**
+      (the fallback's `svcExitProcess` makes the system restart the console, item 14); part C
+      is inconclusive (item 15); B8 and part D were not run. Open: the fallback exit fix, then a
+      console re-check of 6b and 10, mode 7 on the shipping build, part C with a chattier log,
+      part D.
       **One console session** (procedure and order for a fresh agent: `docs/3ds/CONSOLE-SESSION-A6.md`) for all of it: design 5.6.1 runs 1-4 (written out in item 5), the `debug-fatal`
       list in item 14 (boot-time control, mode 1 by eye, modes 2-4, 6, 6b; the launcher
       relaunches Aleph One after each; the DSP falls silent after 6/6b/7), the mirror

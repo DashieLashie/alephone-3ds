@@ -1273,19 +1273,27 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
    piece 5 implements the 500 ms bound (`retire_wait_ms`). Console (New 3DS, 2026-10-24,
    A6): **500 ms was never hit** in the 6 gate-on releases of runs 2-4 (`queue retired after
    0 ms` every time, no `release abandoned`), so it is not too tight for a HOME > Close
-   release. **Open:** a release right after a busy frame (an error screen, part B of
-   `CONSOLE-SESSION-A6.md`, not run). The 5 s window of run 1 is not needed to see the
+   release. Also not hit in the six fatal-error releases of part B (B1-B6, 11:
+   `queue retired after 0 ms`, 96-270 ms after the last frame end; Console (New 3DS),
+   2026-10-25/26). The 5 s window of run 1 is not needed to see the
    failure: the queue was still not retired at 5000 ms, so any wait is spent in full; a
    shorter diagnostic bound would have shown the same.*
 4. SPECULATIVE: dump 5 is the teardown-on-another-thread class (5.6.3 tests 2-4 on
-   the console, launcher check). *Status: still pending (A6 stopped before part B2-B4).*
+   the console, launcher check). *Status: **VERIFIED** on a New 3DS, 2026-10-25 (A6 B2-B4): modes 2,
+   3 and 4 are handed to the main thread, one port screen, `exit`, launcher back, no new Luma
+   dump (still 0-6); mode 4 shows that a non-main `error_screen()` never touches citro3d.*
 5. The fallback's `svcExitProcess` skips `gspExit`, `aptExit` and `ndspExit`: the
    HOME menu and the launcher survive, and the DSP does not go on playing buffers
    from the freed heap (listen for a buzz or a looping fragment after the exit; mode
    7, console, optional). The **audio-thread variant** skips `ndspExit` too (`_Exit` ->
    `__appExit` does not stop the DSP, and SDL's audio close is skipped): the same
    silence check applies to mode 6, and to 6b when it ends in the fallback (critic,
-   piece 2 review round 1, minor 8). *Status: still pending (A6 stopped before part B6/B8).*
+   piece 2 review round 1, minor 8). *Status: **mode 6 VERIFIED** on a New 3DS, 2026-10-26: silent
+   after the error and in the launcher. **REFUTED for the fallback**, 2026-10-26 (6b and mode
+   10, citro3d up): `svcExitProcess` without `aptExit`/`gspExit` does not return to the
+   launcher; the system shows its own fatal-error message and restarts the console. The DSP
+   check could not be made after those restarts. Which skipped call matters is UNVERIFIED: run
+   mode 7 on the shipping (software) build, whose fallback also ends in `svcExitProcess`.*
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 

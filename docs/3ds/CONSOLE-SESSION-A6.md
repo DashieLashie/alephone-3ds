@@ -53,6 +53,17 @@ user says yes, then Cleanup and Recording (docs, `stage10: A6 console session re
 B/C/D)` on `stage10-c3d`, identical item 14/15/16 text on `3ds-port`, backup bundle,
 memory file).
 
+## Session 3 (2026-10-26): finished; results are in `NEXT-SPRINT.md` items 5, 14-16
+
+B6 (mode 6) and B7 mode 11 pass, the shipping-build spot check (B1, B2) passes. **B6b and B7
+mode 10 fail on the console:** the fallback's `svcExitProcess` (citro3d up, nothing drawn) ends
+in the system's "software error, the system will now restart" message and a reboot, not in the
+launcher. Part C was inconclusive (10 s and 150 s freezes did not fill the socket buffers).
+B8 and part D were not run (the user's choice). Notes for a future run: a 3dslink launch
+overwrites `/3ds/alephone.3dsx` on the card; the log rate in game is too low for the
+`kill -STOP` check, use a chattier flag; the card was cleaned up at the end (shipping build,
+the user's own prefs, no `debug-*`).
+
 ## State at handoff
 
 | Branch | Head | Contents |
