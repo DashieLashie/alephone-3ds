@@ -15,8 +15,11 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   `.claude/worktrees/stage10-c3d`. P0 (software baseline) and P1 (GPU present, tag `port-stage10-P1`) are done.
   The G0-b console runs were all done on 2026-10-19 (`PERF.md` "Console G0-b", two sessions). **User decisions
   (2026-10-19):** keep the GPU present, G1 = build the renderer aiming at M7 (supersampling) and M9 (stereo),
-  try the zero-copy present. The plan is the end of `docs/3ds/NEXT-SPRINT.md`: fixes first (HOME > Close in a
-  game hangs with the GPU present; backlog items 14 and 15), then zero-copy, then M0-M6, M7, M9.
+  try the zero-copy present. The plan is the end of `docs/3ds/NEXT-SPRINT.md`. **Plan A (the fixes) is complete and
+  verified on the console (2026-10-26):** the HOME > Close hang (A5/A6), the fatal-error hand-off, the 3dslink
+  mirror stall, Power Off, and the fatal fallback's exit (A7, also carried to `3ds-port`). **Next: B, the zero-copy
+  present** (one engine edit, `PATCHES.md` 55+; the user's go is the 2026-10-19 decision), **then C: M0-M6, M7, M9.**
+  Stage 10 is not paused and needs no further decision before B. G0 and G1 are behind us.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
 - Hardware: one **New 3DS / New 2DS**. Every Old 3DS figure comes from Azahar's Old 3DS mode and is unverified.
@@ -168,7 +171,7 @@ netloader can't run at once. Full procedure: `NEXT-SPRINT.md` "How to drive the 
 
 Goal (user-confirmed 2026-10-16): **HUD + Map at Framerate Target 60 sustains >= 55 fps on L0/L6/L20 on a New 3DS**,
 no regression at 30, Classic @60 no worse than 53.16 fps. At 30 fps the software renderer already idles over half the
-frame, so "faster at 30" is not a goal. Order: P0 baseline -> P1 GPU present -> **G0** -> (user's G1) -> M0-M5
+frame, so "faster at 30" is not a goal. Order: P0 baseline -> P1 GPU present -> G0 (done) -> G1 (decided: build) -> plan A fixes (done) -> B zero-copy -> M0-M5
 renderer in readback mode (no speedup) -> M6 direct mode (the payoff) -> M7-M9 optional. The design is
 `docs/3ds/CITRO3D_DESIGN.md` (critic-approved round 3; section 10 is the "Needs console verification" list,
 section 7 the milestones). Code layout under `ports/3ds/render_c3d/`: `core/` plain C++ (host-testable), `front/`
@@ -180,7 +183,7 @@ then tag. `docs/3ds/KICKOFF_PROMPT.md` is the original prompt.
 
 | Doc | Answers |
 | --- | --- |
-| `NEXT-SPRINT.md` | rules carried over, how to drive the console, open backlog, **the pending runbooks** (stage 2, catch-up, G0-b) |
+| `NEXT-SPRINT.md` | rules carried over, how to drive the console, open backlog, **the runbooks** (stage 2, catch-up, G0-b, fallback exit; each says at its head whether it was run) |
 | `PATCHES.md` | every upstream-source edit, numbered, with its non-3DS check |
 | `PERF.md` | profiler, benchmark method, every measurement and rejected experiment, load times, stage 10 P0/P1 |
 | `STAGE7.md` / `STAGE6.md` / `STAGE5.md` / `STAGE4.md` | bottom screen (HUD + Map) / audio / controls (open items table) / boot + paths + diagnostics |

@@ -217,5 +217,5 @@ and update the memory file `stage10-paused-at-g0.md`.
 - **Fixes go through the agents afterwards:** `c3d-implementer`, then `c3d-critic` at
   **medium effort** (the user's standing preference), then Azahar, then a short console
   re-check.
-- **Plan B** (zero-copy present) and the renderer wait until plan A passes here. Plan B
-  then needs the user's go.
+- **Plan B** (zero-copy present) and the renderer wait until plan A passes here. *(Plan A
+  passed, 2026-10-26; the user's go for B is the 2026-10-19 decision in `CITRO3D_DESIGN.md` 0.5.)*

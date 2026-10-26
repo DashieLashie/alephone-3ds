@@ -573,6 +573,15 @@ Azahar) [PERF "Next candidates"]
     `gfxExit`** (F2, F3), so the `GSPGPU_ReleaseRight` candidate in the runbook is not needed. Not
     exercised: the other branches of `aptExit` (this console always took the chainload one).
     Part C: item 15. Part D: item 16.
+    **Carried to `3ds-port` (2026-10-26, the user's decision after the console passed):** cherry-pick of
+    `stage10-c3d`'s `db10ade` and `5da39e0` (port code only: `a1_3ds_platform.cpp/.h`, `input_3ds.cpp`,
+    `scripts/3ds/run-azahar.sh`; no `Source_Files/` edit, so no `PATCHES.md` entry), squashed into one commit;
+    one comment in `a1_3ds_platform.cpp` now states the console result instead of "UNVERIFIED"; the
+    design doc stays on `stage10-c3d`. `build-3ds` rebuilt: 0 warnings, `arm-none-eabi-nm` 0 citro3d
+    symbols. **Console (New 3DS), 2026-10-26, the shipping build (`build-3ds/alephone.3dsx` of
+    `3ds-port` at `b6cc886`), mode 7: pass.** The same lines as F1 (`gfxExit`, `should close 0 ...
+    aptExit`, `svcExitProcess`), no `[c3d]` lines, the launcher came back with no restart message,
+    no new Luma dump. The shipping build no longer restarts the console in the fallback.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -804,11 +813,12 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
 
 ## Stage 10 G0-b runbook (the citro3d GPU present on the console)
 
-Stage 10 is **paused at G0** (user's decision, 2026-10-16; `CITRO3D_DESIGN.md`
-0.5). G0-b decides whether to keep the GPU present (P1, tag `port-stage10-P1`):
-**HUD + Map `present` drops ≥ 2 ms with no visible change**. Then the user
-decides G1 (build the 3D renderer). Same driving as "How to drive the console";
-kill leftover 3dslink first.
+*(Historical: the pause at G0 was the user's decision of 2026-10-16, and it is over.
+G0-b ran on 2026-10-19 and the user decided the same day: keep the GPU present, and
+G1 = build the renderer (`CITRO3D_DESIGN.md` 0.5). Stage 10 is **not** paused; the plan
+below is in progress.)* G0-b asked whether to keep the GPU present (P1, tag
+`port-stage10-P1`): **HUD + Map `present` drops ≥ 2 ms with no visible change**. Same
+driving as "How to drive the console"; kill leftover 3dslink first.
 
 **All console steps are done** (2026-10-19, two sessions: `PERF.md` "Console
 G0-b, first session" and "second session"). In short:
@@ -874,7 +884,8 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       modes 1, 2, 6, 11: release on main, then the error screen, `exit`; modes 7, 10: the
       fallback line above, `svcExitProcess`; scripts 22 fast (no dialog frame) and plain (the
       dialog frame; Azahar keeps GPU rights, so no hang); 0 null reads in each run.
-   **Next: 6 (the console session), then B.**
+   **Plan A is complete (2026-10-26): pieces 0-5 are done, A6 and A7 passed on the console (items 14-16).
+   Next: B (the zero-copy present), then C (the renderer).**
    5. **Done (Azahar; console check pending), 2026-10-24:** the HOME > Close hang (A1, design
       5.6.1 a/b), `stage10-c3d` only, no engine edit (no `PATCHES.md` entry), commit
       `stage10: A5 ...`. What it is, in the order of the code:
@@ -1097,9 +1108,7 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       `PATCHES.md` entry. **These files are shared with `3ds-port`, which still has the old
       fallback** (the shipping build restarts the console in mode 7); A7 is on `stage10-c3d`
       only, by the user's instruction for this task (design 5.6.0 row A7); carrying it over is
-      the user's decision once the console passes. Results: item 14. Next: the "Fallback exit
-      runbook" at the end of this file (F0-F3, optional F4/F5, then part C; part D only if the
-      user says yes).
+      the user's decision once the console passes (done, item 14). Results: item 14.
       **Console (New 3DS), 2026-10-26: the A7 console session passes** (item 14 F1-F5, item 15 C1-C2,
       item 16 part D; no new Luma dump in any run). The fallback ends cleanly on hardware in both
       builds: mode 7 (software), 6b and 10 (GPU) return to the launcher with no restart message; HOME
@@ -1108,8 +1117,8 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       the exit is `svcExitProcess` after `aptExit` (not the `APT_CloseApplication` path Azahar
       shows); `APT_CloseApplication` runs only after HOME > Close (F5) and returns. So the working
       part of the fix is the `aptExit` (plus `gfxExit` in the software build); `gspExit` is not
-      needed in the GPU build. **A7 is still on `stage10-c3d` only; carrying it to `3ds-port` is the
-      user's decision (asked at the end of the session).**
+      needed in the GPU build. **A7 was carried to `3ds-port` on 2026-10-26** (item 14), and the shipping
+      build passes mode 7 on the console.
 B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
    Measured on the console against the current GPU present.

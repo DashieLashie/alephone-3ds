@@ -119,6 +119,10 @@ the target on the console). **Try the zero-copy present** (critic P1 finding 3).
 Order: the fixes, then the zero-copy present, then M0-M6, M7, M9 (open questions
 3 and 9).
 
+**Status, 2026-10-26:** G0 and G1 are behind us. The fixes (plan A, 5.6.0 pieces 0-5 and
+A6/A7) are done and verified on the console; the next piece is the zero-copy present (plan B),
+then M0 onwards. The user's go for B is the 2026-10-19 decision above.
+
 ## 1. Frame flow and the seam
 
 ### 1.1 Software path per frame (reference)
