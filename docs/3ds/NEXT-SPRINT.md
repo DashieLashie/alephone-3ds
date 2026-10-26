@@ -560,6 +560,14 @@ Azahar) [PERF "Next candidates"]
     `gfxExit`** (F2, F3), so the `GSPGPU_ReleaseRight` candidate in the runbook is not needed. Not
     exercised: the other branches of `aptExit` (this console always took the chainload one).
     Part C: item 15. Part D: item 16.
+    **Carried to `3ds-port` (2026-10-26, the user's decision after the console passed):** cherry-pick of
+    `stage10-c3d`'s `db10ade` and `5da39e0` (port code only: `a1_3ds_platform.cpp/.h`, `input_3ds.cpp`,
+    `scripts/3ds/run-azahar.sh`; no `Source_Files/` edit, so no `PATCHES.md` entry), squashed into one commit;
+    one comment in `a1_3ds_platform.cpp` now states the console result instead of "UNVERIFIED"; the
+    design doc stays on `stage10-c3d`. `build-3ds` rebuilt: 0 warnings, `arm-none-eabi-nm` 0 citro3d
+    symbols. **The shipping build with A7 has not been run on the console** (F1-F5 used `stage10-c3d`'s
+    software build, which is the same fallback code): a console re-check of mode 7 (F1) with
+    `build-3ds/alephone.3dsx` is the remaining step.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its

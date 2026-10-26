@@ -97,6 +97,11 @@ void fatal_guard_enter();
 void fatal_guard_leave();
 void fatal_note_audio_thread();
 bool fatal_audio_parked();
+// The requester is running the fallback (step 3a): apt_hook() on another thread stays
+// quiet, and fatal_log_raw() writes one line straight to the log fd (a bounded try-lock
+// of the tee lock, 200 ms, then unlocked; never printf: main may hold the tee lock).
+bool fatal_fallback_active();
+void fatal_log_raw(const char* text);
 bool is_abort_handler(void (*handler)(int));
 
 // debug-fatal (docs/3ds/CITRO3D_DESIGN.md 5.6.3 tests, source/fatal_test_3ds.cpp):
