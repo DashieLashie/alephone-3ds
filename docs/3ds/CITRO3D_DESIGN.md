@@ -1176,7 +1176,10 @@ the first call of the port's callback, `timed_callback`, `audio_3ds.cpp`:157), a
       `fallback exit: watchdog fired (stuck in <step>); svcExitProcess` raw and calls
       `svcExitProcess()`. A hang in the steps below therefore ends exactly as before this
       piece (the system's restart), never worse. If the thread cannot be created, log it
-      and go on without it.
+      and go on without it. *Built (A7):* the watchdog starts after `error_screen_here()`
+      returns, not before: the screen waits for A/START, and a 5 s timer would end it.
+      So the screen itself stays unguarded (a hang inside its `aptMainLoop()`, e.g. in a
+      HOME transition), as before A7; only the exit steps are timed (critic round 1, 6).
    2. **Software build only (`A1_RENDER_C3D` off): `gfxExit()`**, as every clean exit did
       before its APT close (SDL's video quit reaches it there). The c3d build skips it:
       with citro3d up T must not touch the GPU state (5.6.2 a; `gspExit` joins the thread
@@ -1184,7 +1187,15 @@ the first call of the port's callback, `timed_callback`, `audio_3ds.cpp`:157), a
       `C3D_FrameEnd`), and with citro3d down the only reachable `gfxExit` is
       `__wrap_gfxExit`, which `printf`s through the tee lock that main may hold. This
       split is also the diagnosis: if mode 7 (software) passes and 6b/10 (GPU) do not,
-      `gspExit` matters too.
+      `gspExit` matters too; the GPU build then ends still holding the GPU right with the
+      GSP event thread alive, and the next candidate is a bare `GSPGPU_ReleaseRight()` on T
+      before `aptExit` (one IPC, no thread join; UNVERIFIED that it matters; critic round 1,
+      5). Known window (software build): after `gspExit` the GSP shared memory is unmapped
+      (`gspgpu.c`:218-220); a main thread that is not stuck for good and reaches a present
+      (`gfxScreenSwapBuffers`) before APT ends the process would fault (a Luma data abort, not
+      a clean close). Not reachable in the test modes (mode 10's main blocks at its next
+      service point, `video_3ds.cpp`:233, before a present); the window is `aptExit` plus one
+      IPC (critic round 1, 4).
    3. **`aptExit()`**, once. The port's `apt_hook`, when it runs on a thread other than
       main while the fallback is active, logs one raw line and returns: no `printf`, no
       SDL call (an ONEXIT under a close order would otherwise `printf` through the tee
@@ -1195,7 +1206,12 @@ the first call of the port's callback, `timed_callback`, `audio_3ds.cpp`:157), a
       `aptExitProcess`), call it: `APT_CloseApplication`, as `__libctru_exit` would,
       without the heap frees before it. Otherwise (reinit or chainload branch, or the
       loader's own return address, which expects a freed heap) `svcExitProcess()`. If the
-      call returns, `svcExitProcess()`. The log line before it says which.
+      call returns, `svcExitProcess()`. The log line before it says which. **Only the
+      close branch ends the way libctru does.** With `RUNFLAG_APTREINIT` libctru sends
+      `APT_Finalize` and `__libctru_exit` then calls the loader's return address after
+      freeing the heap; the fallback cannot (the heap is in use) and ends in
+      `svcExitProcess()`: that is the A6 failure plus one IPC, so expect the restart there
+      (critic round 1, 2). d7 says which branch the launcher selects.
    Not run: `ndspExit` (can hang; mode 6 ended silent without it), `hidExit`, `fsExit`,
    `archiveUnmountAll`, `srvExit` (the kernel closes their sessions; no evidence that they
    matter; UNVERIFIED), and the heap frees (they are what faulted in dump 6: threads
@@ -1310,7 +1326,7 @@ does for `test_vhalt`; `stage10-c3d` keeps `test_vhalt` 1-4 for the citro3d inte
 | 5 | `error_screen()` on a second thread 10 s into a HUD + Map game (script 23) | the same; two captures 5 s apart, identical bottoms with the text |
 | 6 | `vhalt()` **inside the SDL audio callback** at a quiet moment, a scripted `home 2000` during the error screen | `s_audio_parked`, fatal-exit variant logged; no deadlock (the HOME round trip and A both work); clean exit |
 | 6b | the same, fired while main is inside the engine's audio lock: during a music-volume change (Preferences) or at a level transition (`OpenALManager.cpp`:144, :221) | either served with the variant or, main blocked on `SDL_LockAudio`, the fallback after 5 s; both accepted, as long as Azahar ends cleanly (game list back, no guest fault); in the fallback the exit lines of mode 7 |
-| 7 | a second thread takes a `LightLock` that main takes every frame, then fails | no acknowledgement; after 5 s **one** fallback screen drawn on that thread by `error_screen_here` (no second `handed to the main thread` line: no recursion), fallback lines in the log via the raw fd; A; then (step 3a) raw lines `fallback exit: starting the 5 s watchdog`, `fallback exit: gfxExit` (software build only), `fallback exit: should close 0, run flags 0x0 (...), return address null; aptExit` (Azahar: not homebrew, flags 0, return address null at d7), `fallback exit: APT_CloseApplication via __system_retAddr` (the close branch changed the address; the other branch logs `svcExitProcess (aptExit branch: reinit/chainload/crippled: retAddr unchanged)`); the run ends (Azahar's game list returns), no `watchdog fired` line, 0 null reads. With the ON build and citro3d up: nothing drawn, no wait, immediate exit, the same lines minus `gfxExit`. The watchdog itself is tested by hanging `aptExit` on purpose (temporary build): `watchdog fired (stuck in aptExit); svcExitProcess` after 5 s |
+| 7 | a second thread takes a `LightLock` that main takes every frame, then fails | no acknowledgement; after 5 s **one** fallback screen drawn on that thread by `error_screen_here` (no second `handed to the main thread` line: no recursion), fallback lines in the log via the raw fd; A; then (step 3a) raw lines `fallback exit: starting the 5 s watchdog`, `fallback exit: gfxExit` (software build only), `fallback exit: should close 0, run flags 0x0 (...), return address null; aptExit` (Azahar: not homebrew, flags 0, return address null at d7), `fallback exit: APT_CloseApplication via __system_retAddr` (the close branch changed the address; the other branch logs `svcExitProcess (aptExit left __system_retAddr unchanged: reinit, chainload, crippled, or not the last APT reference)`); the run ends (Azahar's game list returns), no `watchdog fired` line, 0 null reads. With the ON build and citro3d up: nothing drawn, no wait, immediate exit, the same lines minus `gfxExit`. The watchdog itself is tested by hanging `aptExit` on purpose (temporary build): `watchdog fired (stuck in aptExit); svcExitProcess` after 5 s |
 | 8 | two fatal errors at once: the audio callback and a second thread, 1 ms apart, in either order | one screen, drawn by main; the loser logs one raw line and blocks; the exit takes the audio variant in both orders (no `SDL_Quit` deadlock) |
 
 With the ON build, modes 2-5 also with `p1-gpu.cfg`: `release done` on the main
@@ -1381,7 +1397,9 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
    "Fallback exit runbook".*
 6. Which `aptExit` branch the Homebrew Launcher's run flags select on this console (d7 at
    boot), and whether `APT_Finalize` alone (the reinit branch) also ends cleanly if that is
-   the branch. *Status: UNVERIFIED; read d7 in any console log after piece A7.*
+   the branch (expected not: the fallback then skips the loader's return, step 3a.4).
+   *Status: UNVERIFIED; read d7 in any console log after piece A7. Azahar (non-authoritative,
+   2026-10-26): `homebrew 0, run flags 0x0`, return address null: the close branch.*
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 

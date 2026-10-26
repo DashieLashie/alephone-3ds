@@ -964,3 +964,137 @@ B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
+
+## Fallback exit runbook (piece A7 on the console; when the user is back)
+
+Written 2026-10-26 (overnight, no console). Piece A7 (`stage10-c3d`, `db10adee1`; design
+`CITRO3D_DESIGN.md` 5.6.3 step 3a) changes how the fatal fallback ends: instead of a bare
+`svcExitProcess()` (the system's "An error has occurred forcing the software to close. The
+system will now restart." in A6, item 14) it runs `gfxExit()` (software build only),
+`aptExit()` and `APT_CloseApplication` (through `__system_retAddr`), behind a 5 s watchdog.
+**Everything here is UNVERIFIED on the console**: that the missing APT close was the cause,
+that `aptExit()` off the main thread ends cleanly on hardware, and whether `gspExit` matters.
+Driving as in "How to drive the console"; setup, flag swaps and log fetching exactly as
+`CONSOLE-SESSION-A6.md` "Setup", with `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw/a7`
+(`mkdir -p $H`) and the user's own preferences (HUD + Map @60: the modes fire at the main
+menu, 20 s after the first present). Every run starts from the **Homebrew Launcher** (not
+3dslink: the raw fallback lines are only on the card, and a 3dslink launch overwrites
+`sdmc:/3ds/alephone.3dsx`).
+
+**Builds.** Both from the `stage10-c3d` worktree, where A7 is:
+`build-3ds/alephone.3dsx` (software renderer, A7) and `build-3ds-c3d/alephone.3dsx` (GPU
+present, A7). **Not** the main checkout's `build-3ds` (`3ds-port`, the shipping build: it does
+not have A7). Check first: `cmake --build build-3ds && cmake --build build-3ds-c3d` (nothing to
+do / 0 warnings), and `$DEVKITARM/bin/arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE
+'citro|C3D_|a1_c3d'` prints 0.
+
+**Pass for F1-F3:** the port's error screen where it can be drawn (software build; with the
+GPU present up nothing is drawn by design, the top screen stays frozen until the exit), then
+the **Homebrew Launcher** comes back and Aleph One launches again from it; **no** system
+restart message, **no** Luma exception screen, **no new Luma dump** (dumps 0-6 exist:
+`/luma/dumps/arm11/`, list it before and after); silent (listen after the exit and after the
+relaunch). After each run fetch `log.txt` into `$H/F<n>.log` before the next launch and check
+its boot lines: `[3ds] debug-fatal: mode N ...` must match the run.
+
+0. **F0, d7 (read off F1's log, no extra run):** the boot line `[3ds] env: homebrew <0|1>,
+   run flags 0x<hex> (aptworkaround <0|1>, aptreinit <0|1>, aptchainload <0|1>), return address
+   <set|null>`. Record it in `CITRO3D_DESIGN.md` 5.6.4 item 6. Prediction from libctru's
+   `aptExit()` (`apt.c`:371-440): `aptreinit 0` and no close order give the close branch, i.e.
+   the line `fallback exit: APT_CloseApplication via __system_retAddr` below. `aptreinit 1` gives
+   `APT_Finalize` and `svcExitProcess (aptExit left __system_retAddr unchanged: ...)`: record it;
+   **expect the restart then** (libctru would call the loader's return address after freeing
+   the heap, which the fallback cannot do: design 5.6.3 step 3a.4), and report it as the
+   finding rather than running F2/F3 blind. Azahar shows `homebrew 0, run flags 0x0`, return
+   address null.
+1. **F1, mode 7, software build** (install `build-3ds/alephone.3dsx` of the worktree as
+   `/3ds/alephone.3dsx`; `debug-fatal` = `scripts/3ds/tests/fatal/mode-7.cfg`). The strongest
+   case: the screen is drawn, and the exit has `gfxExit` + APT close. Expected log tail (Azahar
+   order): `fatal error on thread N: handed to the main thread`, `not acknowledged in 5 s; shown
+   on this thread`, `ERROR: debug-fatal mode 7`, `error screen d6: thread other ...`, (A pressed)
+   `fallback exit: starting the 5 s watchdog`, `fallback exit: gfxExit`, `fallback exit: should
+   close 0, run flags ... ; aptExit`, `fallback exit: APT_CloseApplication via __system_retAddr`.
+   The user: the screen reads "debug-fatal mode 7 / A second thread failed holding a lock the
+   main thread needs"; one A; then the launcher.
+2. **F2, mode 6b, GPU build** (install `build-3ds-c3d/alephone.3dsx`; `mode-6b.cfg`): `fatal
+   error on thread N: handed`, `not acknowledged`, `error screen: citro3d still up (fallback off
+   main): logged only`, `starting the 5 s watchdog`, **no** `gfxExit` line, the `aptExit` line,
+   `APT_CloseApplication via __system_retAddr`. No screen (by design), so no A: the exit follows
+   within about a second of the 5 s timeout. Also the DSP check from A6 B6 that the restart
+   prevented: silent after the exit, normal sound after the relaunch.
+3. **F3, mode 10, GPU build** (`mode-10.cfg`): the same lines as F2 (the error is
+   `debug-fatal mode 4`'s text). Main sleeps 7 s; the exit should come at about 5 s, before it
+   wakes, so no `the request was taken back` line is expected.
+
+**Reading a failure (stop after the first; do not retry blindly; ask the user to power-cycle
+if it hangs).**
+- `fallback exit: watchdog fired (stuck in <step>); svcExitProcess`: that step hung on
+  hardware; the restart that follows is the old behaviour. Record the step.
+- `fallback exit: APT_CloseApplication returned; svcExitProcess`: `APT_CloseApplication` did
+  not end the process; the restart that may follow is the old path. Record it.
+- `watchdog fired (stuck in APT_CloseApplication)`: NS took more than 5 s to end the process
+  and the watchdog raced it; record whether the launcher came back anyway.
+- The `APT_CloseApplication via __system_retAddr` line, then the system's restart message: the
+  APT close was not enough (or not the cause). If F1 passed and F2/F3 restart, `gspExit` matters
+  in the GPU build (5.6.3 step 3a.2: that build ends holding the GPU right, GSP event thread
+  alive): the next candidate is a bare `GSPGPU_ReleaseRight()` on the fallback thread before
+  `aptExit` (one IPC, no citro3d call, no thread join; critic round 1, 5), a new piece. If F1 restarts too: the remaining candidates are
+  the other `__appExit` calls (`fsExit`, `hidExit`, `srvExit`) or the heap teardown itself; then
+  the narrower fix (make the fallback rarer: a longer acknowledgement bound, main serving more
+  often; 5.6.3 step 3a "Rejected" C2) is the next decision, the user's.
+- Luma's exception screen or a new dump: fetch it (registers at 0x28; `arm-none-eabi-addr2line
+  -e build-3ds[-c3d]/alephone.elf`), record, stop.
+- `apt hook <NAME> on the fallback thread: ignored` lines are expected only if HOME (or POWER)
+  is pressed while the fallback runs; don't press it in F1-F3 (optional F4 below).
+4. **F4 (optional, only if F1 passed):** F1 again, and press HOME while the fallback screen is
+   up, then back, then A. Expected: `apt hook ONSUSPEND on the fallback thread: ignored` (and
+   ONRESTORE), the error text still there after HOME (on main it survives a HOME round trip,
+   script 25 in Azahar; on the fallback thread this is untested), then F1's exit lines and the
+   launcher. This is deferred item (4) of piece 2's review, which A7 addresses; no Azahar script
+   reaches it (HOME during the fallback), so the console is its only test.
+5. **F5 (optional, only if F1 passed):** F1 again, and choose **HOME > Close** while the
+   fallback screen is up. The only way to reach `aptExit()`'s close-order branch and its ONEXIT
+   hook off main: expected `apt hook ONSUSPEND on the fallback thread: ignored`, the screen's
+   loop ends (`aptMainLoop()` false), then the exit lines with `should close 1`, `apt hook ONEXIT
+   on the fallback thread: ignored` (may be lost if the log closes first), `APT_CloseApplication
+   via __system_retAddr`, then the launcher (as every HOME > Close in A6, item 16), no restart.
+
+**Then part C (3dslink mirror, item 15) with the new step, and part D only if the user says
+yes.** Part C (`build-3ds-c3d`, over 3dslink this time, HUD + Map @60):
+- **C1 (no sudo):** put an empty `debug-input` on the card (`$FTP IP put` an empty file as
+  `/3ds/alephone/debug-input`). Launch with `.../build-3ds/hw/sprint8/launch.sh IP
+  build-3ds-c3d/alephone.3dsx $H/C1-mirror.txt` in the background (kill stale 3dslink first:
+  `pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`), start a game, then `kill -STOP` the host's
+  3dslink process and have the user **move both sticks continuously** (circles) for 60 s, up to
+  4 min if no line has appeared, then `kill -CONT`. Why: the stall path needs the console's send
+  buffer full, and a stopped 3dslink leaves the host kernel's receive buffer in the way. Host
+  reproduction (`scripts/3ds/tests/link-stall/run.sh`, macOS loopback, tee_write's loop copied):
+  388-550 KB are accepted before the stall path runs, whatever buffer sizes are asked for;
+  that is 38-54 min at the in-game ~170 B/s, and about 25-35 s at the ~16 KB/s that `debug-input`
+  logs with both sticks moving (measured in Azahar — non-authoritative, 2026-10-26, a scripted
+  stick wiggle: 4796 input lines, 241 KB in 15.1 s). The Wi-Fi path and the 3DS's own socket
+  buffer sizes are UNVERIFIED, hence the 4 min ceiling.
+- **C2 (if C1 shows no stall line; needs sudo, so the user runs it in Terminal.app):** drop the
+  console's packets on the Mac, a real "stalled link" (no ACKs, so only the console's send
+  buffer has to fill):
+  `printf 'block drop quick from 192.168.100.72 to any\nblock drop quick from any to 192.168.100.72\n' | sudo pfctl -a com.apple/a1-stall -f -`
+  then `sudo pfctl -E` (note the token it prints); keep the sticks moving for 60 s; then
+  `sudo pfctl -a com.apple/a1-stall -F rules` and `sudo pfctl -X <token>`. Check with
+  `sudo pfctl -a com.apple/a1-stall -s rules` (empty afterwards). The rule also blocks ftpd: remove
+  it before fetching the log. (macOS's `/etc/pf.conf` loads `anchor "com.apple/*"`, so the
+  anchor is evaluated.)
+- **Pass (C1 or C2):** the game keeps running (the card log's `[c3d] stats` lines keep coming
+  each second through the freeze), the card's `log.txt` has `[3ds] 3dslink mirror stopped
+  (stalled); the SD log goes on` (with C2, `(host went away)` is possible if TCP gives up
+  first: record which; both mean the game did not freeze), and the transcript stops there.
+- Afterwards: delete `debug-input`; put the wanted `.3dsx` back (the 3dslink launch overwrote it).
+
+**Cleanup (always):** delete `debug-fatal` and `debug-input`; the user's preferences stay
+(F1-F3 do not change them); reinstall the shipping build
+(`/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/alephone.3dsx`, `3ds-port`) unless the user
+wants another; kill leftover 3dslink processes; remove any pf rule (C2).
+
+**Record:** `NEXT-SPRINT.md` item 14 (the F runs, "Console (New 3DS), <date>"), item 15 (part
+C), plan A item 7; `CITRO3D_DESIGN.md` 5.6.4 items 5 and 6 (VERIFIED or REFUTED); items 14-15
+text mirrored identically to `3ds-port`. If F1-F3 pass, carrying A7 to `3ds-port` (the shipping
+build still has the old fallback) is the user's decision (cherry-pick of the A7 commit, or the
+next merge).
