@@ -1736,6 +1736,8 @@ VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
   alone drops by the fill once it is split out). `scripts/3ds/tests/perf-table.py` gets the columns
   `c3d_wait`, `c3d_fill`, `c3d_upload`, `c3d_vblank` and "present total" (round 2, 4, 5).
   The user decides on the result.
+- **Status (2026-10-26):** B-a built (`a35aa79f4`, critic APPROVE, minors folded), Azahar passes
+  (`PERF.md` "Stage 10 B-a"); the console session is `NEXT-SPRINT.md` "B-a console runbook".
 - **B-b (on the go):** the engine edit (5.7.2, `PATCHES.md` 55), the reorder draws (5.7.3), the
   zero-copy path selection (5.7.5), `zero_copy` (5.7.7); B-a's `two_frame` becomes the zero-copy
   present's structure (zero-copy presents are always two-frame).

@@ -63,7 +63,9 @@ bool s_abandoned = false;   // release() gave up on a queue that did not retire 
 bool s_releasing = false;   // release_and_fini() is running (a fatal error inside it must not re-enter)
 GxQueue s_gx;
 GateTracker s_gate;
-unsigned s_frames_gate_closed = 0;   // frames ended while the gate condition held (only with suspend_gate 0)
+// C3D frames ended while the gate condition held: with suspend_gate 0 every such frame (two per
+// present with two_frame 1: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
+unsigned s_frames_gate_closed = 0;
 uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
 
 unsigned s_presents = 0, s_odd = 0, s_false_returns = 0, s_releases = 0, s_gfx_exits = 0;
@@ -510,8 +512,9 @@ void stats_tick()
 	if (now - s_stats_tick < kTicksPerSecond)
 		return;
 	s_stats_tick = now;
-	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3): `draw` = the previous
-	// frame's draw + framebuffer transfer; `upload` (two_frame 1 only) = the staging upload.
+	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3). two_frame 1: `draw` =
+	// frame D (draw + framebuffer transfer), `upload` = frame U. two_frame 0: `draw` = the whole
+	// present (upload + draw + transfer), so across the modes compare it with draw + upload.
 	char gpu[64];
 	int n = snprintf(gpu, sizeof gpu, " gpu_ms draw=%.2f", s_gpu_n[0] ? s_gpu_ms[0] / s_gpu_n[0] : 0.0);
 	if (s_cfg.two_frame)

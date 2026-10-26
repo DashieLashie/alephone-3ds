@@ -309,7 +309,8 @@ enum class Swizzle { Plain };
 // TEV stage 0 and the colour write mask, set in full before every draw of the present texture
 // (design 5.7.3, critic round 1 finding 1): the texture's reading may differ from the previous
 // draw's, so nothing is left to what an earlier draw or present_init set. C3D_GetTexEnv() marks
-// the stage dirty (texenv.h:24).
+// the stage dirty (texenv.o C3D_GetTexEnv+0x8-0x24: flag bit 26 + id; NULL if the context is not
+// active, which cannot happen here: every caller runs between C3D_Init and C3D_Fini).
 void set_present_draw(Swizzle swizzle)
 {
 	C3D_TexEnv* env = C3D_GetTexEnv(0);

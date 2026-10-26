@@ -1174,6 +1174,40 @@ were done. Raw logs: `build-3ds/hw/a6/` (outside git).
   6144 KiB. Mode 6 ran 29 s from the first present to the error (+29.1 s) and exited at +49.6 s
   (the user read the screen). The fallback runs (6b, mode 10) release nothing by design.
 
+## Stage 10 B-a: the two-frame present (Azahar — non-authoritative)
+
+Recorded 2026-10-26 on `stage10-c3d`, commit `a35aa79f4` (review follow-ups in the next commit).
+Design `CITRO3D_DESIGN.md` 5.7 (the zero-copy present, plan B) and 5.7.11 (B-a): port code only,
+`debug-c3d two_frame 1` runs today's staging present as two C3D frames (U: fill, flush, upload;
+D: waits for U in zone `c3d_upload`, then the quad), so the console can measure what B-b's engine
+edit would save before it is built. New zones `c3d_fill`, `c3d_upload`, `c3d_vblank` (inside
+`present`, exclusive); `perf-table.py` adds them and "present total". Critic: APPROVE (5 minors,
+folded). `two_frame 0` (default) issues the same GPU work as before; the OFF builds' `objdump -d`
+is identical to before and `nm` finds no citro3d symbol.
+
+| Check | Result |
+| --- | --- |
+| `b-diff.cfg` (`two_frame 1`, `present_diff 30`), HUD + Map @30 L0 (perf-bench, ON-prof) | `present_diff final: 32 checks, 0 with RGB differences`, max \|diff\| 0; `gaps=0` |
+| scripts 13 and 14 (`--terminal-test`), both Bottom Screen settings, `b-diff.cfg` | 21 / 25 / 8 / 10 checks, **0 with RGB differences**; 0 false returns, GX high-water 2, `release done`, no guest fault |
+| script 07 (menus, dialog, HOME, sleep), `b-diff.cfg` | about 85 checks over 2574 presents, no mismatch line (every mismatch is logged; the run ends at the 150 s timeout, so no `final` line); HOME and sleep round trips, 0 false returns, GX high-water 2 |
+| script 22 and 22-fast (HOME > Close in a game), `b-two-frame.cfg` | pass: gate closed, `gfxExit call #1`, `release #1`, `queue retired after 0 ms`, `release done` (linear 17776 KiB, VRAM 6144 KiB), `exit`; no guest fault |
+| `calibrate 1` + `alt_load 1` + `two_frame 1` | 12 captures, each uniform and its own frame N |
+| `odd_surface 1` + `two_frame 1` | captures byte-identical to `two_frame 0` |
+
+Profile, ON-prof, HUD + Map @30 L0, 2 runs each (ms per frame):
+
+| debug-c3d | busy | present | c3d_wait | c3d_fill | c3d_upload | c3d_vblank | present total | blit | bottom | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `p1-gpu.cfg` (`two_frame 0`) | 17.98 | 0.41 | 0.00 | 1.33 | 0.00 | 0.00 | 1.75 | 1.20 | 2.76 | 68.35 |
+| `b-two-frame.cfg` (`two_frame 1`) | 17.77 | 0.45 | 0.00 | 1.34 | 0.00 | 0.00 | 1.79 | 1.20 | 2.50 | 69.20 |
+
+The fill is 1.33 ms here (P1's breakdown: 1.34) and the two-frame structure costs +0.04 ms of
+instructions; but Azahar completes GPU work synchronously (`c3d_upload` and `c3d_wait` read 0, the
+stats line's `gpu_ms` are not meaningful), so **the go / no-go for B-b is the console's**
+(`NEXT-SPRINT.md` "B-a console runbook": saving = `c3d_fill` − (present total `two_frame 1` −
+present total `two_frame 0`) ≥ 0.5 ms @30 on L0, L6 and L20). Not exercised in Azahar: the gate
+closing between frames U and D (a real Close landing there).
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

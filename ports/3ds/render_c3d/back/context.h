@@ -90,8 +90,9 @@ void count_present();
 void count_odd_surface();
 void stats_tick();   // logs "[c3d] stats ..." once a second
 // C3D_GetDrawingTime() (the last *finished* queue) right after a successful frame_begin() of a
-// present, averaged into the stats line (design 5.7.3). `Draw`: the previous frame's draw and
-// framebuffer transfer (after the first or only frame's begin); `Upload`: frame U, the staging
+// present, averaged into the stats line (design 5.7.3). `Draw`: the previous present's last
+// frame (after the first or only frame's begin): with two_frame 1 frame D (draw + framebuffer
+// transfer), with two_frame 0 the whole present (upload too); `Upload`: frame U, the staging
 // upload (after two_frame's frame D's begin).
 enum class GpuTime { Draw, Upload };
 void sample_drawing_time(GpuTime which);

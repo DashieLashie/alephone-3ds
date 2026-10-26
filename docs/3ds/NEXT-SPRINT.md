@@ -1122,9 +1122,82 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
 B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
    Measured on the console against the current GPU present.
+   **Status (2026-10-26):** designed (`CITRO3D_DESIGN.md` 5.7; critic round 1 REVISE, round 2
+   APPROVE). The estimate's lower end (~0.1-0.4 ms per frame) is within the console's noise, so the
+   engine edit is **not** built on it: B is split into **B-a** (port only, `two_frame` behind
+   `debug-c3d`, off by default; built, `a35aa79f4`, Azahar passes: `PERF.md` "Stage 10 B-a") and
+   **B-b** (the engine edit and the channel reorder), built only if the **"B-a console runbook"**
+   below shows a saving of ≥ 0.5 ms per frame @30 on L0, L6 and L20. **Next: that console session,
+   then the user's go / no-go for B-b.**
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
+
+## B-a console runbook (plan B's go / no-go; when the user is at the console)
+
+**Not run yet.** Written 2026-10-26. Decides whether B-b (the zero-copy present's engine edit) is
+built: design `CITRO3D_DESIGN.md` 5.7.1 and 5.7.11. Driving as in "How to drive the console"
+(ask the IP: it was 192.168.100.72; the helpers below have it written in, edit if it changed).
+Tell the user each time whether you need **ftpd** (card files) or the **Homebrew Launcher
+netloader** (Y). About 14 launches, ~40 min.
+
+**Builds** (from the `stage10-c3d` worktree, commit `a35aa79f4` or later):
+`build-3ds-c3d-prof/alephone.3dsx` (benchmarks) and `build-3ds-c3d/alephone.3dsx` (functional
+run). Check first: `cmake --build` both (nothing to do / 0 warnings).
+
+**Setup.** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw` (the main checkout; not in git),
+`mkdir -p $H/b0`, and make a run helper from G0-b's:
+`sed 's#build-3ds/hw/g0b/#build-3ds/hw/b0/#' $H/g0b/run.sh > $H/b0/run.sh; chmod +x $H/b0/run.sh`
+(it launches `<worktree>/BUILD/alephone.3dsx` over 3dslink, transcript `b0/TAG.txt`). Kill stale
+3dslink first (`pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`). ftpd: list `/luma/dumps/arm11/`
+(dumps 0-6 exist), fetch the user's `Marathon 2 Preferences` into `$H/b0/prefs-user` (to put back
+at the end), then `$H/sprint8/setprefs.sh IP 0 30` (HUD + Map, Framerate Target 30).
+
+**1. The series (HUD + Map @30, 12 runs).** Per run, on ftpd: put `$H/sprint8/debug-perf-L<N>` as
+`/3ds/alephone/debug-perf` and the config as `/3ds/alephone/debug-c3d`
+(`scripts/3ds/tests/c3d/p1-gpu.cfg` = `two_frame 0`, `b-two-frame.cfg` = `two_frame 1`;
+`scripts/3ds/sd-ftp.sh IP put <file> /3ds/alephone` puts it under its own name, so copy it to a
+file named `debug-perf` / `debug-c3d` in a scratch dir first). Then netloader:
+`$H/b0/run.sh build-3ds-c3d-prof hm30-tf<0|1>-L<N>-<a|b>`; the user presses A twice; the game
+quits by itself after the BENCH line. Order, interleaved so drift hits both sides alike:
+L0 tf0-a, L0 tf1-a, L0 tf0-b, L0 tf1-b, then the same for L6 and L20. Each run: `gaps=0` (else
+rerun), and the transcript's `[c3d] debug-c3d:` line must show the intended `two_frame`.
+**Read:** `python3 -I scripts/3ds/tests/perf-table.py $H/b0/hm30-*.txt`. Per level:
+`fill` = mean `c3d_fill` of the two tf0 runs; `extra` = mean present total (tf1) − mean present
+total (tf0); **saving = fill − extra**. Also note `c3d_upload` (the upload wait), `c3d_vblank`,
+`bottom`, `blit`, `max`, and the stats lines' `gpu_ms draw=... upload=...`. Sanity: tf0's present
+total should be close to G0-b's 2.03 ms (`PERF.md` "Console G0-b, first session"), and both
+sides' `c3d_fill` should agree.
+**Go for B-b iff saving ≥ 0.5 ms on L0, L6 and L20.** Report the table and the verdict; the user
+decides.
+
+**2. Optional, @60 (no-regression look, 2-4 runs):** `setprefs.sh IP 0 60`, L0 only, tf0 then tf1
+(once or twice each). Only fps, `max`, `gaps` and `c3d_vblank` matter here (@60 a CPU saving can
+turn into VBlank wait; design 5.7.1).
+
+**3. Functional run (`build-3ds-c3d`, `b-diff.cfg`, no `debug-perf`):** delete `debug-perf`,
+put `b-diff.cfg` as `debug-c3d`, `setprefs.sh IP 0 30`. `run.sh build-3ds-c3d fn-b`: main menu,
+start a game (HUD + Map), play ~30 s, HOME and back, close the lid ~5 s and open it, Preferences ->
+Bottom Screen Classic (in a game if possible, or from the main menu and a new game), play ~20 s, quit
+to the main menu, start a game again, then **HOME > Close in the game**. Pass: the launcher comes
+back (no hang on "Closing software..."), no Luma screen, no new dump; on the card's `log.txt`:
+`present_diff final: N checks, 0 with RGB differences`, `present_screen_false_returns=0`,
+`gx_high_water` ≤ 4, `release done`. Fetch `log.txt` into `$H/b0/fn-b-log.txt`. By eye: the
+picture as usual on both paths.
+
+**Reading a failure:** a hang at HOME > Close: power off, fetch the log, record the last `[c3d]`
+lines (as in `PERF.md` "Console G0-b, second session"), stop. `present_diff` differences with
+`two_frame 1`: record the first line (pixel, values), stop (B-a's structure is wrong on hardware;
+B-b would inherit it). A Luma dump: fetch it, `arm-none-eabi-addr2line -e
+build-3ds-c3d[-prof]/alephone.elf` (registers at 0x28), stop.
+
+**Cleanup (always):** delete `debug-perf` and `debug-c3d`; put back `$H/b0/prefs-user` as
+`Marathon 2 Preferences`; reinstall the user's `.3dsx` if a 3dslink launch replaced it (ask which;
+the shipping build is `/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/alephone.3dsx`); kill
+leftover 3dslink processes.
+
+**Record:** `PERF.md` "Stage 10 B-a" (a "Console (New 3DS), <date>" part with the table and the
+verdict), `CITRO3D_DESIGN.md` 5.7.10 item 1 and section 10 item 16, plan B above.
 
 ## Fallback exit runbook (piece A7 on the console; when the user is back)
 

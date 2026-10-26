@@ -12,7 +12,8 @@ first file's, level by level.
 Logs of a citro3d profile build carry the zones c3d_wait, c3d_fill, c3d_upload
 and c3d_vblank (all inside "present", exclusive); when any file has them, those
 columns and "present total" (= present + the four, design 5.7.11) are added.
-Logs without them print exactly as before.
+Logs with none of them (software builds) print exactly as before; a P1-era log (c3d_wait
+only, the fill still inside "present") gets the columns with "-" where a zone is missing.
 """
 import re
 import sys
