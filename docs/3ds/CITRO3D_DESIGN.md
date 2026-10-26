@@ -1395,11 +1395,30 @@ ONEXIT runs; citro3d's own APT hook; per-thread newlib signal handlers.
    the missing APT close was the cause, that `aptExit` off main ends cleanly on hardware,
    and whether `gspExit` matters (mode 7 software vs 6b/10 GPU). Test: `NEXT-SPRINT.md`
    "Fallback exit runbook".*
+   *Console (New 3DS), 2026-10-26 (A7 session, `NEXT-SPRINT.md` item 14): **VERIFIED that the
+   fixed fallback ends cleanly** in all five cases: mode 7 software (F1), mode 6b (F2) and mode 10
+   (F3) GPU, HOME round trips (F4) and HOME > Close (F5) on the fallback thread; the launcher
+   returns, no restart message, no Luma screen, no new dump; the DSP is silent during the freeze
+   and normal after relaunching (F2). **VERIFIED: the missing `aptExit` was the cause** of the A6
+   restarts. **REFUTED: that `APT_CloseApplication` was the missing piece**: this console takes
+   the chainload branch (item 6), where F1-F4 end in `svcExitProcess` after `aptExit` without
+   calling it, and F5's call (close order) returns before `svcExitProcess`. **REFUTED: that
+   `gspExit` matters**: the GPU build (F2, F3) ends cleanly without `gspExit`/`gfxExit`, so the
+   `GSPGPU_ReleaseRight` follow-up is not needed. `aptExit` off the main thread ends cleanly
+   on hardware (VERIFIED, with the chainload branch only).*
 6. Which `aptExit` branch the Homebrew Launcher's run flags select on this console (d7 at
    boot), and whether `APT_Finalize` alone (the reinit branch) also ends cleanly if that is
    the branch (expected not: the fallback then skips the loader's return, step 3a.4).
    *Status: UNVERIFIED; read d7 in any console log after piece A7. Azahar (non-authoritative,
    2026-10-26): `homebrew 0, run flags 0x0`, return address null: the close branch.*
+   *Console (New 3DS), 2026-10-26 (A7 session): **VERIFIED, and the Azahar prediction REFUTED.**
+   d7 reads `homebrew 1, run flags 0x4 (aptworkaround 0, aptreinit 0, aptchainload 1), return
+   address null` (all five logs). So the launcher's run flags select the chainload branch, not the
+   close branch: `aptExit` leaves `__system_retAddr` unchanged and the fallback ends in
+   `svcExitProcess` (`fallback exit: svcExitProcess (aptExit left __system_retAddr unchanged: ...)`),
+   and that ends cleanly. The reinit-branch question (`APT_Finalize` alone) does not arise here
+   (`aptreinit 0`); the close branch is reached only by a close order (F5, which also
+   returns cleanly). Azahar's `homebrew 0, run flags 0x0` differs from the console.*
 
 ## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
 

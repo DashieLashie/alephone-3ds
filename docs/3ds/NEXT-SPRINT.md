@@ -532,6 +532,47 @@ Azahar) [PERF "Next candidates"]
     it proves the order of the steps, not the console's reaction. **Console:** the "Fallback exit
     runbook" at the end of `stage10-c3d`'s NEXT-SPRINT.md (modes 7 software, 6b and 10 GPU, with
     A7's builds from the `stage10-c3d` worktree).
+    **Console (New 3DS), 2026-10-26 (A7 session; 192.168.100.72; every run started from the Homebrew
+    Launcher; software build = `build-3ds/alephone.3dsx` and GPU build = `build-3ds-c3d/alephone.3dsx`
+    of the `stage10-c3d` worktree at `659603a`; the user's own prefs, HUD + Map @60, unchanged;
+    raw logs `F1.log`-`F5.log` in `build-3ds/hw/a7/`, outside git): F1-F5 all pass.** After every run
+    the Luma dump list was unchanged (dumps 0-6), and the boot line matched the run. **F0, d7:**
+    `[3ds] env: homebrew 1, run flags 0x4 (aptworkaround 0, aptreinit 0, aptchainload 1), return
+    address null` (identical in all five logs). That is **not** the Azahar prediction (`homebrew 0, run
+    flags 0x0`, the close branch): on this console `aptExit()` is in the chainload branch, so every
+    run below logs `fallback exit: svcExitProcess (aptExit left __system_retAddr unchanged: reinit,
+    chainload, crippled, or not the last APT reference)` and `APT_CloseApplication` was not called
+    (except in F5, below). **F1, mode 7, software build:** `fatal error on thread 286: handed to the
+    main thread`, `not acknowledged in 5 s; shown on this thread`, `ERROR: debug-fatal mode 7`, `error
+    screen d6: thread other (id 286); ...`, then (A) `starting the 5 s watchdog`, `gfxExit`, `should
+    close 0, ... aptExit`, `svcExitProcess (...)`. The user: the expected message showed ("debug-fatal
+    mode 7"), one A, the launcher came back, **no restart message**, no Luma screen. This is the run
+    that restarted the console in A6 (mode 7 on the shipping build). **F2, mode 6b, GPU build:**
+    `handed to the main thread`, `not acknowledged in 5 s`, `ERROR: Aleph One stopped / debug-fatal:
+    vhalt() inside the SDL audio callback`, `error screen: citro3d still up (fallback off main): logged
+    only`, `starting the 5 s watchdog`, no `gfxExit` line (by design), `should close 0 ... aptExit`,
+    `svcExitProcess (...)`. The user: the top screen froze, then the launcher came back with no
+    message; **silent during the freeze, normal sound after relaunching** (the DSP check the restarts
+    prevented in A6 B6b). **F3, mode 10, GPU build:** the same lines (`ERROR: debug-fatal mode 4`);
+    no `the request was taken back` line (the exit came before main woke, as predicted); no messages,
+    the launcher came back. **F4 (software, mode 7, HOME while the fallback screen is up):** the user
+    went HOME and back **twice**, the error text stayed on the bottom screen each time (the fallback
+    thread survives a HOME round trip), then A. The log has `apt hook ONSUSPEND on the fallback
+    thread: ignored` and `ONRESTORE ... ignored`, twice each, then F1's exit lines; the launcher
+    came back. **F5 (software, mode 7, HOME > Close while the fallback screen is up):** the log
+    has `apt hook ONSUSPEND on the fallback thread: ignored`, then `gfxExit`, `should close 1, run
+    flags 0x4 (...); aptExit`, `apt hook ONEXIT on the fallback thread: ignored` (expected), `fallback
+    exit: APT_CloseApplication via __system_retAddr`, `fallback exit: APT_CloseApplication returned;
+    svcExitProcess`. The user: the program closed, nothing noticeable. The runbook listed "returned;
+    svcExitProcess" as a failure reading ("`APT_CloseApplication` did not end the process"); here it
+    is not one: the close call returns, the final `svcExitProcess` ends the process, and the launcher
+    returns with no restart. **What this shows:** the fix works on hardware for all five cases, in
+    both builds. The A6 restarts came from the exit **without `aptExit`** (with `gfxExit` first in
+    the software build); `APT_CloseApplication` as the missing piece is not what fixed it (it is not
+    even called in F1-F4: chainload branch), and the GPU build ends cleanly **without `gspExit`/
+    `gfxExit`** (F2, F3), so the `GSPGPU_ReleaseRight` candidate in the runbook is not needed. Not
+    exercised: the other branches of `aptExit` (this console always took the chainload one).
+    Part C: item 15. Part D: item 16.
 15. **The 3dslink log mirror can freeze the game.** `tee_write()`
     (`ports/3ds/source/a1_3ds_platform.cpp`, port code on `3ds-port`) writes a line to
     the SD log, then `send()`s it on a blocking socket while holding the log lock; its
@@ -576,6 +617,29 @@ Azahar) [PERF "Next candidates"]
     nothing, a `pfctl` drop rule for the console's address on the Mac (sudo, Terminal.app): no
     ACKs at all, so only the console's send buffer has to fill. The Wi-Fi path's and the 3DS soc
     service's buffer sizes are UNVERIFIED. No code change.
+    **Console (New 3DS), 2026-10-26 (A7 session, `build-3ds-c3d` over 3dslink with
+    `build-3ds/hw/sprint8/launch.sh`, an empty `debug-input` on the card, HUD + Map @60, a game
+    running; logs `C1.log`, `C2.log`, transcripts `C1-mirror.txt`, `C2-mirror.txt` in
+    `build-3ds/hw/a7/`): both stall checks pass.** **C1 (host `kill -STOP`, no sudo):** 3dslink was
+    stopped at 10:53:09 (about +51 s of game time) while the user moved both sticks; the card log
+    has `[3ds] 3dslink mirror stopped (stalled); the SD log goes on` at **+98.4 s**, about 47 s
+    after the stop (the host-loopback estimate was 25-35 s, Wi-Fi sizes were UNVERIFIED), a single
+    522 ms gap in the input log at the stall and nothing else; the `[c3d] stats` lines go on until the
+    clean exit at +317 s (4187 presents). 3dslink was resumed after 4 min and ended with `recv:
+    Connection reset by peer` (the console had closed its end); the transcript stops at the stall.
+    The user: the game never froze but had hitches, "especially at the beginning" and a stuttery
+    frame rate (no counter). With `debug-input` on the log is about 16 KB/s to the SD card and the
+    socket, which is the likely cause (UNVERIFIED: the mean over the run is 15.5 presents per stats
+    line including menus; no run without the flag was made in this session). **C2 (pf drop rule on the
+    Mac, sudo in Terminal.app):** `block drop quick` from and to 192.168.100.72 in the anchor
+    `com.apple/a1-stall`, `pfctl -E`; the transcript froze (17 496 bytes) and stayed frozen for the
+    5.5 min the rule was in; the card log has the same `mirror stopped (stalled)` line, at **+92.2 s**,
+    not `(host went away)`; the game ran on (299 stats lines, 6956 presents at the clean exit
+    at +333 s). Rule and token removed afterwards (`pfctl -s rules` on the anchor printed only
+    pfctl's "No ALTQ support in kernel" banner; ftpd was reachable again). Neither run left a Luma
+    dump. So the stall path works on hardware both ways, and the earlier "inconclusive" was the
+    log rate, as suspected. A 3dslink launch overwrote `sdmc:/3ds/alephone.3dsx` with the GPU
+    build; the user chose to leave that build on the card.
 
 16. **HOME > Close in a game took the slow path: `APTHOOK_ONEXIT` fires too late**
     (design `CITRO3D_DESIGN.md` 5.6.1 c, piece 3, branch `stage10-c3d`). `exit_requested()` read
@@ -652,6 +716,18 @@ Azahar) [PERF "Next candidates"]
     not to power the console off), so the "no quit dialog
     after the d1 line" check for that route is still open (the POWER route above was taken at
     the main menu, so it also shows no dialog).
+    **Part D, console (New 3DS), 2026-10-26 (A7 session; `build-3ds-c3d`, `p1-gpu.cfg`, HUD + Map @60,
+    launcher start; the user held POWER in a game and chose Power Off; log `D.log` read over ftpd
+    before any relaunch): pass.** The power-off looked normal and there is no new Luma dump. The log:
+    `apt hook ONSUSPEND on thread 1224 (main 1224): gpu right 1, should close 0`, `suspended (HOME menu
+    or applet); SDL audio paused`, `[c3d] gate closed at present 1234 (gpu_right 0, should_close 1,
+    suspended 1)`, then `finish_game: begin` 0.67 s after the suspend line, every `finish_game` step
+    (8-32 ms each), `main loop ended`, `gfxExit call #1 (citro3d up: release first)`, `queue retired
+    after 0 ms`, `release done`, `real gfxExit returned`, `exit`, 1.07 s after the suspend line. The
+    only `terminals: 640x320` line is the boot one (line 90, before the hook): **no quit-dialog frame
+    after the d1 line**, so the fast path (bit 0x200) runs for Power Off as for Close. One difference
+    from the runbook text: the d1 line itself reads `should close 0` (the order to close arrives a
+    moment later; the gate line right after already has `should_close 1`).
 
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
@@ -1009,7 +1085,7 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       (max 2 revise rounds); design: architect then critic.
       **The fallback exit fix is piece 7 (built overnight 2026-10-26, Azahar only, UNVERIFIED on
       the console).**
-   7. **A7, the fallback's exit (built 2026-10-26; Azahar passes; console check pending):**
+   7. **A7, the fallback's exit (built 2026-10-26; Azahar passes; console passes, 2026-10-26):**
       design `CITRO3D_DESIGN.md` 5.6.3 step 3a (decision and rejected options), commits
       `4981782` (decision), `db10ade` (code), `5da39e0` + `5bd0867` (review round 1), critic
       round 2 APPROVE (medium effort). The fallback now ends through `gfxExit` (software build
@@ -1024,6 +1100,16 @@ A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
       the user's decision once the console passes. Results: item 14. Next: the "Fallback exit
       runbook" at the end of this file (F0-F3, optional F4/F5, then part C; part D only if the
       user says yes).
+      **Console (New 3DS), 2026-10-26: the A7 console session passes** (item 14 F1-F5, item 15 C1-C2,
+      item 16 part D; no new Luma dump in any run). The fallback ends cleanly on hardware in both
+      builds: mode 7 (software), 6b and 10 (GPU) return to the launcher with no restart message; HOME
+      and HOME > Close on the fallback thread are handled. Findings: d7 reads `homebrew 1, run flags
+      0x4 (aptreinit 0, aptchainload 1)`, so this console's `aptExit()` takes the chainload branch and
+      the exit is `svcExitProcess` after `aptExit` (not the `APT_CloseApplication` path Azahar
+      shows); `APT_CloseApplication` runs only after HOME > Close (F5) and returns. So the working
+      part of the fix is the `aptExit` (plus `gfxExit` in the software build); `gspExit` is not
+      needed in the GPU build. **A7 is still on `stage10-c3d` only; carrying it to `3ds-port` is the
+      user's decision (asked at the end of the session).**
 B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
    Measured on the console against the current GPU present.
@@ -1032,6 +1118,8 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
 
 ## Fallback exit runbook (piece A7 on the console; when the user is back)
+
+**Run on 2026-10-26: every test passed; results in items 14-16 and plan A item 7 above.**
 
 Written 2026-10-26 (overnight, no console). Piece A7 (`stage10-c3d`, `db10adee1`; design
 `CITRO3D_DESIGN.md` 5.6.3 step 3a) changes how the fatal fallback ends: instead of a bare
