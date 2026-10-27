@@ -2099,8 +2099,11 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     row). `C3D_FrameSplit(GX_CMDLIST_FLUSH)` now comes first; the rule holds for every readback
     frame of M1-M5 (5.2). Azahar does not model the cache and cannot show it. The `c3d_readback`
     zone excludes the retirement wait (timed in `c3d_wait`): the readback's cost is
-    `c3d_readback + c3d_wait`. Applied by the main session (the review's last round); the
-    critic prescribed the change.
+    `c3d_readback + c3d_wait`. Applied by the main session as the critic prescribed; a
+    narrow critic round on that commit (`e971b1198`, user's request): **APPROVE**, one nit carried
+    to M1: `GxQueue::take` charges the flushing split 2 entries (1 + 1 for a non-empty command
+    buffer) where the queue holds 1, so `gx_high_water` (5 in Azahar) is a conservative upper
+    bound; if M1's per-frame readback nears the budget, charge the split exactly 1.
   - *Not in M0:* any C3D rasteriser, readback of a real frame into `world_pixels`,
     the discard path, texture code. Hook 1's code (1.2) is used unchanged; its
     "re-running `c3d_draw` is safe" paragraph is superseded by the record/replay
