@@ -40,6 +40,17 @@
 	                    U, then the quad); only to measure the cost structure of plan B-b. With
 	                    suspend_gate 1 the gate is checked again between U and D
 
+	Key of plan B-b (design 5.7.2, 5.7.7, the zero-copy present):
+
+	  zero_copy 0|1     default 1. 1 = the 400x240 game surface (HUD + Map) is allocated in linear
+	                    memory (512 KiB, once, never freed) and the GPU's display transfer reads it
+	                    directly; the channel order is fixed by three masked draws, and the present
+	                    is two C3D frames (U, D). 0 = the engine allocates the surface itself and
+	                    every present goes through the staging image: exactly the P1 present.
+	                    Acts from the next game screen setup (the surface is created there), so put
+	                    the file on the card before launching. One build serves both sides of the
+	                    measurement. Needs present gpu; with present cpu the key does nothing.
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -66,6 +77,7 @@ struct Config
 	bool force_abandon = false;
 	bool close_frame = false;
 	bool two_frame = false;
+	bool zero_copy = true;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.

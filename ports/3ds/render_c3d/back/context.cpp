@@ -64,7 +64,7 @@ bool s_releasing = false;   // release_and_fini() is running (a fatal error insi
 GxQueue s_gx;
 GateTracker s_gate;
 // C3D frames ended while the gate condition held: with suspend_gate 0 every such frame (two per
-// present with two_frame 1: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
+// present of a two-frame present: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
 unsigned s_frames_gate_closed = 0;
 uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
 
@@ -90,10 +90,10 @@ void load_config()
 	config_parse(s_cfg, text.str(), problems);
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
-	       "two_frame %d\n",
+	       "two_frame %d, zero_copy %d\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
-	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame);
+	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.zero_copy);
 	if (s_cfg.present_diff && s_cfg.calibrate)
 		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
 	for (const std::string& p : problems)
@@ -512,12 +512,13 @@ void stats_tick()
 	if (now - s_stats_tick < kTicksPerSecond)
 		return;
 	s_stats_tick = now;
-	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3). two_frame 1: `draw` =
-	// frame D (draw + framebuffer transfer), `upload` = frame U. two_frame 0: `draw` = the whole
-	// present (upload + draw + transfer), so across the modes compare it with draw + upload.
+	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3). a two-frame present
+	// (two_frame 1 or zero-copy): `draw` = frame D (draw + framebuffer transfer), `upload` = frame U
+	// (printed when the period had such samples). One-frame presents: `draw` = the whole present
+	// (upload + draw + transfer), so across the modes compare it with draw + upload.
 	char gpu[64];
 	int n = snprintf(gpu, sizeof gpu, " gpu_ms draw=%.2f", s_gpu_n[0] ? s_gpu_ms[0] / s_gpu_n[0] : 0.0);
-	if (s_cfg.two_frame)
+	if (s_gpu_n[1] > 0)
 		snprintf(gpu + n, sizeof gpu - n, " upload=%.2f", s_gpu_n[1] ? s_gpu_ms[1] / s_gpu_n[1] : 0.0);
 	printf("[c3d] stats presents=%u (+%u) odd_surface=%u gx_high_water=%d gx_refused=%u "
 	       "cmdbuf_usage=%.4f present_screen_false_returns=%u gate_skipped=%u%s\n",

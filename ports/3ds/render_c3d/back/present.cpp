@@ -20,6 +20,14 @@
 	steps 1-3 (fill, flush, upload transfer), C3D_FrameEnd(0): nothing drawn, no framebuffer
 	transfer. Frame D: C3D_FrameBegin(0) (it waits for U: zone c3d_upload), steps 4-5.
 
+	The zero-copy present (plan B-b, design 5.7, debug-c3d "zero_copy 1", the default): a 400x240
+	game surface (HUD + Map) lives in a 512 KiB linear buffer made by main_surface_pixels() (the
+	engine's main_surface, screen.cpp, PATCHES.md 55). Always two frames: U has no step 2 (no
+	fill): the surface itself is flushed (rows 0-239) and is the source of the upload transfer;
+	D draws the texture with three one-channel masked draws that put the surface's 0xXXRRGGBB
+	words (texture: R = X, G = surface R, B = surface G, A = surface B) back in order (5.7.3).
+	Everything else (640x480, odd surfaces, any other surface) takes the staging path above.
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -302,9 +310,20 @@ void test_vhalt_thread(void* arg)
 	vhalt("debug-c3d test_vhalt 3 (second thread)");   // SDL_Quit's gfxExit, then the error screen
 }
 
-// Which picture the present texture holds, i.e. how TEV stage 0 reads it. B-a has one: plain (the
-// texel as it is, as the staging is filled). B-b adds the reordered variant of design 5.7.3.
-enum class Swizzle { Plain };
+// Which picture the present texture holds, i.e. how TEV stage 0 reads it. Plain: the texel as it is
+// (the staging is filled with xrgb << 8). ToRed / ToGreen / ToBlue: the three draws that reorder the
+// zero-copy surface's words (design 5.7.3), each writing one colour channel.
+enum class Swizzle { Plain, ToRed, ToGreen, ToBlue };
+
+// What the present texture holds now: false = the staging's words (draw Plain), true = the zero-copy
+// surface's words (three reorder draws). Set when an upload transfer was actually issued; frame D and
+// present_close_frame() draw accordingly (design 5.7.5).
+bool s_tex_reordered = false;
+
+// The zero-copy surface (design 5.7.2), made once by a1_3ds::main_surface_pixels(), never freed.
+u32* s_zc_surface = nullptr;
+bool s_zc_tried = false;
+constexpr int kZcPitch = kStagingPitchPx * sizeof(u32);   // 2048 bytes
 
 // TEV stage 0 and the colour write mask, set in full before every draw of the present texture
 // (design 5.7.3, critic round 1 finding 1): the texture's reading may differ from the previous
@@ -326,21 +345,67 @@ void set_present_draw(Swizzle swizzle)
 			C3D_TexEnvColor(env, 0xFFFFFFFF);   // C3D_TexEnvInit's value; no source reads it
 			C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
 			break;
+		// The reorder draws (design 5.7.3). The texel's R is the surface's X, G its R, B its G, A its B.
+		// Each draw copies one texture channel into the three RGB inputs (REPLACE of source 1 with a
+		// channel operand: enums.h:331-346, GPU_TEVOP_RGB_SRC_G = 0x08, _SRC_B = 0x0C, _SRC_ALPHA = 0x02)
+		// and the colour write mask (enums.h:224-230, effect.h:10 C3D_DepthTest) lets one channel through.
+		// UNVERIFIED on hardware: that the operands broadcast the channel and that the PICA honours a
+		// one-channel mask as a read-modify-write (design 5.7.10 items 2 and 4); present_diff settles it.
+		case Swizzle::ToRed:
+			// red = texel G (surface R); alpha written as 0 from the constant colour, as to_fb() does.
+			C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_G, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+			C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+			C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+			C3D_TexEnvColor(env, 0);
+			C3D_DepthTest(false, GPU_ALWAYS, static_cast<GPU_WRITEMASK>(GPU_WRITE_RED | GPU_WRITE_ALPHA));
+			break;
+		case Swizzle::ToGreen:
+			// green = texel B (surface G); alpha masked off (its source is still set in full).
+			C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_B, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+			C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+			C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+			C3D_TexEnvColor(env, 0);
+			C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_GREEN);
+			break;
+		case Swizzle::ToBlue:
+			// blue = texel A (surface B); alpha masked off.
+			C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+			C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+			C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+			C3D_TexEnvColor(env, 0);
+			C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_BLUE);
+			break;
 	}
 }
 
-// The GPU state of a present and its one quad into the screen target (step 4 below; also the
-// close_frame forced frame).
-void draw_present_quad()
+// The GPU state of a present and its quad into the screen target (step 4 below; also the
+// close_frame forced frame): one Plain draw, or, for a texture holding the zero-copy surface's words
+// (`reordered`), the three channel draws of design 5.7.3, each with its stage 0 and mask set in full.
+void draw_present_quad(bool reordered)
 {
-	set_present_draw(Swizzle::Plain);
 	C3D_CullFace(GPU_CULL_NONE);
 	C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	C3D_FrameDrawOn(s_target);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
-	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+	if (!reordered)
+	{
+		set_present_draw(Swizzle::Plain);
+		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+		return;
+	}
+	for (Swizzle channel : {Swizzle::ToRed, Swizzle::ToGreen, Swizzle::ToBlue})
+	{
+		set_present_draw(channel);
+		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+	}
 }
 
 // frame_begin() for a present, and what a failed one means for the caller (the same handling for
@@ -381,7 +446,7 @@ bool present_close_frame()
 		return true;
 	}
 	crumb("close_frame: after frame_begin");
-	draw_present_quad();
+	draw_present_quad(s_tex_reordered);
 	char line[96];
 	snprintf(line, sizeof line, "close_frame: before frame_end (gpu right %d, in frame 1)", gspHasGpuRight() ? 1 : 0);
 	crumb(line);
@@ -480,6 +545,7 @@ void present_free()
 	if (s_staging)
 		linearFree(s_staging);
 	s_staging = nullptr;
+	// s_zc_surface is not freed: the engine's main_surface lives in it for the rest of the run (design 5.7.2).
 	if (s_diff_checks || s_diff_no_cpu || s_diff_fb_size)
 		printf("[c3d] present_diff final: %u checks, %u with RGB differences; not checkable: %u (no CPU present "
 		       "for the surface), %u (framebuffer size); max |diff| R %u G %u B %u A %u\n",
@@ -497,6 +563,41 @@ uint32_t present_counter()
 
 } // namespace back
 } // namespace a1_c3d
+
+// The engine's main_surface pixels for a 400x240 game screen (design 5.7.2; declared in
+// a1_3ds_platform.h). No citro3d call: linearAlloc, memset, GSPGPU_FlushDataCache, printf only.
+void* a1_3ds::main_surface_pixels(int width, int height, int& pitch)
+{
+	using namespace a1_c3d;
+	using namespace a1_c3d::back;
+	if (width != kScreenW || height != kScreenH)
+		return nullptr;
+	const Config& cfg = config();   // loads debug-c3d on first use
+	if (!cfg.present_gpu || !cfg.zero_copy)
+		return nullptr;
+	if (!s_zc_tried)
+	{
+		s_zc_tried = true;   // a failed allocation is logged once and not retried
+		const unsigned before = linearSpaceFree() / 1024;
+		s_zc_surface = static_cast<u32*>(linearAlloc(kStagingBytes));
+		if (s_zc_surface)
+		{
+			memset(s_zc_surface, 0, kStagingBytes);
+			GSPGPU_FlushDataCache(s_zc_surface, kStagingBytes);
+			printf("[c3d] zero_copy: surface buffer %p, %lu KiB, pitch %d; linear free %u -> %u KiB\n",
+			       static_cast<void*>(s_zc_surface), static_cast<unsigned long>(kStagingBytes / 1024), kZcPitch,
+			       before, linearSpaceFree() / 1024);
+		}
+		else
+			printf("[c3d] zero_copy: linearAlloc of %lu KiB failed (linear free %u KiB): the engine allocates the surface\n",
+			       static_cast<unsigned long>(kStagingBytes / 1024), before);
+		fflush(stdout);
+	}
+	if (!s_zc_surface)
+		return nullptr;
+	pitch = kZcPitch;
+	return s_zc_surface;
+}
 
 bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
 {
@@ -591,11 +692,20 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		src_pitch = src_w * 4;
 	}
 
-	// Design 5.7.4 (plan B-a): with two_frame the staging upload is a C3D frame of its own (U),
-	// and the draw another (D), which begins only when U has retired.
-	const bool two = cfg.two_frame;
-	static bool logged_two = false;
-	if (two && !logged_two)
+	// Design 5.7.5: the zero-copy path iff the picture is the engine's own surface in the 5.7.2 buffer
+	// (it exists only with zero_copy 1), 400x240, pitch 2048, a format with the XRGB word layout.
+	const bool zero = !odd_now && s_zc_surface && src == s_zc_surface && src_w == kScreenW &&
+	                  src_h == kScreenH && src_pitch == kZcPitch;
+	// Design 5.7.4: a zero-copy present is always two frames; with two_frame the staging upload is a
+	// C3D frame of its own (U), and the draw another (D), which begins only when U has retired.
+	const bool two = cfg.two_frame || zero;
+	static bool logged_two = false, logged_zero = false;
+	if (zero && !logged_zero)
+	{
+		logged_zero = true;
+		printf("[c3d] present: 400x240 zero-copy: the GPU reads main_surface (frames U and D, three channel draws)\n");
+	}
+	else if (two && !zero && !logged_two)
 	{
 		logged_two = true;
 		printf("[c3d] present: two_frame 1: frame U (fill, flush, upload) and frame D (draw) per present\n");
@@ -625,7 +735,9 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 			++s_diff_no_cpu;
 	}
 
-	// 2. Staging, written only now that the previous transfer has read the old one.
+	// 2. Staging, written only now that the previous transfer has read the old one. Not for a
+	// zero-copy present: the engine's surface is the source of the upload.
+	if (!zero)
 	{
 #ifdef A1_PROFILE
 		A1_PROF_SCOPE(C3dFill);
@@ -650,16 +762,21 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		}
 	}
 	// two_frame: the staging is flushed before frame U ends (the transfer starts at its C3D_FrameEnd);
-	// otherwise at step 5, as in P1.
+	// otherwise at step 5, as in P1. Zero-copy: the surface's rows 0-239 (the engine wrote them through the cache).
 	if (two)
-		GSPGPU_FlushDataCache(s_staging, kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
+		GSPGPU_FlushDataCache(zero ? static_cast<void*>(s_zc_surface) : static_cast<void*>(s_staging),
+		                      kStagingWrittenBytes);   // critic P1 minor 5: rows 0-239 only
 
 	// 3. Linear -> tiled into the present texture: the first GX operation of the frame.
-	if (!gx_op([&] {
-		    C3D_SyncDisplayTransfer(s_staging, GX_BUFFER_DIM(kTexW, kTexH), static_cast<u32*>(s_tex.data),
-		                            GX_BUFFER_DIM(kTexW, kTexH), kUploadTransferFlags);
+	const u32* const upload_src = zero ? s_zc_surface : s_staging;
+	if (gx_op([&] {
+		    C3D_SyncDisplayTransfer(const_cast<u32*>(upload_src), GX_BUFFER_DIM(kTexW, kTexH),
+		                            static_cast<u32*>(s_tex.data), GX_BUFFER_DIM(kTexW, kTexH),
+		                            kUploadTransferFlags);
 	    }))
-		printf("[c3d] GX budget: present upload refused\n");
+		s_tex_reordered = zero;   // the texture now holds this picture's words (5.7.5)
+	else
+		printf("[c3d] GX budget: present upload refused\n");   // the texture keeps the previous picture
 
 	if (two)
 	{
@@ -710,7 +827,7 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		C3D_FrameDrawOn(s_target);
 	}
 	else
-		draw_present_quad();
+		draw_present_quad(s_tex_reordered);
 
 	// 5. The transfer's destination is taken at C3D_FrameEnd, and the previous queue (with
 	// its swap request) finished in step 1: if that swap has not taken effect yet (next

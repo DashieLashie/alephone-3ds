@@ -28,6 +28,17 @@ static void test_config()
 	CHECK(d.present_gpu && d.test_vhalt == 0);
 	CHECK(!d.two_frame);   // plan B-a: off by default
 
+	CHECK(d.zero_copy);    // plan B-b: on by default (design 5.7.7)
+	{
+		Config z;
+		std::vector<std::string> zp;
+		config_parse(z, "present gpu\nzero_copy 0   # P1 present\n", zp);
+		CHECK(zp.empty() && !z.zero_copy);
+		CHECK(config_apply(z, "zero_copy", "1") && z.zero_copy);
+		CHECK(!config_apply(z, "zero_copy", "2") && z.zero_copy);
+		CHECK(!config_apply(z, "zero_copy", "yes") && !config_apply(z, "zero_copy", "") && z.zero_copy);
+	}
+
 	// two_frame (design 5.7.11)
 	Config t;
 	std::vector<std::string> tproblems;
