@@ -998,3 +998,40 @@ item 14 in `NEXT-SPRINT.md`).
 "Source_Files/CSeries/csalerts_sdl.cpp"`, both volumes): DIFFER (2 lines), **0 lines with
 numbers normalised** (only `__LINE__` moved); `-fsyntax-only` exit 0, 0 diagnostics
 (167 934 and 89 269 preprocessed lines).
+
+## Stage 10 B: the zero-copy present (55)
+
+Added 2026-10-26 on branch `stage10-bb` (stage 10 plan B-b, `CITRO3D_DESIGN.md` 5.7.2; built on the
+user's decision of 2026-10-26 although B-a's console saving was below the 0.5 ms rule, and kept off
+`stage10-c3d` until it is re-measured at 60 fps with the renderer).
+
+55. **`RenderOther/screen.cpp`: the 400x240 `main_surface` can live in a linear buffer the GPU
+    reads.** At the one creation site (`change_screen_mode`, `if (!main_surface)`, now :1140-1149),
+    fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)`, the engine first asks
+    `a1_3ds::main_surface_pixels(vmode_width, vmode_height, pitch)` (declared in `a1_3ds_platform.h`
+    under `#ifdef A1_RENDER_C3D`, which `screen.cpp` already includes under `A1_PLATFORM_3DS`;
+    defined in `render_c3d/back/present.cpp`). It returns `nullptr` unless the surface is 400x240
+    (HUD + Map in game) and `debug-c3d` says `present gpu` and `zero_copy 1` (the default); then one
+    512 KiB `linearAlloc` buffer, pitch 2048 bytes (the present staging's shape), zeroed, flushed,
+    allocated once and never freed, and the surface is made with `SDL_CreateRGBSurfaceFrom` (same
+    masks, so the same `SDL_PIXELFORMAT_RGB888`). Otherwise, or if that fails, upstream's
+    `SDL_CreateRGBSurface` line runs unchanged. `SDL_CreateRGBSurfaceFrom` marks the surface
+    `SDL_PREALLOC`, so the two free sites (:864-867, :975-978) leave the buffer alone and the next
+    400x240 surface gets the same one (one live `main_surface` at a time: one creation site guarded by
+    `!main_surface`). Every user of the surface goes through SDL or its `->pitch` (critic B-b review:
+    `screen.cpp` `quadruple_surface`, `draw_pattern_rect`, the present seam and SDL fallback;
+    `screen_drawing.cpp`; `interface.cpp`, `sdl_dialogs.cpp` blits and fills; `HUDRenderer_Lua`;
+    `shell.cpp` screenshots; `video_3ds.cpp` `rotate_copy`, `half_rotate`, `present_reference`), so
+    the 2048-byte pitch (not `w * 4`) changes nothing for them, and after a release the CPU present
+    shows the same buffer. Port side: the GPU present uploads straight from the surface (no CPU copy
+    into the staging) as two C3D frames and fixes the channel order with three one-channel draws
+    (design 5.7.3-5.7.5); `debug-c3d zero_copy 0` turns it off at run time. Not in the default build
+    (`A1_RENDER_C3D=OFF`): the fenced lines and the declaration compile to nothing there.
+
+**Non-3DS check** (2026-10-26, `ppcheck.sh "Source_Files/RenderOther/screen.cpp"
+"Source_Files/RenderOther/screen.cpp"`, both volumes): **IDENTICAL** (197 086 and 125 182
+preprocessed lines), `-fsyntax-only` exit 0, 0 diagnostics. **3DS OFF builds** (the check
+`ppcheck.sh` cannot make, design 5.7.7): `arm-none-eabi-objdump -d` of `build-3ds/alephone.elf` and
+`build-3ds-prof/alephone.elf` byte-identical to the parent commit's (`cb40b9db9`); `arm-none-eabi-nm
+... | grep -ciE 'citro|C3D_|a1_c3d|main_surface_pixels'` = 0 in both; 0 warnings. (`screen.cpp` has
+no `__LINE__` user after the edit, so not even line constants move.)

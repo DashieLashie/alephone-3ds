@@ -694,8 +694,10 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 
 	// Design 5.7.5: the zero-copy path iff the picture is the engine's own surface in the 5.7.2 buffer
 	// (it exists only with zero_copy 1), 400x240, pitch 2048, a format with the XRGB word layout.
+	// The format is checked explicitly, not left to the conversion above (critic B-b minor 3).
 	const bool zero = !odd_now && s_zc_surface && src == s_zc_surface && src_w == kScreenW &&
-	                  src_h == kScreenH && src_pitch == kZcPitch;
+	                  src_h == kScreenH && src_pitch == kZcPitch &&
+	                  (src_fmt == SDL_PIXELFORMAT_RGB888 || src_fmt == SDL_PIXELFORMAT_ARGB8888);
 	// Design 5.7.4: a zero-copy present is always two frames; with two_frame the staging upload is a
 	// C3D frame of its own (U), and the draw another (D), which begins only when U has retired.
 	const bool two = cfg.two_frame || zero;
@@ -787,7 +789,8 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 		// empty frame. Only with suspend_gate 1 (0 is the deliberate reproduction: D draws as today).
 		if (cfg.suspend_gate && gate_closed())
 		{
-			printf("[c3d] two_frame: the gate closed between frames U and D: frame D not drawn\n");
+			printf("[c3d] two-frame present (%s): the gate closed between frames U and D: frame D not drawn\n",
+			       zero ? "zero-copy" : "two_frame 1");
 			fflush(stdout);
 			switch (begin_present_frame(FrameZone::Wait))
 			{
