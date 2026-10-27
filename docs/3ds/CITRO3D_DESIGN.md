@@ -199,6 +199,9 @@ the rectangle's clip fields from the window before each call
 re-instantiated from `view->tick_count` (`render.cpp`:869). Only the
 static-noise seed (`low_level_textures.h`:40-44) carries over; the harness
 saves/restores it. M0 proves it (SW-vs-SW diff = 0).
+*Superseded (M0 pre-implementation, round 1):* the weapon layer calls `rand()`
+(`weapons.cpp`:2922-2924), so a second traversal is not side-effect free; the
+harness records one traversal and replays it (section 7, M0 specification).
 
 ### 1.3 Support hooks
 
@@ -1859,6 +1862,201 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   demo: SW-vs-SW **0** differing pixels; (d) `mode null` bench L0/L6/L20:
   `R`, polygons/vertices/state changes max and p99 per frame; ring sizes in
   9.2 fixed at 2 × max.
+- **M0 specification (revision of 2026-10-26, before code; Review log "M0
+  pre-implementation").** The text above predates P1, plan A and B-a; where it and
+  the code disagree, this block rules. Citations are the code as of `e2394b1`.
+  - *Keys.* `calibrate` is taken: it is P1's present-target test (`core/config.h`
+    "calibrate 0|1", `back/present.cpp` step 4). M0's readback calibration is the
+    new key **`readback_cal 0|1`**. New keys, all in `core/config.*` + host test:
+    `renderer sw|c3d` (default `sw`), `mode null|readback|direct` (default
+    `readback`), `diff N` (0 = off, default; every N-th world frame is a diff
+    frame), `diff_frames N` (default 20; diff frames in all, then diffing stops and
+    a summary is logged; 0 = no limit), `classes LIST` (comma list, no spaces, of
+    `walls floors landscape static sprites weapons tinted other frame`, or `all` =
+    every one of them; default `all`; the `replay` check runs on every diff frame
+    regardless), `fullbright 0|1`, `dump 0|1`, `readback_cal 0|1`. The parser stays `core/config.cpp`'s one-token `key value` (not
+    `profile_3ds.cpp`'s), so `film <path>` (M1) will need a rest-of-line value.
+  - *What runs in M0* (`render_frame`, in 1.5's order; everything else returns
+    `false` and the caller draws in SW exactly as today):
+
+    | Config | M0 behaviour |
+    | --- | --- |
+    | no `debug-c3d`, or `renderer sw` without `diff`/`readback_cal` | `false` at once (one flag test) |
+    | `bit_depth != 32` or view side > 1024 | `false`, logged once per change (1.5) |
+    | `diff N` (either renderer) | on diff frames: the harness below, which also draws the real frame into `dest` and returns `true`. With `renderer c3d` the B side is still SW in M0 (no C3D rasteriser before M1; logged once) |
+    | `renderer c3d`, `mode null` | null mode (below), then `false` |
+    | `renderer c3d`, `mode readback`/`direct` | logged once ("not before M1/M6"), `false` |
+    | `readback_cal 1` | the first 30 world frames (after citro3d is up) run the calibration below, then `false` |
+
+  - *One traversal per frame: record, then replay* (critic, M0 pre-implementation
+    round 1, major 1). A second `c3d_draw` is **not** free of side effects:
+    `render_viewer_sprite_layer` → `get_weapon_display_information()` →
+    `add_random_flutter()` calls `rand()` (`weapons.cpp`:1242-1245, 1287-1289,
+    1348-1350, 2922-2924), so two traversals can draw a fluttering weapon
+    differently and shift the sequence Lua's `math.random` reads (`lmathlib.c`:201).
+    1.2's "only the static-noise seed carries over" is therefore wrong; the harness
+    never traverses twice. A diff frame runs `draw(ctx, &recorder)` **once**: the
+    `front/` `Recorder` (a `RasterizerClass`) appends a **copy** of every primitive
+    (`polygon_definition` holds its vertices inline, `scottish_textures.h`:181-211;
+    `rectangle_definition` has no pointer SW writes through) with its entry point and
+    foreground flag to a list of fixed capacity (8 192 events, a tagged union of the
+    two structs, ≈ 1.1 MiB malloc next to the scratch bitmaps, allocated at the first
+    diff frame, diff runs only), **taking the copy before** forwarding the original to
+    SW drawing into scratch A. The recording is an **event list**: `SetView(view)`,
+    `Begin`, each primitive (entry point + copy), `SetForeground`, `End`, in traversal
+    order; every replay re-emits the events in order to its target, handing each
+    primitive over as a **temporary copy** of the stored entry (so SW's clip edits,
+    the fullbright edit and later replays never see a modified entry). Then every comparison **replays** that list; the real frame is the
+    full replay into `dest` (drawn over the previous frame's pixels, as SW does), and
+    `render_frame` returns `true`. Recorder overflow: recording stops but forwarding
+    to SW goes on to the end of the traversal; then the diff frame is dropped
+    (logged, counted), the seed restored, `false` (the caller's SW draw is then a
+    second traversal on that one frame). Null mode (below) keeps the caller's draw
+    and so a second traversal per frame; its flutter is cosmetic, and null mode is
+    **benchmark-only** (benchmarks run no Lua; with a Lua plugin its second traversal
+    would shift `math.random`). M1+ (C3D frames, discards) should build on the recording; noted for M1.
+  - *Diff frame* (8.1, made concrete). Two scratch bitmaps A and B of `dest`'s
+    geometry (`bitmap_definition_buffer` + `precalculate_bitmap_row_addresses`,
+    `textures.h`:55-81; 2 × 450 KiB malloc at the first diff frame, diff runs only);
+    `dest` is written only by the final real-frame replay. SW draws into A or B by
+    pointing `Rasterizer_SW_Class::screen` (`Rasterizer_SW.h`) at it and back. The
+    noise seed (`texture_random_seed()`, `low_level_textures.h`:40-44, an inline
+    function's static: one object program-wide; `front/frame.cpp` includes that
+    header) is saved as `s0` before the traversal and set to `s0` before every draw
+    and replay. Steps: (1) clear A, record while SW draws the full frame into A;
+    (2) clear B, replay everything into B, compare as class **`replay`** (proves that
+    replaying the copies equals the direct draw; must be 0 in every milestone);
+    (3) per selected class: clear A (tinted: `0xFF808080`, else `0x00000000`),
+    replay `filter(class)` to SW into A; clear B likewise, replay the same into B
+    (M0: SW; M1+: C3D + readback keeping alpha); compare with `core/diff.cpp`;
+    (4) replay everything into `dest`, `true`. Coverage: A by top byte ≠ 0 (B the
+    same while B is SW; alpha ≠ 0 once B is C3D), tinted and static by "≠ clear".
+    Edge band: a pixel whose 8-neighbourhood (inside the image) holds a different
+    A-coverage. Metric over common covered non-edge pixels: max RGB channel |Δ|,
+    mean of it, share ≤ the class tolerance (8.3; 0 in M0). One line per check:
+    `[c3d] DIFF frame=F class=C covered=A/B cov_mismatch=E/N common=K within_tol=P% (tol T) mean=M max=X differ=D`
+    (`differ` = pixels whose 32 bits differ, the M0 acceptance figure), and after
+    `diff_frames` a `[c3d] DIFF summary frames=… checks=… differ_total=… dropped=…`.
+    Zone **`c3d_diff`** around the whole harness (diff frames are not benchmark
+    frames). `dump 1` writes `c3d-diff-<frame>-<class>-{sw,c3d}.bmp` (`core/bmp.cpp`,
+    32-bit BMP, host-tested) for the first diff frame's checks and for every check
+    with `differ > 0`, at most 32 files per run; `run-azahar.sh` copies `c3d-*.bmp`
+    like `screen-*.bmp`. `c3d-diff.py` (stdlib, `python3 -I`): `log LOG` tabulates
+    the DIFF lines per class; `bmp A B [class]` recomputes the metric from a dump
+    pair.
+  - *Classes* (`front/filter.cpp`; the pure mapping in `core/`, host-tested). The
+    filter **wraps** a `RasterizerClass*` (composition; it does not derive from
+    `Rasterizer_SW_Class`, so SW's internal punt of `_static` horizontal polygons to
+    `texture_vertical_polygon`, `scottish_textures.cpp`:211-214, stays inside SW and
+    the primitive is seen once). It forwards `SetView`, `Begin`, `End`,
+    `SetForeground`, and per primitive either drops it or forwards a **copy** (the
+    fullbright edit and SW's in-place clip edits never reach the recording):
+
+    | Entry point | `transfer_mode` | class |
+    | --- | --- | --- |
+    | `texture_vertical_polygon` | `_textured` / `_big_landscaped` / `_static` | walls / landscape / static |
+    | `texture_horizontal_polygon` | `_textured` / `_big_landscaped` / `_static` | floors / landscape / static |
+    | `texture_rectangle` | `_tinted` / `_static` | tinted / static |
+    | `texture_rectangle` | other, before / after `SetForeground()` (reset by `Begin()`) | sprites / weapons |
+    | any | anything else (`_solid`: SW draws nothing) | other |
+
+    `frame` = no filter (the full replay, under the class's own clear and
+    `fullbright`). `fullbright 1`: every forwarded `_textured` primitive without
+    `_SHADELESS_BIT` gets `ambient_shade = FIXED_ONE`, which selects the top shading
+    table at any depth (`scottish_textures.cpp`:157-159: `a + s/2 ≥ FIXED_ONE`,
+    `CEILING` to the last table, :161-170), i.e. 3.2's `table[256·255 + i]`. The
+    `replay` check never uses `fullbright`.
+  - *Null mode* (defines `R`, 0.5 and 9.3): `draw(ctx, &null)` with a `front/`
+    `NullRasterizer` that receives every primitive the SW rasteriser would,
+    classifies it, counts and draws nothing; then `false` and the caller's SW draw.
+    `R` = its time, zone **`c3d_null`** (nested in `render`, so `render` stays the SW
+    cost). Per frame it counts: polygons, rectangles, vertices `V = Σ n + 4·rects`,
+    fan indices `I = Σ 3(n−2) + 6·rects`, **state changes** (consecutive primitives
+    whose key `(class, texture, shading_tables, transfer_mode, transfer_data,
+    _SHADELESS_BIT)` differs: the merges 2.1 allows; draws = changes + 1; this key
+    comparison is M1's batching test, so it belongs in `R`) and distinct `(texture,
+    shading_tables)` pairs. The bookkeeping inside `c3d_null` is bounded (critic
+    minor 5): the distinct pairs in a fixed 1 024-slot open-addressing table with a
+    per-frame generation tag (no clearing; a full table counts as 1 024 and is
+    flagged), the per-frame samples in fixed arrays of 16 384 frames (beyond that only
+    the max is kept), allocated once at the first null frame. `[c3d] null` lines every
+    300 null frames and at release give max and p99 of each over all stored null
+    frames (p99 by a host-tested nearest-rank function in `core/`). Ring sizes (9.2) =
+    2 × the bench max of `V` and `I`, rounded up to 1 024; 9.2's own "2 ×" (two
+    halves, one per frame in flight in M6) is kept on top.
+  - *The front/back interface.* `front/` includes two plain headers from `back/`
+    (no `<3ds.h>`): `context.h` (as now: `config()`, `is_up()`) and the new `view.h`,
+    which exports exactly: `enum class ViewCal` / `struct CalResult` (POD from
+    `core/`), `bool view_calibrate(unsigned k, int w, int h, CalResult& out)` (false =
+    skipped: citro3d not up, a release pending or the gate closed, 5.6.1 a; it applies
+    those rules itself) and `void view_free()` (called by `release_and_fini()`).
+  - *Readback calibration* (5.2's orientation, UNVERIFIED until it passes),
+    `back/view.cpp`: an **unlinked** view target of the view's size
+    (`C3D_RenderTargetCreate(w, h, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1))`,
+    `renderqueue.h`:62; 400x240, Classic 480x240) and a linear readback staging of
+    `w·h·4` bytes, both created at the first calibration frame and freed by
+    `view_free()` after `C3D_Fini` (the abandon path skips it, as it skips
+    `present_free()`). A calibration frame runs inside `render_frame`, i.e. between
+    two presents, through `back::frame_begin()` / `frame_end(0, …, FrameKind::View)`
+    (the gate, the abandon and `s_in_frame` rules hold for it). It clears the view
+    target to a colour encoding the calibration frame index `k`, draws four 16x16
+    corner quads (top-left red, top-right green, bottom-left blue, bottom-right
+    white; screen pixels, y down) with the present's shader and attribute layout
+    (`present.v.pica`, float3 + float2) and TEV stage 0 = `GPU_CONSTANT`
+    (`texenv.h`:85), ends the frame, then reads back out of frame:
+    `C3D_SyncDisplayTransfer` tiled → linear (runs the queue and waits, 0.3),
+    `GSPGPU_InvalidateDataCache` (`gspgpu.h`:246), converts with 5.2's
+    `(rgba >> 8) | 0xFF000000`. **Starting values** (no local example uses an
+    unlinked, untilted target: every target in `examples/3ds/graphics/gpu/` is a
+    240x400 screen with `Mtx_OrthoTilt`): projection `Mtx_Ortho(0, w, h, 0, 0, 1,
+    true)` (`maths.h`:492); transfer `GX_BUFFER_DIM(w, h)` in and out,
+    `GX_TRANSFER_FLIP_VERT(0) | OUT_TILED(0) | RAW_COPY(0) | IN_FORMAT(RGBA8) |
+    OUT_FORMAT(RGBA8) | SCALING(NO)`. Checks: each corner holds its own colour →
+    `orientation ok`; else the observed mapping is logged and fixed by **one** change
+    and one re-run: rows flipped → swap bottom and top of the projection
+    (`Mtx_Ortho(0, w, 0, h, …)`; the transfer flags stay); columns flipped → swap
+    left and right; transposed → **not** a flag change (swapping `GX_BUFFER_DIM` on a
+    non-square tiled buffer scrambles it): log it and stop; the fix is a design change
+    to the screen-style arrangement every local example uses (target `(h, w)`,
+    `Mtx_OrthoTilt`, `GX_BUFFER_DIM(h, w)`, `both_screens/source/main.c`:52, 102) with
+    a transposing CPU conversion; the centre
+    holds frame `k`'s colour (else which `k` it is) → `current frame ok`; the
+    converted red is `0xFFFF0000` → `channels ok` (else the conversion is changed).
+    One `[c3d] readback_cal k=… orientation … current frame … channels …` line per
+    frame and a summary after 30; with `dump 1` the readback of frames 0 and 29 as
+    `c3d-rbcal-<k>.bmp`. The values that pass are written into this block. **State
+    hygiene with the present** (`back/present.cpp` is not edited in M0: plan B-b
+    edits it): `view.cpp` copies `*C3D_GetBufInfo()` into a local, binds its own
+    buffer, and after its draws restores the copy with `C3D_SetBufInfo(&saved)`
+    (`buffers.h`:20-21; whether `C3D_SetBufInfo` copies its argument is UNVERIFIED,
+    so `saved` lives until the present's next draw has been issued: a static in
+    `view.cpp`); sets the projection uniform for its own draws (the present sets its
+    own before each draw, `present.cpp`:342); sets TEV stage 0 (the present resets
+    it in full before every draw, `set_present_draw`) and the cull/depth/stencil/
+    alpha/blend state it needs (the present sets them all before every draw,
+    `draw_present_quad`); and does **not** touch the program (`C3D_BindProgram` at
+    init only, `present.cpp`:432), `AttrInfo` (:435-438), `C3D_TexBind(0)` (:453) or
+    TEV stages 1-5, none of which the present sets again. **GPU timing:** a view
+    frame sets a flag in `context.cpp` so that the present's next
+    `sample_drawing_time(Draw)` is skipped (its "last finished queue" would be the
+    view frame and readback, critic minor 7); `present.cpp` is unchanged.
+  - *GX queue* (2.4). `core/gx_queue.h` gains the readback's +1:
+    `note_out_of_frame()` adds one entry to the frame just ended and to the
+    high-water mark; host test of 2.4's worst case (24 + 2 + 1 = 27 < 32).
+    `frame_end` gets a frame kind (`FrameKind::Present` default, `View`): presents
+    keep the "> 4 entries" warning, view frames warn at > 27 (2.4).
+  - *Zones* (`a1_3ds_profile.h`, inside the `A1_RENDER_C3D` fence after B-a's;
+    `profile_3ds.cpp` names; `perf-table.py` columns if it lists zones by name):
+    `c3d_null`, `c3d_diff`, `c3d_readback` (the out-of-frame transfer + invalidate
+    + conversion). A view frame's `C3D_FrameBegin(0)` is timed in `c3d_wait`, which
+    then also appears inside `render`.
+  - *Stats.* `[c3d] frame stats` once a second while world frames run: frames,
+    diff frames (and dropped), null frames, calibration frames, skipped calibration
+    frames.
+  - *Not in M0:* any C3D rasteriser, readback of a real frame into `world_pixels`,
+    the discard path, texture code. Hook 1's code (1.2) is used unchanged; its
+    "re-running `c3d_draw` is safe" paragraph is superseded by the record/replay
+    bullet above.
 
 ### M1 — flat-shaded walls only
 - Add: `core/geometry.cpp`, `front/rasterizer.cpp` (walls → draw items; others
@@ -2394,3 +2592,62 @@ flip off the main thread); (5) the OFF check adds `main_surface_pixels` to the `
 gate re-check only with `suspend_gate 1`; (3) the new zones inside the `A1_RENDER_C3D` fence; (4)
 `c3d_fill` of the go formula from the `two_frame 0` runs; (5) `perf-table.py` columns and the
 present-total comparison with G0-b.
+
+### M0 pre-implementation (coordinator, 2026-10-26)
+
+M0 is the first milestone built on P1, plan A and B-a, which changed `back/present.cpp`,
+`back/context.cpp` and `core/config.*` after the design was approved. Checked against the code
+(`e2394b1`), with the result in section 7's "M0 specification" block:
+(1) `debug-c3d calibrate` is P1's present-target test, so M0's readback calibration gets
+`readback_cal`; (2) "null mode" and `R` were used (0.5, 9.3) but never defined; (3) M0 has no C3D
+rasteriser, so the diff's B side is a second SW draw into a scratch bitmap, and `renderer c3d`
+with `mode readback|direct` does nothing yet; (4) the class/fullbright filter and the state-change
+count had no definition; (5) `core/gx_queue.h` cannot count the readback's +1 entry (2.4), and
+`frame_end` warns above 4 entries, a present-only limit; (6) section 7's zone list has
+`c3d_readback` but no zone for `R` or the diff work; (7) `front/` may not include `<3ds.h>`, so
+the calibration's citro3d side is a new `back/view.cpp` behind a plain `back/view.h`; (8)
+`back/present.cpp` binds its vertex buffer once at init, so another draw would leave the present
+with the wrong buffer, and plan B-b edits that file, so M0 restores the binding from `view.cpp`
+instead of editing it; (9) the config parser is `core/config.cpp`'s one-token form, not
+`profile_3ds.cpp`'s (M1's `film <path>` will need more).
+
+### M0 pre-implementation, round 1 (critic: REVISE, 1 major, 8 minor)
+
+1. **A second traversal calls `rand()` — accepted, record/replay.** `add_random_flutter()`
+   (`weapons.cpp`:2922-2924) runs inside `render_viewer_sprite_layer`, so A and B could differ for a
+   fluttering weapon and Lua's `math.random` would shift. A diff frame now traverses once into a
+   recorder (copies, fixed capacity) while SW draws the direct frame into scratch A; a `replay` check
+   (direct vs replay) runs every diff frame; classes replay the recording into A and B; the real frame
+   is the replay into `dest` (`render_frame` returns `true`). 1.2's re-run paragraph marked superseded.
+   With replay A and B see identical input, so a flutter frame cannot make (c) fail; no extra film
+   needed for it.
+2. **`front/` needs more than `view.h` — accepted.** `front/` includes `context.h` and `view.h`;
+   `view.h`'s exports are listed.
+3. **`C3D_SetBufInfo` — accepted.** Copy `*C3D_GetBufInfo()`, restore with `C3D_SetBufInfo(&saved)`
+   (kept alive: copy semantics UNVERIFIED); program, `AttrInfo`, `C3D_TexBind(0)`, TEV 1-5 untouched.
+4. **Calibration start and fix rules — accepted.** Starting projection and flags given; one change
+   per failure kind, one re-run each.
+5. **Null-mode bookkeeping inflates `R` — accepted, bounded.** Fixed generation-tagged table and fixed
+   sample arrays, allocated once; the state-key comparison stays in `R` (it is M1's batching test).
+6. **Filter by composition — accepted.**
+7. **Drawing-time sample after a view frame — accepted.** Skipped via a flag in `context.cpp`.
+8. **`frame_end` frame kind — accepted.** `FrameKind::Present`/`View`; `note_out_of_frame()`
+   host-tested with 24 + 2 + 1.
+9. **Cleared `dest` on diff frames (speculative) — accepted, moot.** A and B are scratch bitmaps;
+   `dest` is written only by the real-frame replay, over the previous frame as usual.
+
+Console items from the critic, added to section 10 item 8's readback line when M0 is recorded: the
+unlinked target's orientation and flags; that a view frame's `C3D_FrameEnd` with no linked target
+causes no top-screen swap; that the out-of-frame `C3D_SyncDisplayTransfer` waits for its own
+completion.
+
+### M0 pre-implementation, round 2 (critic: APPROVE, 5 minor, folded)
+
+(1) "Transposed" is not fixed by swapping `GX_BUFFER_DIM` (it scrambles a non-square tiled buffer):
+log and stop; the fix would be the examples' `(h, w)` + `Mtx_OrthoTilt` arrangement, a design change.
+(2) The recording is an event list (`SetView`, `Begin`, primitives, `SetForeground`, `End`) re-emitted
+in order by every replay. (3) The copy is taken before forwarding; replays hand over temporary copies.
+(4) Recorder memory ≈ 1.1 MiB (8 192 events), diff runs only; on overflow forwarding continues to the
+end of the traversal. (5) Null mode is benchmark-only (its second traversal shifts `rand()`).
+Console items carried: readback orientation/flags; no top-screen swap from a view frame; the
+out-of-frame transfer waits for its own completion; whether `C3D_SetBufInfo` copies its argument.
