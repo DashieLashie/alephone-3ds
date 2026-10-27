@@ -1137,6 +1137,11 @@ B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
    `.claude/worktrees/stage10-bb`, from `8626f3065`), not merged into `stage10-c3d`. The renderer
    (plan C, M0 first) goes on `stage10-c3d` meanwhile. B-b is re-measured at 60 fps once the
    renderer exists, and merged only if it helps there.**
+   **B-b built (2026-10-26, branch `stage10-bb`, tag `port-stage10-B`; critic round 1 REVISE, round 2
+   APPROVE):** engine edit `PATCHES.md` 55, `debug-c3d zero_copy` (default 1; the OFF build is unchanged,
+   `objdump -d` identical). Azahar passes 5.7.9 items 1-5 (`PERF.md` "Stage 10 B-b": `present_diff` 0 on
+   every path and path switch, both negative controls fire). **Next: the "B-b console runbook" below, when
+   the user decides** (at the latest with the renderer, at 60 fps); not merged into `stage10-c3d`.
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
@@ -1208,6 +1213,80 @@ leftover 3dslink processes.
 
 **Record:** `PERF.md` "Stage 10 B-a" (a "Console (New 3DS), <date>" part with the table and the
 verdict), `CITRO3D_DESIGN.md` 5.7.10 item 1 and section 10 item 16, plan B above.
+
+## B-b console runbook (the zero-copy present on hardware; when the user decides)
+
+**Not run yet. Do not run it without the user's go** (decision of 2026-10-26: B-b stays on its branch and
+is judged at 60 fps once the renderer exists; this runbook can serve then, or earlier if the user wants
+the @30 figures). Written 2026-10-26. Design `CITRO3D_DESIGN.md` 5.7.9 ("Console") and 5.7.10; Azahar
+results in `PERF.md` "Stage 10 B-b". Driving as in "How to drive the console" and
+`KICKOFF_B_CONSOLE.md` (ask the IP: it was 192.168.100.72). Tell the user each time whether you need
+**ftpd** (card files) or the **Homebrew Launcher netloader** (Y). About 22 launches, ~60 min.
+
+**Builds** (from the `stage10-bb` worktree, tag `port-stage10-B` or later):
+`build-3ds-c3d-prof/alephone.3dsx` (benchmarks) and `build-3ds-c3d/alephone.3dsx` (functional run).
+Check first: `cmake --build` both (nothing to do / 0 warnings). If the renderer has been merged into a
+branch that carries B-b by then, use that branch's builds and say so in the record.
+
+**Setup.** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw` (not in git), `mkdir -p "$H/bb"`, and
+make the run helper from B-a's: `sed 's#stage10-c3d#stage10-bb#; s#hw/b0/#hw/bb/#' "$H/b0/run.sh" >
+"$H/bb/run.sh"; chmod +x "$H/bb/run.sh"`. Kill stale 3dslink first (`pgrep -fl
+'^/opt/devkitpro/tools/bin/3dslink'`). ftpd: list `/luma/dumps/arm11/` (note the highest dump number),
+fetch the user's `Marathon 2 Preferences` into `$H/bb/prefs-user` (to put back at the end).
+`setprefs.sh` below is `"$H/sprint8/setprefs.sh" IP <bottom_screen> <fps>`, as in B-a. Configs
+(copy each to a scratch file named `debug-c3d` before `sd-ftp.sh put`): **side A**
+`scripts/3ds/tests/c3d/b-zero-copy-off.cfg` (`zero_copy 0`: the P1 staging present), **side B**
+`b-zero-copy.cfg` (`zero_copy 1`). **Never use `p1-gpu.cfg` as side A on this branch**: without the key
+it runs zero-copy (default 1). The key acts at the game's screen setup, so the file must be on the card
+before the launch.
+
+**1. `present_diff` first (settles 5.7.10 items 2 and 4: the one-channel write masks and the TEV
+channel operands on the PICA).** `build-3ds-c3d`, `b-zero-copy-diff.cfg`, no `debug-perf`,
+`setprefs.sh IP 0 30`. `run.sh build-3ds-c3d diff-hm`: start a game, play ~30 s, START > quit to the main
+menu, start a game again, play ~20 s, quit from the game's menu. Pass: every `[c3d] present_diff` line
+`0 of 96000 pixels differ in RGB (0 in A only)` and `present_diff final: N checks, 0 with RGB
+differences`, max |diff| 0 in all four channels; exactly one `[c3d] zero_copy: surface buffer` line;
+`[c3d] present: 400x240 zero-copy` logged. **If any check differs: record the first lines (pixel,
+gpu/cpu words) and stop here** (B-b's reorder does not hold on hardware; the benchmarks would be
+meaningless). By eye: colours as usual (a swapped red/blue or a green tint is the failure to look for).
+
+**2. The series (HUD + Map @30, 12 runs).** `build-3ds-c3d-prof`, `setprefs.sh IP 0 30`. Per run, on
+ftpd: `$H/sprint8/debug-perf-L<N>` as `debug-perf` and the side's config as `debug-c3d`; then netloader:
+`$H/bb/run.sh build-3ds-c3d-prof hm30-zc<0|1>-L<N>-<a|b>`; the user presses A twice; the game quits
+after the BENCH line. Order, interleaved: L0 zc0-a, L0 zc1-a, L0 zc0-b, L0 zc1-b, then L6, then L20.
+Each run: `gaps=0` (else rerun), and the transcript's `[c3d] debug-c3d:` line shows the intended
+`zero_copy`; zc1 transcripts also show the `zero_copy: surface buffer` line.
+**Read:** `python3 -I scripts/3ds/tests/perf-table.py "$H"/bb/hm30-*.txt`. Per level: present total
+(`present` + `c3d_wait` + `c3d_fill` + `c3d_upload` + `c3d_vblank`) zc0 vs zc1, `c3d_fill` (zc1 must read
+0.00), `c3d_upload` (the upload wait; B-a: 0.61-0.62 ms), `blit`, `bottom` (**did B-a's ~0.4 ms `bottom`
+drop carry over?**), busy, `max`, and the stats lines' `gpu_ms draw=... upload=...` (zc1's `draw` holds
+the three fills: 5.7.10 item 3). **Keep rule (5.7.9): @30 HUD + Map `present` total and busy drop on
+L0, L6 and L20 (means of 2 runs).** Report; the user decides.
+
+**3. @60 (no-regression look, 8 runs).** `setprefs.sh IP 0 60`: L0, L6, L20 zc0 then zc1, one run
+each; then `setprefs.sh IP 2 60` (Classic) L0 zc0 and zc1. Only fps, `max`, `gaps`, `c3d_vblank` and
+`gpu_ms draw` matter: @60 a CPU saving can turn into VBlank wait (5.7.1; B-a @60: `c3d_vblank` 1.08 ->
+0.70). Classic must be unchanged (it never takes the zero-copy path: no `surface buffer` line).
+This step is the one the user's decision turns on, and the one to repeat once the renderer exists.
+
+**4. Functional run (`build-3ds-c3d`, `b-zero-copy-diff.cfg`, no `debug-perf`).** `setprefs.sh IP 0 30`.
+`run.sh build-3ds-c3d fn-bb`: start a game (HUD + Map), play ~30 s, HOME and back, close the lid ~5 s
+and open it, Preferences -> Bottom Screen Classic, play ~20 s in Classic, back to HUD + Map, play ~20 s,
+quit to the main menu, start a game again, then **HOME > Close in the game**. Pass: the launcher comes
+back, no Luma screen, no new dump; on the card's `log.txt`: `present_diff final: N checks, 0 with RGB
+differences`, exactly one `zero_copy: surface buffer` line, `present_screen_false_returns=0`,
+`gx_high_water` <= 4, `release done`. Fetch `log.txt` into `$H/bb/fn-bb-log.txt`.
+
+**Reading a failure:** differences in step 1 or 4: stop, record (above). A hang at HOME > Close: power
+off, fetch the log, record the last `[c3d]` lines, stop. A Luma dump: fetch it,
+`arm-none-eabi-addr2line -e build-3ds-c3d[-prof]/alephone.elf` (registers at 0x28), stop.
+
+**Cleanup (always):** delete `debug-perf` and `debug-c3d`; put back `$H/bb/prefs-user` as `Marathon 2
+Preferences`; reinstall the user's `.3dsx` if a launch replaced it (ask which; the shipping build is
+`/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/alephone.3dsx`); kill leftover 3dslink processes.
+
+**Record:** `PERF.md` "Stage 10 B-b" (a "Console (New 3DS), <date>" part), `CITRO3D_DESIGN.md` 5.7.10
+items 2-5 and section 10 item 16, plan B above.
 
 ## Fallback exit runbook (piece A7 on the console; when the user is back)
 

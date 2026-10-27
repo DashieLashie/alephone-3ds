@@ -1247,6 +1247,69 @@ Preferences, new game, HOME > Close): PASS. `present_diff final: 151 checks, 0 w
 returned`, exit; the launcher came back, no Luma screen, dumps unchanged (0-6). The 3dslink transcript ends
 at the lid ("Connection reset by peer"); the rest is in the card's `log.txt` (`b0/fn-b-log.txt`).
 
+## Stage 10 B-b: the zero-copy present (Azahar — non-authoritative)
+
+Recorded 2026-10-27 on branch `stage10-bb` (not merged into `stage10-c3d`), commits `631913d64` and
+`3dfaac6aa` (review follow-ups), tag `port-stage10-B`. Design `CITRO3D_DESIGN.md` 5.7: one engine edit
+(`PATCHES.md` 55) creates `main_surface` over a 512 KiB linear buffer (pitch 2048) that the port hands out
+for the 400x240 surface. The present then skips the fill: frame U flushes the surface and uploads it
+(`GX_DisplayTransfer`, no format change), and frame D draws the quad three times with one-channel write masks
+to put the channels back (texel R,G,B,A = surface X,R,G,B). `debug-c3d zero_copy 0|1`, default 1. The
+640x480 surface (menus, Classic) never takes the path and keeps the staging present. Critic: round 1
+REVISE (PATCHES.md 55 missing, 3 minors), round 2 APPROVE. Design and code agreed when re-read before
+the build; nothing in 5.7 changed.
+
+| Check | Result |
+| --- | --- |
+| `b-zero-copy-diff.cfg` (`zero_copy 1`, `present_diff 30`), HUD + Map @30 L0/L6/L20 (perf-bench, ON-prof) | 31 / 32 / 32 checks, **0 with RGB differences**, max \|diff\| 0 in R, G, B and A (so 0 alpha-only too); one `zero_copy: surface buffer` line per run; `gaps=0` |
+| scripts 13, 14, 26 (new: game, quit to menu, second game), both Bottom Screen settings, `b-zero-copy-diff.cfg` | 31 / 37, 8 / 13, 34 / 41 checks, **0 with RGB differences**; one buffer line in HUD + Map, none in Classic (640x480 surface); 26 shows game -> menu -> game |
+| scripts 07 and 08, `b-zero-copy-diff.cfg` | 07: no mismatch line (ends at the timeout); 08: 71 checks, 0 differences |
+| scripts 22 and 22-fast (HOME > Close in a game), `b-zero-copy.cfg` | pass: gate closed, `release done`, exit; no guest fault |
+| every run above | `present_screen_false_returns=0`, `gx_high_water=3` (the staging path reads 3 too), `gx_refused=0` |
+| negative control 1: the ToGreen / ToBlue operands swapped, script 13 | menus (640x480) 0 differences; from present 120 (in game) ~56 k pixels differ per check, max R 0, G 250, B 250 |
+| negative control 2: the stage-0 restore skipped (Plain draw after a reorder without `set_present_draw`), script 26 | 3 of 34 checks differ (87-94 k pixels) after game -> menu |
+| OFF builds (`build-3ds`, `build-3ds-prof`) | `objdump -d` identical to `cb40b9db9`; `nm` grep 0; 0 warnings (ON builds 0 too); `ppcheck.sh` on `screen.cpp`: IDENTICAL |
+
+Profile, `build-3ds-c3d-prof`, the same binary both ways (`b-zero-copy-off.cfg` / `b-zero-copy.cfg`); HUD
++ Map @30 2 runs per cell, @60 and Classic 1 run; every log's `[c3d] debug-c3d:` line shows the intended
+`zero_copy`, `gaps=0` throughout. ms per frame (present total = `present` + `c3d_*`):
+
+| Setting | Level | zero_copy | fps | present | c3d_wait | c3d_fill | c3d_upload | c3d_vblank | present total | blit | bottom | busy | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| HUD + Map @30 | L0 | 0 | 30.33 | 0.41 | 0.00 | 1.33 | 0.00 | 0.00 | 1.74 | 1.20 | 2.50 | 17.72 | 68.79 |
+| HUD + Map @30 | L0 | 1 | 30.33 | 0.48 | 0.00 | 0.00 | 0.00 | 0.00 | 0.48 | 1.20 | 2.50 | 16.48 | 67.10 |
+| HUD + Map @30 | L6 | 0 | 30.31 | 0.41 | 0.00 | 1.33 | 0.00 | 0.00 | 1.74 | 1.20 | 2.42 | 15.46 | 74.44 |
+| HUD + Map @30 | L6 | 1 | 30.31 | 0.48 | 0.00 | 0.00 | 0.00 | 0.01 | 0.49 | 1.20 | 2.67 | 14.46 | 66.44 |
+| HUD + Map @30 | L20 | 0 | 30.34 | 0.41 | 0.00 | 1.33 | 0.00 | 0.00 | 1.74 | 1.20 | 3.02 | 15.86 | 63.32 |
+| HUD + Map @30 | L20 | 1 | 30.33 | 0.48 | 0.00 | 0.00 | 0.00 | 0.00 | 0.48 | 1.20 | 3.02 | 14.65 | 60.39 |
+| HUD + Map @60 | L0 | 0 | 51.72 | 0.41 | 0.00 | 1.33 | 0.00 | 0.01 | 1.75 | 1.20 | 2.54 | 18.77 | 52.78 |
+| HUD + Map @60 | L0 | 1 | 54.45 | 0.47 | 0.00 | 0.00 | 0.00 | 0.01 | 0.48 | 1.20 | 2.53 | 17.43 | 43.02 |
+| HUD + Map @60 | L6 | 0 | 56.88 | 0.41 | 0.00 | 1.33 | 0.00 | 0.03 | 1.77 | 1.20 | 2.38 | 16.35 | 61.85 |
+| HUD + Map @60 | L6 | 1 | 59.61 | 0.47 | 0.00 | 0.00 | 0.00 | 0.35 | 0.82 | 1.21 | 2.36 | 15.32 | 51.08 |
+| HUD + Map @60 | L20 | 0 | 56.22 | 0.40 | 0.00 | 1.33 | 0.00 | 0.04 | 1.77 | 1.20 | 2.75 | 16.49 | 50.27 |
+| HUD + Map @60 | L20 | 1 | 59.57 | 0.47 | 0.00 | 0.00 | 0.00 | 0.13 | 0.60 | 1.21 | 2.70 | 15.20 | 49.38 |
+| Classic @60 | L0 | 0 | 44.59 | 0.47 | 0.00 | 4.31 | 0.00 | 1.00 | 5.78 | 1.44 | 0.00 | 22.42 | 61.21 |
+| Classic @60 | L0 | 1 | 44.54 | 0.47 | 0.00 | 4.31 | 0.00 | 1.03 | 5.81 | 1.44 | 0.00 | 22.44 | 59.06 |
+
+Reading, with Azahar's limits (GPU work completes at once, so `c3d_upload` and `c3d_wait` read 0; no cache
+model):
+
+- **The fill goes** (1.33 -> 0.00) and the three draws add +0.06-0.07 ms of instructions to `present`:
+  present total -1.25 ms, busy -1.00 to -1.24 ms @30. This is an upper bound. The console adds the
+  upload wait B-a measured (0.61-0.62 ms), so 5.7.11's arithmetic predicts 1.12-1.14 − 0.07 − 0.62 ≈
+  0.45 ms on the console before any `bottom` effect.
+- **The `bottom` drop of B-a does not show in Azahar:** L0 2.50 / 2.50, L6 2.42 / 2.67, L20 3.02 / 3.02.
+  Azahar has no cache model, so this neither confirms nor refutes the console's ~0.4 ms. (B-a's Azahar pair
+  2.76 / 2.50 was two separate runs, and this series' zc0 already reads 2.50.) Open for the console.
+- **The @60 VBlank absorption shows only in part.** In Azahar the @60 frame is CPU-bound (fps 52-57,
+  `c3d_vblank` ≤ 0.04 with `zero_copy 0`), so most of the saving shows as frame rate (+2.7 to +3.4 fps). Once
+  L6 and L20 reach ~59.6 fps, `c3d_vblank` rises to 0.35 / 0.13: the start of the absorption 5.7.1 warns
+  about. On the console @60 is already at 60 on L0 (B-a pair), so expect it there mostly as VBlank wait.
+- **Classic @60 is unchanged** (44.59 / 44.54; fill 4.31 both): its 640x480 surface never takes the path, by
+  design.
+
+The console runbook is `NEXT-SPRINT.md` "B-b console runbook" (not run).
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

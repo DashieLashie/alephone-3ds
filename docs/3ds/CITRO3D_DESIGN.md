@@ -1724,6 +1724,12 @@ VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
    settles it together with item 2.
 5. Whether `blit` or `bottom` move with the surface in linear memory at a 2048-byte pitch.
 
+*B-b built 2026-10-26 (branch `stage10-bb`, `PERF.md` "Stage 10 B-b"). Azahar — non-authoritative:
+items 2 and 4 hold in the emulator (`present_diff` 0 RGB and 0 alpha-only pixels on every zero-copy
+present, L0/L6/L20 and scripts 13/14/26; the swapped-draws control reports G/B differences, so the
+check sees the reorder); items 1, 3 and 5 cannot be read there (GPU work completes synchronously).
+All five stay open for the console ("B-b console runbook", `NEXT-SPRINT.md`).*
+
 #### 5.7.11 Order: B-a, then B-b on the console's go
 
 - **B-a (port only, no engine edit, no `PATCHES.md` entry):** `debug-c3d two_frame 0|1` (default
@@ -1743,6 +1749,9 @@ VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
   The user decides on the result.
 - **Status (2026-10-26):** B-a built (`a35aa79f4`, critic APPROVE, minors folded), Azahar passes
   (`PERF.md` "Stage 10 B-a"); the console session is `NEXT-SPRINT.md` "B-a console runbook".
+- **Status B-b (2026-10-26):** built on the user's decision despite the no-go, on branch `stage10-bb`
+  only (critic round 1 REVISE: `PATCHES.md` 55 missing, 3 minors; round 2 APPROVE); Azahar passes
+  5.7.9 items 1-5 (`PERF.md` "Stage 10 B-b"); console: `NEXT-SPRINT.md` "B-b console runbook".
 - **B-b (on the go):** the engine edit (5.7.2, `PATCHES.md` 55), the reorder draws (5.7.3), the
   zero-copy path selection (5.7.5), `zero_copy` (5.7.7); B-a's `two_frame` becomes the zero-copy
   present's structure (zero-copy presents are always two-frame).
@@ -2088,6 +2097,9 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     `two_frame 1` over 151 checks; see 5.7.10 item 1*); then B-b's one-channel
     write masks and TEV operands give `present_diff` 0; the upload wait (`c3d_upload`) and the three
     fills' drawing time; the `zero_copy 0`/`1` series decide whether B-b is kept (5.7.9, 5.7.10).
+    *B-b was built anyway on the user's decision (2026-10-26, branch `stage10-bb`, not merged; passes
+    Azahar, `PERF.md` "Stage 10 B-b"). Its console items (`present_diff` with `zero_copy 1`, the
+    `zero_copy 0`/`1` series @30 and @60) are `NEXT-SPRINT.md` "B-b console runbook", not run yet.*
 
 ## 11. Open questions
 
