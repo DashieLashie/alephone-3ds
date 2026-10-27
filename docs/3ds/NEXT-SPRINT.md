@@ -1144,9 +1144,9 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    non-authoritative): the seam (`PATCHES.md` 45), the record/replay diff harness (SW-vs-SW 0
    differing pixels on L0/L6/L20 and the menu demo), null mode (`R_est` 0.33-0.62 ms, far under
    G2-a's 3 ms), the readback calibration (30/30 ok in Azahar with the design's starting values).
-   **Next: the user's choice: M1 (flat-shaded walls, its own kickoff), or first the short "M0
-   console check" below** (the readback orientation is the one M0 fact Azahar cannot settle; M1+
-   build on it).
+   **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
+   console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
+   console runbook carries the M0 steps.
 
 ## B-a console runbook (plan B's go / no-go; when the user is at the console)
 
@@ -1357,7 +1357,7 @@ next merge).
 
 ## M0 console check (the readback calibration on hardware; when the user is at the console)
 
-**Not run yet.** Written 2026-10-27. Settles `CITRO3D_DESIGN.md` section 10 item 8 for the
+**Not run yet; deferred by the user (2026-10-27), to be folded into M1's console runbook.** Written 2026-10-27. Settles `CITRO3D_DESIGN.md` section 10 item 8 for the
 renderer's readback (every M1-M5 frame is read back this way) and takes `R` on the console. Driving
 as in "How to drive the console" (ask the IP; ftpd for card files, the Homebrew Launcher netloader
 (Y) for launches). About 6 launches, ~20 min.
