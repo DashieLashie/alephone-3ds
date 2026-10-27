@@ -166,18 +166,19 @@ static void test_config_m0()
 {
 	Config d;
 	CHECK(!d.renderer_c3d && d.mode == Mode::Readback && d.diff == 0 && d.diff_frames == 20);
-	CHECK(d.classes == kAllClassesMask && !d.fullbright && !d.dump && !d.readback_cal);
+	CHECK(d.classes == kAllClassesMask && !d.fullbright && !d.dump && !d.readback_cal && !d.readback_cal_resize);
 
 	Config c;
 	std::vector<std::string> problems;
 	config_parse(c,
 	             "renderer c3d\nmode null\ndiff 5   # every fifth\ndiff_frames 0\n"
-	             "classes walls,floors,frame\nfullbright 1\ndump 1\nreadback_cal 1\n",
+	             "classes walls,floors,frame\nfullbright 1\ndump 1\nreadback_cal 1\nreadback_cal_resize 1\n",
 	             problems);
 	CHECK(problems.empty());
 	CHECK(c.renderer_c3d && c.mode == Mode::Null && c.diff == 5 && c.diff_frames == 0);
 	CHECK(c.classes == ((1u << kWalls) | (1u << kFloors) | (1u << kFrame)));
-	CHECK(c.fullbright && c.dump && c.readback_cal);
+	CHECK(c.fullbright && c.dump && c.readback_cal && c.readback_cal_resize);
+	CHECK(config_apply(c, "readback_cal_resize", "0") && !c.readback_cal_resize);
 	CHECK(config_apply(c, "mode", "direct") && c.mode == Mode::Direct);
 	CHECK(config_apply(c, "mode", "readback") && c.mode == Mode::Readback);
 	CHECK(config_apply(c, "renderer", "sw") && !c.renderer_c3d);
@@ -195,6 +196,7 @@ static void test_config_m0()
 	CHECK(!config_apply(b, "fullbright", "2") && !b.fullbright);
 	CHECK(!config_apply(b, "dump", "yes") && !b.dump);
 	CHECK(!config_apply(b, "readback_cal", "") && !b.readback_cal);
+	CHECK(!config_apply(b, "readback_cal_resize", "2") && !b.readback_cal_resize);
 	CHECK(config_apply(b, "classes", "walls"));
 	const uint32_t only_walls = b.classes;
 	CHECK(only_walls == (1u << kWalls));
@@ -353,23 +355,21 @@ static void test_bmp()
 
 static void test_gx_queue_readback()
 {
+	// The readback transfer is inside the view frame since revise 1: it is one more take() (two with a
+	// non-empty command buffer) and the frame's total counts it.
 	GxQueue q;
 	q.begin_frame();
-	for (int i = 0; i < GxQueue::kBudget; ++i)
+	for (int i = 0; i < GxQueue::kBudget - 2; ++i)
 		CHECK(q.take(false));
+	CHECK(q.take(true));   // the readback transfer, splitting the command list
 	CHECK(!q.take(false) && q.refused() == 1);
-	CHECK(q.end_frame(1) == 26);
-	CHECK(q.last_total() == 26 && q.high_water() == 26);
-	q.note_out_of_frame();
-	CHECK(q.last_total() == 27 && q.high_water() == 27);
-	CHECK(q.high_water() < 32);
+	CHECK(q.end_frame(0) == GxQueue::kBudget + 1);
+	CHECK(q.last_total() == 25 && q.high_water() == 25 && q.high_water() < 32);
 
-	// A later, smaller frame does not lower the high-water mark; the +1 follows the last frame.
+	// A later, smaller frame does not lower the high-water mark.
 	q.begin_frame();
 	CHECK(q.take(true));
-	CHECK(q.end_frame(0) == 3 && q.last_total() == 3);
-	q.note_out_of_frame();
-	CHECK(q.last_total() == 4 && q.high_water() == 27);
+	CHECK(q.end_frame(0) == 3 && q.last_total() == 3 && q.high_water() == 25);
 }
 
 static void test_stats()
@@ -476,45 +476,106 @@ static void test_calibrate()
 			quad(w - kCalQuad, h - kCalQuad, cs.br);
 			const CalResult r = cal_check(img.data(), w, h, w, k);
 			CHECK(r.orientation == cs.o);
-			CHECK(r.current_frame_ok && r.observed_k == 17);
+			CHECK(r.observed_k == 17 && r.current_frame_ok == (cs.o != Orientation::Unknown));   // unknown: corners mismatch
 			CHECK(r.corner[0] == cs.tl && r.corner[1] == cs.tr && r.corner[2] == cs.bl && r.corner[3] == cs.br);
 			CHECK(r.centre == cal_clear_argb(k));
 			CHECK(r.channels_ok == (cs.o != Orientation::Unknown));
 			if (cs.o == Orientation::Ok)
 				CHECK(cal_line(k, r) ==
-				      "[c3d] readback_cal k=17 orientation ok current frame ok channels ok corners "
-				      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+				      "[c3d] readback_cal k=17 orientation ok current frame ok mismatched 0 (sentinel 0) "
+				      "channels ok corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 		}
 	}
 
-	// Current frame wrong: a stale frame's k, or something that is no clear at all.
+	// A perfect image: every pixel accounted for, nothing stale, nothing left of the sentinel.
 	const int w = 400, h = 240;
-	std::vector<uint32_t> img = flat(w, h, cal_clear_argb(16));
-	img[4 * w + 4] = kCalTopLeft;
-	img[4 * w + (w - 5)] = kCalTopRight;
-	img[(h - 5) * w + 4] = kCalBottomLeft;
-	img[(h - 5) * w + (w - 5)] = kCalBottomRight;
+	auto perfect = [&](unsigned k) {
+		std::vector<uint32_t> im = flat(w, h, cal_clear_argb(k));
+		auto quad = [&](int x0, int y0, uint32_t v) {
+			for (int y = y0; y < y0 + kCalQuad; ++y)
+				for (int x = x0; x < x0 + kCalQuad; ++x)
+					im[static_cast<size_t>(y) * w + x] = v;
+		};
+		quad(0, 0, kCalTopLeft);
+		quad(w - kCalQuad, 0, kCalTopRight);
+		quad(0, h - kCalQuad, kCalBottomLeft);
+		quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+		return im;
+	};
+	{
+		std::vector<uint32_t> im = perfect(17);
+		CalResult p = cal_check(im.data(), w, h, w, 17);
+		CHECK(p.current_frame_ok && p.mismatched == 0 && p.sentinel == 0 && p.orientation == Orientation::Ok);
+		CHECK(cal_line(17, p) ==
+		      "[c3d] readback_cal k=17 orientation ok current frame ok mismatched 0 (sentinel 0) channels ok "
+		      "corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+
+		// One stale pixel (the previous frame's clear) away from every sample point.
+		im[100 * w + 100] = cal_clear_argb(16);
+		p = cal_check(im.data(), w, h, w, 17);
+		CHECK(!p.current_frame_ok && p.mismatched == 1 && p.sentinel == 0);
+		CHECK(p.orientation == Orientation::Ok && p.observed_k == 17);   // the five samples are fine
+
+		// A row the transfer never wrote: the sentinel (also 0xRRGGBB of another k than 17's) is left in it.
+		im = perfect(17);
+		for (int x = 0; x < w; ++x)
+			im[50 * w + x] = cal_sentinel_argb(17);
+		p = cal_check(im.data(), w, h, w, 17);
+		CHECK(!p.current_frame_ok && p.mismatched == static_cast<unsigned>(w) && p.sentinel == static_cast<unsigned>(w));
+		CHECK(cal_line(17, p).find("mismatched 400 (sentinel 400)") != std::string::npos);
+		// ... in a quad, and in a row that is also stale: only the sentinel pixels count as sentinel.
+		im[3 * w + 3] = cal_sentinel_argb(17);
+		im[60 * w + 60] = cal_clear_argb(16);
+		p = cal_check(im.data(), w, h, w, 17);
+		CHECK(p.mismatched == static_cast<unsigned>(w) + 2 && p.sentinel == static_cast<unsigned>(w) + 1);
+
+		// The sentinel is no clear and no corner colour for any k, and differs from k to k.
+		for (unsigned k = 0; k < 256; ++k)
+		{
+			const uint32_t sn = cal_sentinel_argb(k);
+			CHECK(sn != cal_clear_argb(k) && sn != kCalTopLeft && sn != kCalTopRight && sn != kCalBottomLeft &&
+			      sn != kCalBottomRight);
+			CHECK(rgba_to_argb(cal_sentinel_rgba(k)) == sn && sn != cal_sentinel_argb(k + 1));
+		}
+
+		// Rows flipped: still reported as an orientation, and the image is current (0 mismatched against
+		// the flipped layout); the orientation, not the mismatch count, tells it apart.
+		std::vector<uint32_t> fl = perfect(17);
+		for (int y = 0; y < h / 2; ++y)
+			for (int x = 0; x < w; ++x)
+				std::swap(fl[static_cast<size_t>(y) * w + x], fl[static_cast<size_t>(h - 1 - y) * w + x]);
+		p = cal_check(fl.data(), w, h, w, 17);
+		CHECK(p.orientation == Orientation::RowsFlipped && p.channels_ok && p.mismatched == 0 && p.current_frame_ok);
+		fl[100 * w + 100] = cal_sentinel_argb(17);
+		p = cal_check(fl.data(), w, h, w, 17);
+		CHECK(p.orientation == Orientation::RowsFlipped && p.mismatched == 1 && p.sentinel == 1);
+	}
+
+	// Current frame wrong: a stale frame's k, or something that is no clear at all.
+	std::vector<uint32_t> img = perfect(16);
 	CalResult r = cal_check(img.data(), w, h, w, 17);
 	CHECK(r.orientation == Orientation::Ok && !r.current_frame_ok && r.observed_k == 16);
 	CHECK(cal_line(17, r) ==
-	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre k=16) channels ok corners "
+	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre k=16) mismatched 94976 (sentinel 0) "
+	      "channels ok corners "
 	      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 	img[(h / 2) * w + w / 2] = 0xFF123456u;
 	r = cal_check(img.data(), w, h, w, 17);
 	CHECK(!r.current_frame_ok && r.observed_k == -1);
 	CHECK(cal_line(17, r) ==
-	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre 0xFF123456) channels ok corners "
+	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre 0xFF123456) mismatched 94976 "
+	      "(sentinel 0) channels ok corners "
 	      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 	CHECK(cal_check(img.data(), w, h, w, 0x111).observed_k == -1);   // k is taken mod 256 by the clear
-	img[(h / 2) * w + w / 2] = cal_clear_argb(0x111);
+	img = perfect(0x111);   // k is taken mod 256 by the clear
 	CHECK(cal_check(img.data(), w, h, w, 0x111).current_frame_ok);
 
 	// Channels swapped (R and B exchanged): the corners are no longer the expected colours.
 	auto swap_rb = [](uint32_t c) { return (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); };
-	img[4 * w + 4] = swap_rb(kCalTopLeft);
-	img[4 * w + (w - 5)] = swap_rb(kCalTopRight);
-	img[(h - 5) * w + 4] = swap_rb(kCalBottomLeft);
-	img[(h - 5) * w + (w - 5)] = swap_rb(kCalBottomRight);
+	img = perfect(17);
+	for (uint32_t& p : img)
+		if (p != cal_clear_argb(17))
+			p = swap_rb(p);
 	r = cal_check(img.data(), w, h, w, 17);
 	CHECK(!r.channels_ok && r.orientation == Orientation::Unknown);
 	CHECK(cal_line(17, r).find("channels NO") != std::string::npos);
@@ -524,12 +585,16 @@ static void test_calibrate()
 	for (int y = 0; y < h; ++y)
 		for (int x = 0; x < w; ++x)
 			wide[static_cast<size_t>(y) * 512 + x] = cal_clear_argb(3);
-	wide[4 * 512 + 4] = kCalTopLeft;
-	wide[4 * 512 + (w - 5)] = kCalTopRight;
-	wide[(h - 5) * 512 + 4] = kCalBottomLeft;
-	wide[(h - 5) * 512 + (w - 5)] = kCalBottomRight;
+	for (int y = 0; y < kCalQuad; ++y)
+		for (int x = 0; x < kCalQuad; ++x)
+		{
+			wide[static_cast<size_t>(y) * 512 + x] = kCalTopLeft;
+			wide[static_cast<size_t>(y) * 512 + (w - 1 - x)] = kCalTopRight;
+			wide[static_cast<size_t>(h - 1 - y) * 512 + x] = kCalBottomLeft;
+			wide[static_cast<size_t>(h - 1 - y) * 512 + (w - 1 - x)] = kCalBottomRight;
+		}
 	r = cal_check(wide.data(), w, h, 512, 3);
-	CHECK(r.orientation == Orientation::Ok && r.current_frame_ok && r.channels_ok);
+	CHECK(r.orientation == Orientation::Ok && r.current_frame_ok && r.channels_ok && r.mismatched == 0);
 }
 
 int main()

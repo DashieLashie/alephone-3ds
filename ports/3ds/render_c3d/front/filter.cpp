@@ -61,6 +61,7 @@ void Recorder::clear()
 {
 	if (events_.capacity() < kCapacity)
 	{
+		// 8192 x (12 + 108 + 120) B = about 1.9 MiB on the ARM build.
 		events_.reserve(kCapacity);
 		polys_.reserve(kCapacity);
 		rects_.reserve(kCapacity);

@@ -4,11 +4,17 @@
 
 	An UNLINKED render target of the view's size (never C3D_RenderTargetSetOutput on it: nothing
 	of it ever reaches a framebuffer) and a linear staging buffer. A calibration frame k runs
-	between two presents, inside render_frame (front/frame.cpp), through frame_begin() /
-	frame_end(): the target is cleared to a colour that encodes k, four 16x16 corner quads are
-	drawn with the present's shader and attribute layout, the frame ends, and the target is read
-	back out of frame (display transfer tiled -> linear, which runs the queue and waits, design
-	0.3; cache invalidate; conversion RGBA -> ARGB). core/calibrate.cpp decides what came out.
+	between two presents, inside render_frame (front/frame.cpp): the target and buffers are made
+	(or, for another size, deleted and made again) OUT of frame, because C3D_RenderTargetDelete
+	svcBreaks inside one; the staging is filled with a sentinel and flushed; then, through
+	frame_begin() / frame_end(), the target is cleared to a colour that encodes k, four 16x16
+	corner quads are drawn with the present's shader and attribute layout, and the display
+	transfer (tiled -> linear) is queued INSIDE the frame, behind the draws. The frame ends; an
+	empty frame_begin() / frame_end() pair then returns only when the queue has retired
+	(C3D_FrameBegin(0) waits for every earlier entry, design 0.3); cache invalidate; conversion
+	RGBA -> ARGB. core/calibrate.cpp decides what came out. The out-of-frame C3D_SyncDisplayTransfer
+	is not used: it waits on the PPF event, which the present's in-frame transfers leave signalled
+	(design 5.7.4 "Rejected"), so it can return before its own transfer is done.
 
 	State hygiene with the present (back/present.cpp is not edited in M0; design 7, M0): the
 	program is bound once at init by the present and is not touched here, nor are the AttrInfo,
@@ -70,14 +76,14 @@ Vertex* s_vbo = nullptr;                // linear, kQuads*4 vertices
 int s_uloc_projection = -1;             // the present shader's "projection" uniform
 bool s_uloc_known = false;
 
-// C3D_SetBufInfo()'s copy semantics are UNVERIFIED (buffers.h:21 declares it, nothing says whether the
-// argument is copied), so both structs outlive the call that uses them: the present's next draw reads
-// the restored one.
+// C3D_SetBufInfo() copies its argument into the context (VERIFIED by disassembling libcitro3d.a 1.7.1:
+// a 152-byte memcpy when the context is active; buffers.h:21 does not say), so the structs need not
+// outlive the call; they are kept static anyway.
 C3D_BufInfo s_saved_buf;
 C3D_BufInfo s_view_buf;
 
 bool s_logged_skip_size = false, s_logged_nomem = false, s_logged_in_frame = false, s_logged_draw_on = false,
-     s_logged_nouniform = false, s_logged_gx = false;
+     s_logged_nouniform = false, s_logged_gx = false, s_logged_wait = false;
 int s_skip_w = 0, s_skip_h = 0;     // the size s_logged_skip_size was logged for
 int s_fail_w = 0, s_fail_h = 0;     // a size whose resources could not be created: not retried
 
@@ -130,8 +136,10 @@ int find_projection_location()
 	return loc;
 }
 
-// The target and buffers for a w x h view, (re)created here, after a frame_begin() has returned: an
-// earlier target of another size has then retired (the queue is idle) and can be deleted at once.
+// The target and buffers for a w x h view, (re)created here OUT of frame (no frame_begin() open): an
+// earlier target of another size is deleted first. C3D_RenderTargetDelete svcBreaks (USERBREAK_PANIC)
+// when called inside a frame (libcitro3d.a renderqueue.o: it tests the in-frame flag first); outside
+// one, for an unlinked target, it waits for the queue itself (gxCmdQueueWait) and then destroys.
 // False: out of memory (logged once; the size is not retried).
 bool ensure_resources(int w, int h)
 {
@@ -142,6 +150,7 @@ bool ensure_resources(int w, int h)
 		C3D_RenderTargetDelete(s_target);   // renderqueue.h:63; unlinked, so no output to detach
 		s_target = nullptr;
 		release_buffers();
+		printf("[c3d] view: %dx%d target deleted (the next size is %dx%d)\n", s_w, s_h, w, h);
 	}
 	const size_t bytes = static_cast<size_t>(w) * h * sizeof(u32);
 	// renderqueue.h:62; C3D_DEPTHTYPE(-1) = no depth buffer, as present.cpp. Never SetOutput.
@@ -153,7 +162,7 @@ bool ensure_resources(int w, int h)
 	if (!s_target || !s_staging || !s_argb || !s_vbo)
 	{
 		if (s_target)
-			C3D_RenderTargetDelete(s_target);
+			C3D_RenderTargetDelete(s_target);   // out of frame here too
 		s_target = nullptr;
 		release_buffers();
 		s_fail_w = w;
@@ -199,7 +208,7 @@ void fill_vbo(int w, int h)
 
 } // namespace
 
-bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** pixels)
+bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** pixels, int* out_w, int* out_h)
 {
 	if (pixels)
 		*pixels = nullptr;
@@ -207,8 +216,11 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	// release pending. The present serves a pending release; this does not.
 	if (!is_up() || release_pending() || gate_closed())
 		return false;
-	if (w <= 0 || h <= 0 || (w & 7) || (h & 7) || w > kMaxSide || h > kMaxSide || w * h > kMaxPixels ||
-	    w < 2 * kCalQuad || h < 2 * kCalQuad)
+	auto supported = [](int ww, int hh) {
+		return ww > 0 && hh > 0 && !(ww & 7) && !(hh & 7) && ww <= kMaxSide && hh <= kMaxSide &&
+		       ww * hh <= kMaxPixels && ww >= 2 * kCalQuad && hh >= 2 * kCalQuad;
+	};
+	if (!supported(w, h))
 	{
 		if (!s_logged_skip_size || s_skip_w != w || s_skip_h != h)
 		{
@@ -220,8 +232,29 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 		}
 		return false;
 	}
+	// readback_cal_resize: odd frames use a view 8 pixels smaller each way (still a multiple of 8 and
+	// at least two quads), so the target is deleted and created again on every frame.
+	if (config().readback_cal_resize && (k & 1) && supported(w - 8, h - 8))
+	{
+		w -= 8;
+		h -= 8;
+	}
 	if (w == s_fail_w && h == s_fail_h)
 		return false;
+
+	// Out of frame, after the gate checks: a target of another size is deleted and the new one made
+	// (C3D_RenderTargetDelete must not run inside a frame, see ensure_resources).
+	if (!ensure_resources(w, h))
+		return false;
+	// Neither the clear of k nor a corner colour, flushed so that no dirty cache line is written back
+	// over what the transfer writes; whatever of it is left after the readback was never written.
+	{
+		const u32 sentinel = cal_sentinel_rgba(k);
+		const size_t n = static_cast<size_t>(w) * h;
+		for (size_t i = 0; i < n; ++i)
+			s_staging[i] = sentinel;
+		GSPGPU_FlushDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));   // gspgpu.h
+	}
 
 	// frame_begin(): every earlier C3D frame has retired when it returns Ok (zone c3d_wait).
 	const FrameStart fs = frame_begin(FrameZone::Wait);
@@ -233,11 +266,6 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 			printf("[c3d] view: C3D_FrameBegin(0) refused (already inside a frame): calibration skipped\n");
 		}
 		return false;   // Abandoned: citro3d is surrendered; nothing to do
-	}
-	if (!ensure_resources(w, h))
-	{
-		frame_end(0, false, FrameKind::View);   // an empty frame: closes what frame_begin opened
-		return false;
 	}
 
 	// Clear to the colour that encodes k (0xRRGGBBAA, as present.cpp's calibrate; verified by P1).
@@ -298,30 +326,58 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	}
 	C3D_SetBufInfo(&s_saved_buf);
 
-	frame_end(0, false, FrameKind::View);
-	note_view_frame();
-
-	// Read back, out of frame. C3D_SyncDisplayTransfer outside a frame runs the queue (the frame just
-	// flushed, then the transfer) and waits for it (design 0.3; renderqueue.h:77 declares it; the
-	// out-of-frame behaviour is from the design's reading of citro3d, UNVERIFIED locally) - the
-	// only bounded-by-the-GPU wait here, and the gate was open a moment ago.
-	{
-#ifdef A1_PROFILE
-		A1_PROF_SCOPE(C3dReadback);
-#endif
+	// The readback transfer, INSIDE the frame: C3D_SyncDisplayTransfer in a frame splits the command
+	// list (C3Di_SplitFrame, GX_ProcessCommandList of the part so far) and queues GX_DisplayTransfer
+	// behind the draws, without waiting (libcitro3d.a renderqueue.o; renderqueue.h:77). One or two
+	// GX entries (two while the command buffer is not empty), counted by gx_op. Its completion is
+	// confirmed below, by the next frame_begin().
+	#ifdef A1_PROFILE
+	A1_PROF_SCOPE(C3dReadback);   // the transfer, the retirement wait and the conversion
+	#endif
+	const bool queued = gx_op([&] {
 		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(w, h), s_staging,
 		                        GX_BUFFER_DIM(w, h), kReadbackFlags);
-		gx_note_out_of_frame();   // +1 entry in the ended frame's queue (design 2.4)
-		// The GPU wrote the staging: drop any stale cached copy before reading (gspgpu.h:246).
-		GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(w) * h * sizeof(u32));
-		const size_t n = static_cast<size_t>(w) * h;
-		for (size_t i = 0; i < n; ++i)
-			s_argb[i] = rgba_to_argb(s_staging[i]);
+	});
+	frame_end(0, false, FrameKind::View);
+	note_view_frame();
+	if (!queued)
+	{
+		if (!s_logged_gx)
+		{
+			s_logged_gx = true;
+			printf("[c3d] GX budget: view readback refused\n");
+		}
+		return false;
 	}
+
+	// Retirement: C3D_FrameBegin(0) returns only when every earlier queue entry, the draws and the
+	// transfer, has finished (design 0.3); an empty frame closes it. The gate was open a moment ago.
+	const FrameStart done = frame_begin(FrameZone::Wait);
+	if (done != FrameStart::Ok)
+	{
+		if (!s_logged_wait)
+		{
+			s_logged_wait = true;
+			printf("[c3d] view: the retirement wait after the readback returned %s: calibration frame dropped\n",
+			       done == FrameStart::Abandoned ? "Abandoned" : "AlreadyInFrame");
+		}
+		return false;
+	}
+	frame_end(0, false, FrameKind::View);
+
+	// The GPU wrote the staging: drop any stale cached copy before reading (gspgpu.h:246).
+	const size_t n = static_cast<size_t>(w) * h;
+	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));
+	for (size_t i = 0; i < n; ++i)
+		s_argb[i] = rgba_to_argb(s_staging[i]);
 
 	out = cal_check(s_argb, w, h, w, k);
 	if (pixels)
 		*pixels = s_argb;
+	if (out_w)
+		*out_w = w;
+	if (out_h)
+		*out_h = h;
 	return true;
 }
 

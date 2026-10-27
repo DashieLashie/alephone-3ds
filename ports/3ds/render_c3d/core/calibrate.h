@@ -33,6 +33,13 @@ inline uint32_t cal_clear_argb(unsigned k) { return 0xFF000000u | ((k & 0xFFu) <
 // The same colour as 0xRRGGBBAA, the form C3D_RenderTargetClear takes.
 inline uint32_t cal_clear_rgba(unsigned k) { return ((k & 0xFFu) << 24) | (0x40u << 16) | (0x80u << 8) | 0xFFu; }
 
+// What the back end fills the staging buffer with before each readback transfer (0xRRGGBBAA, as read
+// back, and as ARGB after rgba_to_argb): neither the clear colour of frame k (G 0x40, B 0x80) nor any
+// corner colour (G, B in {0x00, 0xFF}), and different for every k, so a pixel the transfer did not
+// write is told from the previous frame's too.
+inline uint32_t cal_sentinel_rgba(unsigned k) { return ((~k & 0xFFu) << 24) | (0xC3u << 16) | (0xA5u << 8) | 0xFFu; }
+inline uint32_t cal_sentinel_argb(unsigned k) { return rgba_to_argb(cal_sentinel_rgba(k)); }
+
 enum class Orientation { Ok, RowsFlipped, ColsFlipped, Rotated180, Transposed, Unknown };
 
 const char* orientation_name(Orientation o);
@@ -45,14 +52,21 @@ struct CalResult
 	bool channels_ok = false;   // red arrived as 0xFFFF0000; false whenever the orientation is Unknown
 	uint32_t corner[4] = {0, 0, 0, 0};   // TL, TR, BL, BR, ARGB
 	uint32_t centre = 0;
+	// The full-image check: every pixel must be the clear colour of k, or, inside a 16x16 corner quad,
+	// the colour that the detected orientation puts there (the "ok" layout while Unknown).
+	// `mismatched` counts the pixels that are neither; `sentinel` how many of those still hold
+	// cal_sentinel_argb(k) (the transfer never wrote them). current_frame_ok needs both centre and 0.
+	unsigned mismatched = 0;
+	unsigned sentinel = 0;
 };
 
 // `argb` is the converted readback (w x h, `pitch_px` pixels per row, top row first as displayed).
-// Samples (4,4), (w-5,4), (4,h-5), (w-5,h-5) and (w/2,h/2).
+// Orientation, channel order and observed_k come from the samples (4,4), (w-5,4), (4,h-5), (w-5,h-5)
+// and (w/2,h/2); the whole image is then checked as described at CalResult::mismatched.
 CalResult cal_check(const uint32_t* argb, int w, int h, int pitch_px, unsigned k);
 
 // "[c3d] readback_cal k=K orientation <name> current frame <ok|NO (centre k=X)|NO (centre 0x........)>
-//  channels <ok|NO> corners 0x........ 0x........ 0x........ 0x........", no newline.
+//  mismatched N (sentinel S) channels <ok|NO> corners 0x........ 0x........ 0x........ 0x........", no newline.
 std::string cal_line(unsigned k, const CalResult& r);
 
 } // namespace a1_c3d

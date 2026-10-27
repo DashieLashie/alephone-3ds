@@ -55,7 +55,26 @@ CalResult cal_check(const uint32_t* argb, int w, int h, int pitch_px, unsigned k
 	else
 		r.orientation = Orientation::Unknown;
 
-	r.current_frame_ok = r.centre == cal_clear_argb(k);
+	// The colour of each corner quad under the detected orientation (TL, TR, BL, BR).
+	static const uint32_t layout[5][4] = {
+		{R, G, B, W}, {B, W, R, G}, {G, R, W, B}, {W, B, G, R}, {R, B, G, W}};
+	const int li = r.orientation == Orientation::Unknown ? 0 : static_cast<int>(r.orientation);
+	const uint32_t clear = cal_clear_argb(k), sentinel = cal_sentinel_argb(k);
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+		{
+			uint32_t want = clear;
+			if ((x < kCalQuad || x >= w - kCalQuad) && (y < kCalQuad || y >= h - kCalQuad))
+				want = layout[li][(y >= h - kCalQuad ? 2 : 0) + (x >= w - kCalQuad ? 1 : 0)];
+			const uint32_t got = at(x, y);
+			if (got != want)
+			{
+				++r.mismatched;
+				r.sentinel += got == sentinel;
+			}
+		}
+
+	r.current_frame_ok = r.centre == clear && r.mismatched == 0;
 	if (((r.centre >> 8) & 0xFF) == 0x40 && (r.centre & 0xFF) == 0x80)
 		r.observed_k = static_cast<int>((r.centre >> 16) & 0xFF);
 	// Red arrived as red. Only judged when the corners form a known arrangement: the four colours are
@@ -79,11 +98,11 @@ std::string cal_line(unsigned k, const CalResult& r)
 		std::snprintf(frame, sizeof frame, "NO (centre k=%d)", r.observed_k);
 	else
 		std::snprintf(frame, sizeof frame, "NO (centre 0x%08X)", static_cast<unsigned>(r.centre));
-	char buf[256];
+	char buf[320];
 	std::snprintf(buf, sizeof buf,
-	              "[c3d] readback_cal k=%u orientation %s current frame %s channels %s corners "
-	              "0x%08X 0x%08X 0x%08X 0x%08X",
-	              k, orientation_name(r.orientation), frame, r.channels_ok ? "ok" : "NO",
+	              "[c3d] readback_cal k=%u orientation %s current frame %s mismatched %u (sentinel %u) "
+	              "channels %s corners 0x%08X 0x%08X 0x%08X 0x%08X",
+	              k, orientation_name(r.orientation), frame, r.mismatched, r.sentinel, r.channels_ok ? "ok" : "NO",
 	              static_cast<unsigned>(r.corner[0]), static_cast<unsigned>(r.corner[1]),
 	              static_cast<unsigned>(r.corner[2]), static_cast<unsigned>(r.corner[3]));
 	return std::string(buf);

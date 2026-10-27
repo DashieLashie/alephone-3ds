@@ -53,15 +53,12 @@ enum class FrameZone { Wait, Upload };
 // citro3d is abandoned.
 FrameStart frame_begin(FrameZone zone = FrameZone::Wait);
 // What a frame is, for the queue warning of frame_end(): a present (design: <= 4 entries) or an M0
-// view frame (back/view.cpp: the calibration frame, whose out-of-frame readback adds one more
-// entry; design 2.4: <= 27).
+// view frame (back/view.cpp: the calibration frame, whose readback transfer is queued inside it and
+// counted by gx_op; design 2.4: <= 27).
 enum class FrameKind { Present, View };
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) with the queue accounting of the frame closed.
 // `gate_was_closed`: the gate condition held when the present began (diagnostic d2).
 void frame_end(int drawn_linked_targets, bool gate_was_closed = false, FrameKind kind = FrameKind::Present);
-// The out-of-frame C3D_SyncDisplayTransfer of the view readback was issued right after a frame_end():
-// one more entry in that frame's queue (design 2.4); warns when the frame's total exceeds 27.
-void gx_note_out_of_frame();
 // A view frame ran (back/view.cpp). The present's next sample_drawing_time(GpuTime::Draw) is skipped
 // once: its "last finished queue" would be the view frame and its readback, not the previous present.
 void note_view_frame();

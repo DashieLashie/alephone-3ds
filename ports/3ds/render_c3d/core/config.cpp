@@ -126,6 +126,8 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.dump);
 	if (key == "readback_cal")
 		return parse_flag(value, cfg.readback_cal);
+	if (key == "readback_cal_resize")
+		return parse_flag(value, cfg.readback_cal_resize);
 	if (key == "retire_wait_ms")
 	{
 		long v = 0;

@@ -24,8 +24,11 @@ namespace back {
 // a release is pending, or the gate is closed (5.6.1 a), or w/h unsupported (not multiples of 8, > 1024,
 // more than 262144 pixels) or out of memory (logged once). True: `out` holds the check, and *pixels
 // (if non-null) points to the converted w x h ARGB readback (pitch w), valid until the next call or
-// view_free().
-bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** pixels);
+// view_free(). With readback_cal_resize an odd frame k is 8 pixels smaller each way: *out_w / *out_h
+// (if non-null) get the size actually used. The target and buffers are made, or deleted and made
+// again for a new size, before the frame begins (C3D_RenderTargetDelete must not run inside one).
+bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** pixels, int* out_w = nullptr,
+                    int* out_h = nullptr);
 
 // After C3D_Fini (release_and_fini): forgets the view target pointer (C3D_Fini destroyed it) and
 // frees the readback staging, the vertex buffer and the converted copy. Idempotent.

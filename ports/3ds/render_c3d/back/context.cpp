@@ -93,13 +93,17 @@ void load_config()
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
 	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
-	       "dump %d, readback_cal %d\n",
+	       "dump %d, readback_cal %d, readback_cal_resize %d\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
 	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.renderer_c3d ? "c3d" : "sw",
 	       s_cfg.mode == Mode::Null ? "null" : s_cfg.mode == Mode::Direct ? "direct" : "readback",
 	       s_cfg.diff, s_cfg.diff_frames, static_cast<unsigned long>(s_cfg.classes), s_cfg.fullbright,
-	       s_cfg.dump, s_cfg.readback_cal);
+	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize);
+	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
+	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
+	// own atexit handlers, so it runs before close_outputs flushes the log.
+	atexit([] { frame_final_stats(); });
 	if (s_cfg.present_diff && s_cfg.calibrate)
 		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
 	for (const std::string& p : problems)
@@ -481,14 +485,6 @@ void frame_end(int drawn_linked_targets, bool gate_was_closed, FrameKind kind)
 	C3D_FrameEnd(GX_CMDLIST_FLUSH);
 	s_in_frame = false;
 	s_last_frame_end = svcGetSystemTick();
-}
-
-void gx_note_out_of_frame()
-{
-	s_gx.note_out_of_frame();
-	if (s_gx.last_total() > 27)
-		printf("[c3d] warning: %d GX queue entries in one view frame with its readback (design 2.4: <= 27)\n",
-		       s_gx.last_total());
 }
 
 void note_view_frame()

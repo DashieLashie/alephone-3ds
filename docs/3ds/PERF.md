@@ -1262,11 +1262,14 @@ stage10-bb session through a shared lock (`~/Applications/Azahar-2126.2/user/.ru
 | --- | --- |
 | (a) `ppcheck.sh` on `render.cpp` | **IDENTICAL** on both volumes (127 509 / 120 992 lines), `-fsyntax-only` 0 diagnostics |
 | (b) `m0-readback-cal.cfg` (`readback_cal 1`), L0 | `readback_cal summary: 30 frames, orientation ok 30, current frame ok 30, channels ok 30, skipped 0` with the design's starting values (below); GX high-water 3 (clear + frame end + the readback's +1); no guest fault |
+| (b, revise 1) `m0-readback-cal.cfg`, L0, in-frame readback + retirement pair + full-image check | `readback_cal summary: 30 frames, orientation ok 30, current frame ok 30, channels ok 30, mismatched pixels 0 (sentinel 0), skipped 0`; every line `mismatched 0 (sentinel 0)`; `gx_high_water` 4; no guest fault |
+| (b', revise 1) `m0-readback-cal-resize.cfg`, L0 | the same summary, 30/30; 29 `target deleted` lines alternating 400x240 / 392x232; `c3d-rbcal-29` is 392x232; no guest fault, no panic |
 | (c) `m0-diff.cfg` (`renderer sw`, `diff 1`, `diff_frames 20`, `classes all`), L0 / L6 / L20 (perf runs) and the menu demo (script 12) | `DIFF summary frames=20 checks=200 differ_total=0 dropped=0` in all four; `c3d-diff.py log --expect-zero` passes |
 | (c), spread: `diff 15`, `diff_frames 40`, menu demo and L20 | `frames=40 checks=400 differ_total=0 dropped=0` both |
 | (d) `m0-null.cfg` (`renderer c3d`, `mode null`), L0 / L6 / L20, HUD + Map @30 | table below |
 | P1 scripts 08, 13, 14 (`p1-diff.cfg`) | `present_diff final`: 130 / 51 / 11 checks, **0 with RGB differences**; `release done`, 0 false returns |
 | script 13 with `present_diff 30` + `readback_cal 1` | calibration 30/30 ok and `present_diff final: 50 checks, 0 with RGB differences`: the view frames do not disturb the present (its vertex buffer is restored) |
+| script 13, same cfg, revise 1 | calibration 30/30 ok, `mismatched pixels 0 (sentinel 0)`, `present_diff final: 50 checks, 0 with RGB differences` |
 | script 07 (`p1-diff.cfg`) | runs to the 150 s timeout as in B-a, no mismatch line |
 | script 22 (`p1-gpu.cfg`, HOME > Close in a game) | `gate closed`, 3 skipped presents, `release done`, linear 17 728 KiB free after |
 
@@ -1291,6 +1294,19 @@ primitive count: consecutive-state merging (2.1) will save little, so M1 should 
 draw per polygon. Ring sizes (9.2) at 2 × max: **1 024 vertices and 2 048 indices per frame**. These
 come from three bench spots; a busier view overflows to a discard (1.5), and M1 logs the ring's
 high-water mark.
+
+**Revise round 1 (Azahar — non-authoritative; critic round 1).** `C3D_RenderTargetDelete` svcBreaks inside a
+frame, and the first readback used an out-of-frame `C3D_SyncDisplayTransfer`, whose PPF wait can return
+before its own transfer (sticky event, `CITRO3D_DESIGN.md` 0.3). Now: the target is created and deleted
+before the frame; the transfer is queued in the view frame behind the draws; an empty
+`C3D_FrameBegin(0)`/`FrameEnd` pair confirms retirement; the staging is pre-filled with a per-frame
+sentinel and flushed, and every pixel is checked. Azahar completes transfers synchronously, so it
+**cannot show the race**: the passes above prove the check and the resize path, not the wait; the
+console run (`NEXT-SPRINT.md` "M0 console check", steps 1 and 1b) is what does. The final null/diff
+summaries also print on the `atexit` path (`m0-null.cfg` L0 re-run: one `[c3d] null frames=1413 ...`
+line, counts unchanged: V 375/371, I 591/585, polys 71, rects 18, state changes 80/78, pairs 26); the
+null summary is no longer logged every 300 frames (its sort ran inside the `render` zone). The recorder
+is about 1.9 MiB (240 B per event), not 1.1.
 
 **Found on the way:** libctru's `shaderInstanceFree()` frees the instance itself
 (`shaderProgram.o` +0x28-0x2c), so `back/view.cpp`'s throwaway instance (to look up the present

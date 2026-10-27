@@ -56,6 +56,10 @@
 	  dump 0|1          diff frames and calibration frames are written as c3d-*.bmp
 	  readback_cal 0|1  the readback calibration (the first 30 world frames; P1's "calibrate" is the
 	                    present-target test, a different thing)
+  readback_cal_resize 0|1
+                    default 0; with readback_cal: every odd calibration frame uses a view 8 pixels
+                    narrower and lower, so the target and buffers are deleted and created again every
+                    frame (exercises the resize path out of frame)
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -97,6 +101,7 @@ struct Config
 	bool fullbright = false;
 	bool dump = false;
 	bool readback_cal = false;
+	bool readback_cal_resize = false;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.

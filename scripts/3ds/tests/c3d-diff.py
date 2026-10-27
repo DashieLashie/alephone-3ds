@@ -6,12 +6,14 @@
 #       Tabulates the "[c3d] DIFF frame=... class=..." lines of a game log per class: checks, differ total,
 #       max of max, mean of the means, cov_mismatch sums (edge/non-edge); prints the "DIFF summary" line and
 #       the dropped frames. With --expect-zero the exit status is 1 if any check has differ > 0, if there is
-#       no DIFF line at all, or if a DIFF summary is missing.
+#       no DIFF line at all, if a DIFF summary is missing, or if frames were dropped (dropped > 0 in the
+#       summary, or a "DIFF frame=N dropped" line).
 #
 #   python3 -I scripts/3ds/tests/c3d-diff.py bmp A.bmp B.bmp [--class C]
 #       Reads two 32-bit BMPs (c3d-diff-<frame>-<class>-{sw,c3d}.bmp) and recomputes the metric of
 #       core/diff.cpp (tolerance 0): coverage TopByte (alpha byte != 0), or "pixel != clear" for the class
 #       tinted (clear 0xFF808080) and static (clear 0); then prints a DIFF-like line.
+#       A truncated or garbled BMP, or a missing file, is a clean error message and exit status 2.
 import re
 import struct
 import sys
@@ -67,23 +69,39 @@ def cmd_log(path, expect_zero):
     print(summary or "no DIFF summary line")
     for d in dropped:
         print(d)
-    if expect_zero and (bad or not rows or not summary):
+    m = re.search(r"dropped=(\d+)", summary or "")
+    n_dropped = max(len(dropped), int(m.group(1)) if m else 0)
+    if expect_zero and (bad or not rows or not summary or n_dropped):
+        if n_dropped:
+            print("c3d-diff: %d dropped frame(s)" % n_dropped)
         print("c3d-diff: FAIL (--expect-zero)")
         return 1
     return 0
 
 
+class BmpError(Exception):
+    pass
+
+
 def read_bmp(path):
-    with open(path, "rb") as f:
-        data = f.read()
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise BmpError("%s: %s" % (path, e.strerror or e))
     if data[:2] != b"BM":
-        raise SystemExit("c3d-diff: %s is not a BMP" % path)
-    offset = struct.unpack_from("<I", data, 10)[0]
-    hdr, w, h, planes, bpp, comp = struct.unpack_from("<IiiHHI", data, 14)
-    if bpp != 32 or comp not in (0, 3) or w <= 0 or h == 0:
-        raise SystemExit("c3d-diff: %s is not a 32-bit BMP (bpp %d, compression %d)" % (path, bpp, comp))
-    rows = abs(h)
-    px = list(struct.unpack_from("<%dI" % (w * rows), data, offset))   # little-endian: 0xAARRGGBB
+        raise BmpError("%s is not a BMP" % path)
+    try:
+        offset = struct.unpack_from("<I", data, 10)[0]
+        hdr, w, h, planes, bpp, comp = struct.unpack_from("<IiiHHI", data, 14)
+        if bpp != 32 or comp not in (0, 3) or w <= 0 or h == 0:
+            raise BmpError("%s is not a 32-bit BMP (bpp %d, compression %d)" % (path, bpp, comp))
+        rows = abs(h)
+        if w * rows > 64 * 1024 * 1024:
+            raise BmpError("%s: %dx%d is implausibly large" % (path, w, rows))
+        px = list(struct.unpack_from("<%dI" % (w * rows), data, offset))   # little-endian: 0xAARRGGBB
+    except struct.error:
+        raise BmpError("%s is truncated or garbled (%d bytes)" % (path, len(data)))
     if h > 0:   # bottom-up: flip so that row 0 is the top
         px = [p for y in range(rows - 1, -1, -1) for p in px[y * w:(y + 1) * w]]
     return w, rows, px
@@ -123,7 +141,7 @@ def cmd_bmp(pa, pb, cls):
     wa, ha, a = read_bmp(pa)
     wb, hb, b = read_bmp(pb)
     if (wa, ha) != (wb, hb):
-        raise SystemExit("c3d-diff: sizes differ: %dx%d and %dx%d" % (wa, ha, wb, hb))
+        raise BmpError("sizes differ: %dx%d and %dx%d" % (wa, ha, wb, hb))
     m = metric(wa, ha, a, b, cls)
     n = m["common"]
     print("[c3d] DIFF frame=0 class=%s covered=%d/%d cov_mismatch=%d/%d common=%d within_tol=%.2f%% (tol 0) "
@@ -141,7 +159,11 @@ def main(argv):
         rest = argv[4:]
         if rest[:1] == ["--class"] and len(rest) >= 2:
             cls = rest[1]
-        return cmd_bmp(argv[2], argv[3], cls)
+        try:
+            return cmd_bmp(argv[2], argv[3], cls)
+        except BmpError as e:
+            print("c3d-diff: %s" % e, file=sys.stderr)
+            return 2
     print("usage: c3d-diff.py log LOG [--expect-zero] | bmp A.bmp B.bmp [--class C]")
     return 2
 

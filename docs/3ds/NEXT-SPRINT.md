@@ -1373,9 +1373,13 @@ $H/m0/run.sh`. Kill stale 3dslink first. ftpd: fetch the user's `Marathon 2 Pref
 `debug-c3d` = `scripts/3ds/tests/c3d/m0-readback-cal.cfg` (copied to files named `debug-perf` /
 `debug-c3d` first, as in the B-a runbook). `run.sh build-3ds-c3d-prof m0-cal-hm`; the user presses A
 twice; the game quits after the BENCH line. **Pass:** `[c3d] readback_cal summary: 30 frames,
-orientation ok 30, current frame ok 30, channels ok 30`. Fetch `c3d-rbcal-0.bmp` and
+orientation ok 30, current frame ok 30, channels ok 30, mismatched pixels 0 (sentinel 0), skipped 0`
+(and every `readback_cal k=` line says `mismatched 0 (sentinel 0)`). Fetch `c3d-rbcal-0.bmp` and
 `c3d-rbcal-29.bmp` into `$H/m0/` (red top left, green top right, blue bottom left, white bottom
 right).
+**1b. The resize path (revise 1):** `debug-c3d` = `m0-readback-cal-resize.cfg` (odd frames 392x232:
+the target is deleted and created every frame, out of frame); same run, same pass line; the log shows
+`[c3d] view: ... target deleted` / `unlinked RGBA8 target` pairs and no Luma dump.
 **2. The same in Classic (480x240):** `setprefs.sh IP 2 30`, `run.sh build-3ds-c3d-prof m0-cal-cl`.
 Same pass line. Then `setprefs.sh IP 0 30`.
 **3. `R` on the console (optional, 3 runs):** `debug-c3d` = `m0-null.cfg`, `debug-perf-L<N>` for N =
@@ -1389,6 +1393,6 @@ deterministic). G2-b's front-end part: `R ≤ 3 ms`.
 disagrees with Azahar; record the line, stop: the fix (design 7, M0 block) is one change in
 `back/view.cpp` and one re-run, made in the next session, and Azahar's result must be re-checked
 against it. `transposed` or `unknown`: record the corners, stop (a design change). `current frame
-NO`: record which `k` the centre shows (the out-of-frame transfer did not wait for its own frame),
-stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
+NO`: record which `k` the centre shows and the `mismatched N (sentinel S)` counts (S > 0: the transfer
+had not finished when the CPU read; a missing retirement wait), stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
 fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at 0x28), stop.

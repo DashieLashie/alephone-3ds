@@ -64,6 +64,7 @@ uint64_t s_stats_ms = 0;
 // calibration
 unsigned s_cal_done = 0, s_cal_skipped = 0;
 unsigned s_cal_orient_ok = 0, s_cal_frame_ok = 0, s_cal_channels_ok = 0;
+unsigned long long s_cal_mismatched = 0, s_cal_sentinel = 0;
 bool s_cal_summary = false;
 
 // diff
@@ -141,7 +142,8 @@ void run_calibration(const Config& cfg, int w, int h)
 		return;
 	CalResult res;
 	const uint32_t* px = nullptr;
-	if (!back::view_calibrate(s_cal_done, w, h, res, &px))
+	int cw = w, ch = h;   // the size used: readback_cal_resize shrinks the odd frames
+	if (!back::view_calibrate(s_cal_done, w, h, res, &px, &cw, &ch))
 	{
 		++s_cal_skipped;
 		return;
@@ -150,18 +152,21 @@ void run_calibration(const Config& cfg, int w, int h)
 	s_cal_orient_ok += res.orientation == Orientation::Ok;
 	s_cal_frame_ok += res.current_frame_ok;
 	s_cal_channels_ok += res.channels_ok;
+	s_cal_mismatched += res.mismatched;
+	s_cal_sentinel += res.sentinel;
 	if (cfg.dump && px && (s_cal_done == 0 || s_cal_done == kCalFrames - 1))
 	{
 		char name[48];
 		snprintf(name, sizeof name, "c3d-rbcal-%u.bmp", s_cal_done);
-		write_file(name, bmp_encode(px, w, h, w));
+		write_file(name, bmp_encode(px, cw, ch, cw));
 	}
 	++s_cal_done;
 	if (s_cal_done == kCalFrames && !s_cal_summary)
 	{
 		s_cal_summary = true;
 		printf("[c3d] readback_cal summary: %u frames, orientation ok %u, current frame ok %u, channels ok %u, "
-		       "skipped %u\n", s_cal_done, s_cal_orient_ok, s_cal_frame_ok, s_cal_channels_ok, s_cal_skipped);
+		       "mismatched pixels %llu (sentinel %llu), skipped %u\n", s_cal_done, s_cal_orient_ok, s_cal_frame_ok,
+		       s_cal_channels_ok, s_cal_mismatched, s_cal_sentinel, s_cal_skipped);
 	}
 	fflush(stdout);
 }
@@ -276,10 +281,14 @@ bool run_diff_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 
 // --- null mode ---
 
+// Only from frame_final_stats(): Samples::percentile() sorts a copy of its values, which does not
+// belong in a timed render zone. Once.
 void log_null_summary()
 {
-	if (!s_null_stats || s_null_frames == 0)
+	static bool printed = false;
+	if (printed || !s_null_stats || s_null_frames == 0)
 		return;
+	printed = true;
 	const NullStats& n = *s_null_stats;
 	printf("[c3d] null frames=%u polys max=%u p99=%u rects max=%u p99=%u vertices max=%u p99=%u "
 	       "indices max=%u p99=%u state_changes max=%u p99=%u pairs max=%u p99=%u pair_table_full=%u\n",
@@ -311,8 +320,6 @@ void run_null(DrawFn draw, void* ctx)
 	if (c.pair_table_full)
 		++s_pair_table_full;
 	++s_null_frames;
-	if (s_null_frames % 300 == 0)
-		log_null_summary();
 }
 
 void stats_tick()
