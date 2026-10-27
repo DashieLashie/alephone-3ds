@@ -9,7 +9,8 @@
 	svcBreaks inside one; the staging is filled with a sentinel and flushed; then, through
 	frame_begin() / frame_end(), the target is cleared to a colour that encodes k, four 16x16
 	corner quads are drawn with the present's shader and attribute layout, and the display
-	transfer (tiled -> linear) is queued INSIDE the frame, behind the draws. The frame ends; an
+	transfer (tiled -> linear) is queued INSIDE the frame, behind the draws (which are first split
+	off with C3D_FrameSplit(GX_CMDLIST_FLUSH): see the transfer below). The frame ends; an
 	empty frame_begin() / frame_end() pair then returns only when the queue has retired
 	(C3D_FrameBegin(0) waits for every earlier entry, design 0.3); cache invalidate; conversion
 	RGBA -> ARGB. core/calibrate.cpp decides what came out. The out-of-frame C3D_SyncDisplayTransfer
@@ -328,13 +329,20 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 
 	// The readback transfer, INSIDE the frame: C3D_SyncDisplayTransfer in a frame splits the command
 	// list (C3Di_SplitFrame, GX_ProcessCommandList of the part so far) and queues GX_DisplayTransfer
-	// behind the draws, without waiting (libcitro3d.a renderqueue.o; renderqueue.h:77). One or two
-	// GX entries (two while the command buffer is not empty), counted by gx_op. Its completion is
-	// confirmed below, by the next frame_begin().
+	// behind the draws, without waiting (libcitro3d.a renderqueue.o; renderqueue.h:77). Its completion
+	// is confirmed below, by the next frame_begin().
+	// Its own split submits the draws with flags 0, i.e. without GSP's cache flush (renderqueue.o
+	// C3D_SyncDisplayTransfer+0xcc-0xdc; libctru gx.o GX_ProcessCommandList+0x1c-0x44: flush =
+	// (flags >> 1) & 1), and frame_end()'s C3D_FrameEnd(GX_CMDLIST_FLUSH) skips the whole-heap flush
+	// (C3D_FrameEnd+0x7c-0x90): the GPU could run the draw segment from RAM with its bytes still in
+	// the dcache. So the draws are split off first WITH the flush (C3D_FrameSplit, renderqueue.h:33,
+	// passes its flags to GX_ProcessCommandList); the transfer's split then finds an empty buffer.
+	// Two GX entries, one gx_op each. Critic M0 round 2, finding 1.
 	#ifdef A1_PROFILE
-	A1_PROF_SCOPE(C3dReadback);   // the transfer, the retirement wait and the conversion
+	A1_PROF_SCOPE(C3dReadback);   // the split, the transfer and the conversion; the retirement wait
+	                              // inside frame_begin() is timed in c3d_wait (zones are exclusive)
 	#endif
-	const bool queued = gx_op([&] {
+	const bool queued = gx_op([] { C3D_FrameSplit(GX_CMDLIST_FLUSH); }) && gx_op([&] {
 		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(w, h), s_staging,
 		                        GX_BUFFER_DIM(w, h), kReadbackFlags);
 	});

@@ -1394,5 +1394,6 @@ disagrees with Azahar; record the line, stop: the fix (design 7, M0 block) is on
 `back/view.cpp` and one re-run, made in the next session, and Azahar's result must be re-checked
 against it. `transposed` or `unknown`: record the corners, stop (a design change). `current frame
 NO`: record which `k` the centre shows and the `mismatched N (sentinel S)` counts (S > 0: the transfer
-had not finished when the CPU read; a missing retirement wait), stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
+had not finished when the CPU read; a missing retirement wait; wrong or missing corners with S = 0:
+the draw segment ran unflushed, design 0.3 "`C3D_FrameSplit(GX_CMDLIST_FLUSH)`" row), stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
 fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at 0x28), stop.

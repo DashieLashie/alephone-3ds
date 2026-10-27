@@ -1270,6 +1270,9 @@ stage10-bb session through a shared lock (`~/Applications/Azahar-2126.2/user/.ru
 | P1 scripts 08, 13, 14 (`p1-diff.cfg`) | `present_diff final`: 130 / 51 / 11 checks, **0 with RGB differences**; `release done`, 0 false returns |
 | script 13 with `present_diff 30` + `readback_cal 1` | calibration 30/30 ok and `present_diff final: 50 checks, 0 with RGB differences`: the view frames do not disturb the present (its vertex buffer is restored) |
 | script 13, same cfg, revise 1 | calibration 30/30 ok, `mismatched pixels 0 (sentinel 0)`, `present_diff final: 50 checks, 0 with RGB differences` |
+| (b, revise 2) `m0-readback-cal.cfg`, L0, `C3D_FrameSplit(GX_CMDLIST_FLUSH)` before the in-frame transfer | `readback_cal summary: 30 frames, orientation ok 30, current frame ok 30, channels ok 30, mismatched pixels 0 (sentinel 0), skipped 0`; `gx_high_water` 5 (+1: the split) |
+| (b', revise 2) `m0-readback-cal-resize.cfg`, L0 | the same summary, 30/30; 29 `target deleted` lines (15 at 400x240, 14 at 392x232); no guest fault |
+| script 13, `present gpu` + `present_diff 30` + `readback_cal 1`, revise 2 | calibration 30/30 ok, `mismatched pixels 0 (sentinel 0)`, `present_diff final: 51 checks, 0 with RGB differences` |
 | script 07 (`p1-diff.cfg`) | runs to the 150 s timeout as in B-a, no mismatch line |
 | script 22 (`p1-gpu.cfg`, HOME > Close in a game) | `gate closed`, 3 skipped presents, `release done`, linear 17 728 KiB free after |
 
@@ -1307,6 +1310,14 @@ summaries also print on the `atexit` path (`m0-null.cfg` L0 re-run: one `[c3d] n
 line, counts unchanged: V 375/371, I 591/585, polys 71, rects 18, state changes 80/78, pairs 26); the
 null summary is no longer logged every 300 frames (its sort ran inside the `render` zone). The recorder
 is about 1.9 MiB (240 B per event), not 1.1.
+
+**Revise round 2 (Azahar — non-authoritative; critic round 2).** Revise 1's in-frame transfer submitted
+the four draws through its own command-list split with flags 0, so without GSP's cache flush, while
+`C3D_FrameEnd(GX_CMDLIST_FLUSH)` skips the whole-heap flush: on the console the GPU could run the draw
+segment from stale RAM (`CITRO3D_DESIGN.md` 0.3, new row). The draws are now split off first with
+`C3D_FrameSplit(GX_CMDLIST_FLUSH)`. Azahar does not model the CPU cache, so the passes above show the
+change is harmless there, not that it was needed: the console run decides. Readback cost =
+`c3d_readback + c3d_wait` (the retirement wait is timed in `c3d_wait`).
 
 **Found on the way:** libctru's `shaderInstanceFree()` frees the instance itself
 (`shaderProgram.o` +0x28-0x2c), so `back/view.cpp`'s throwaway instance (to look up the present

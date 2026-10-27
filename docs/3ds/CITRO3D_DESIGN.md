@@ -64,6 +64,7 @@ bottom-screen modes" are stage 7 ([STAGE7.md](STAGE7.md)).
 | ⇒ **"frame retired" = `C3D_FrameBegin(0)` returned**: every earlier C3D frame's draws, copies and linked transfers are done. The only port-visible signal; every deferred action hangs off it | per critic (settled) |
 | GPU work starts only at `C3D_FrameEnd` (`gxCmdQueueRun`); in-frame queueing does not start it | gxqueue.o +0x9c-0xd4; renderqueue.o FrameEnd+0x130, per critic |
 | Inside a frame, `C3D_SyncDisplayTransfer`/`C3D_SyncTextureCopy` queue (no wait: `C3Di_SplitFrame` + `GX_ProcessCommandList` of the part so far, then the transfer behind the draws); outside a frame they `gxCmdQueueWait(-1)`, issue, run the queue and `gspWaitForEvent(PPF, false)` = wait *then clear* of a **sticky** event nobody clears after the present's in-frame transfers, so the wait can return **before the transfer is done** (Azahar completes transfers synchronously and cannot show it). **Never used for a result that is read afterwards**; the readback queues the transfer in the frame and confirms it with the next `C3D_FrameBegin(0)` (M0 revise 1, 7) | `renderqueue.h`:77-78; `renderqueue.o` `C3D_SyncDisplayTransfer` disassembled (main session, libcitro3d.a 1.7.1), `svc.h`:107 RESET_STICKY, `gspgpu.h`:155, 183; same reason as 5.7.4 "Rejected" |
+| An in-frame `C3D_SyncDisplayTransfer`/`C3D_SyncTextureCopy` submits the command list so far with flags **0** (no GSP cache flush), and `C3D_FrameEnd(GX_CMDLIST_FLUSH)` skips the whole-heap flush, so draws issued **before** an in-frame Sync* would run from RAM with their bytes possibly still in the dcache. **Rule: an in-frame Sync\* after draws is preceded by `C3D_FrameSplit(GX_CMDLIST_FLUSH)`** (one more queue entry); the Sync*'s own split then finds an empty buffer. The present's in-frame upload is unaffected (it runs on an empty command buffer) | `renderqueue.o` `C3D_SyncDisplayTransfer`+0xcc-0xdc, `C3D_FrameEnd`+0x7c-0x90/+0x178-0x188, `C3D_FrameSplit`+0x24-0x48; `gx.o` `GX_ProcessCommandList`+0x1c-0x44 (flush = `(flags >> 1) & 1`); `renderqueue.h`:33, `gx.h`:66 (M0 critic round 2, 1) |
 | `C3D_RenderTargetDelete` **inside a frame** svcBreaks (`USERBREAK_PANIC`: the first thing it does is test the in-frame flag); outside one, for an unlinked target, it waits for the queue itself and destroys. Targets are created and deleted out of frame | `renderqueue.o` `C3D_RenderTargetDelete`, disassembled (M0 revise 1) |
 | `GX_DisplayTransfer`/`GX_TextureCopy` called directly go into citro3d's bound queue → **never call them directly** | `gx.h`:139-143, 183, 195; per critic |
 | `C3D_TexLoadImage`: memcpy for linear textures, TextureCopy for VRAM | `texture.h`:55; texture.o per critic |
@@ -674,6 +675,7 @@ after init it is 5 257 KiB = 6 144 - 887 (9.1).
 `render_frame()` opens its own C3D frame (view frame) and closes it before
 returning, so it never overlaps the present frame: `C3D_FrameBegin(0)`,
 promotions/uploads, draws into an **unlinked** view target,
+`C3D_FrameSplit(GX_CMDLIST_FLUSH)` (submits the draws with GSP's cache flush, 0.3), then
 the in-frame `C3D_SyncDisplayTransfer` into linear staging (queued behind the draws, 0.3),
 `C3D_FrameEnd(GX_CMDLIST_FLUSH)`, and an empty `C3D_FrameBegin(0)`/`C3D_FrameEnd` pair, which
 returns only when the transfer has finished (M0 revise 1: the out-of-frame form is rejected for the reason of 5.7.4),
@@ -1986,8 +1988,7 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     minor 5): the distinct pairs in a fixed 1 024-slot open-addressing table with a
     per-frame generation tag (no clearing; a full table counts as 1 024 and is
     flagged), the per-frame samples in fixed arrays of 16 384 frames (beyond that only
-    the max is kept), allocated once at the first null frame. `[c3d] null` lines every
-    300 null frames and at release give max and p99 of each over all stored null
+    the max is kept), allocated once at the first null frame. A `[c3d] null` line at release or exit (revise 1; it was every 300 null frames) gives max and p99 of each over all stored null
     frames (p99 by a host-tested nearest-rank function in `core/`). Ring sizes (9.2) =
     2 × the bench max of `V` and `I`, rounded up to 1 024; 9.2's own "2 ×" (two
     halves, one per frame in flight in M6) is kept on top.
@@ -2065,13 +2066,14 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     frame sets a flag in `context.cpp` so that the present's next
     `sample_drawing_time(Draw)` is skipped (its "last finished queue" would be the
     view frame and readback, critic minor 7); `present.cpp` is unchanged.
-  - *GX queue* (2.4). The readback transfer is in-frame since revise 1, counted by `gx_op`
+  - *GX queue* (2.4). The readback transfer is in-frame since revise 1, preceded since revise 2
+    by `C3D_FrameSplit(GX_CMDLIST_FLUSH)`, each counted by its own `gx_op`
     (`note_out_of_frame()` was removed); host test of 2.4's worst case (24 + 1 = 25 < 32).
     `frame_end` gets a frame kind (`FrameKind::Present` default, `View`): presents
     keep the "> 4 entries" warning, view frames warn at > 27 (2.4).
   - *Zones* (`a1_3ds_profile.h`, inside the `A1_RENDER_C3D` fence after B-a's;
     `profile_3ds.cpp` names; `perf-table.py` columns if it lists zones by name):
-    `c3d_null`, `c3d_diff`, `c3d_readback` (the in-frame transfer, the frame end, the retirement wait pair, the invalidate
+    `c3d_null`, `c3d_diff`, `c3d_readback` (the flushing split, the in-frame transfer, the frame end, the retirement wait pair, the invalidate
     + conversion + the full-image check; the wait pair's `C3D_FrameBegin(0)` is timed in the nested
     `c3d_wait`). A view frame's `C3D_FrameBegin(0)` is timed in `c3d_wait`, which
     then also appears inside `render`.
@@ -2091,6 +2093,14 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     demo and a scripted walk before sizing its rings, and logs the ring high-water. The
     calibration does not check alpha (the conversion forces 0xFF); M1 adds an alpha check with
     the alpha-keeping readback (diff step 3).
+  - *Revise 2 (critic round 2, 2026-10-27).* Revise 1's in-frame transfer made its own split
+    submit the four draws with flags 0 (no GSP cache flush) while `C3D_FrameEnd(GX_CMDLIST_FLUSH)`
+    skips the whole-heap flush: the console could run the draw segment from stale RAM (0.3, new
+    row). `C3D_FrameSplit(GX_CMDLIST_FLUSH)` now comes first; the rule holds for every readback
+    frame of M1-M5 (5.2). Azahar does not model the cache and cannot show it. The `c3d_readback`
+    zone excludes the retirement wait (timed in `c3d_wait`): the readback's cost is
+    `c3d_readback + c3d_wait`. Applied by the main session (the review's last round); the
+    critic prescribed the change.
   - *Not in M0:* any C3D rasteriser, readback of a real frame into `world_pixels`,
     the discard path, texture code. Hook 1's code (1.2) is used unchanged; its
     "re-running `c3d_draw` is safe" paragraph is superseded by the record/replay
@@ -2308,7 +2318,9 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    corner colour, 0 mismatches) and the in-frame transfer with the `C3D_FrameBegin(0)` retirement;
    Azahar completes transfers synchronously and cannot show the PPF race, so it cannot tell a
    working wait from a missing one. Also on the console: `m0-readback-cal-resize.cfg` (target
-   deleted and created every frame, no svcBreak).
+   deleted and created every frame, no svcBreak). **Revise 2:** the draws before the in-frame
+   transfer are split off with `C3D_FrameSplit(GX_CMDLIST_FLUSH)` (0.3); on the console both
+   calibration configs must give `mismatched 0 (sentinel 0)` on all 30 frames.
 9. `C3D_FrameEnd(GX_CMDLIST_FLUSH)` + ranged flushes vs the whole-heap flush.
 10. Level-start hitch with the promotion cap (TextureCopy throughput, PPF
     latency); whether pre-warming is needed.
