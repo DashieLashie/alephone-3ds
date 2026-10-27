@@ -18,6 +18,7 @@
 #include "../core/gate.h"
 #include "../core/gx_queue.h"
 #include "../include/a1_c3d_port.h"
+#include "view.h"
 #include "a1_3ds_platform.h"
 #include "a1_3ds_profile.h"
 
@@ -67,6 +68,7 @@ GateTracker s_gate;
 // present with two_frame 1: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
 unsigned s_frames_gate_closed = 0;
 uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
+bool s_view_frame_ran = false;       // a view frame ran since the present's last sample (note_view_frame)
 
 unsigned s_presents = 0, s_odd = 0, s_false_returns = 0, s_releases = 0, s_gfx_exits = 0;
 unsigned s_stats_presents = 0;   // presents at the previous stats line
@@ -90,10 +92,14 @@ void load_config()
 	config_parse(s_cfg, text.str(), problems);
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
-	       "two_frame %d\n",
+	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
+	       "dump %d, readback_cal %d\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
-	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame);
+	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.renderer_c3d ? "c3d" : "sw",
+	       s_cfg.mode == Mode::Null ? "null" : s_cfg.mode == Mode::Direct ? "direct" : "readback",
+	       s_cfg.diff, s_cfg.diff_frames, static_cast<unsigned long>(s_cfg.classes), s_cfg.fullbright,
+	       s_cfg.dump, s_cfg.readback_cal);
 	if (s_cfg.present_diff && s_cfg.calibrate)
 		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
 	for (const std::string& p : problems)
@@ -283,15 +289,22 @@ void release_and_fini()
 	fflush(stdout);
 	C3D_Fini();
 	present_free();
+	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
 	s_off = true;
 	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",
 	       kib(linearSpaceFree()), kib(vramSpaceFree()));
+	frame_final_stats();   // front/frame.cpp: the null-mode and diff summaries
 	log_final_stats();
 	fflush(stdout);
 	// Last: a thread waiting in release_from_any_thread() goes on (and may take the console
 	// over) only when this thread is done, logging included.
 	s_up = false;
 	s_releasing = false;
+}
+
+bool release_pending()
+{
+	return s_release_requested;
 }
 
 bool top_surrendered()
@@ -456,16 +469,31 @@ FrameStart frame_begin(FrameZone zone)
 	return FrameStart::Ok;
 }
 
-void frame_end(int drawn_linked_targets, bool gate_was_closed)
+void frame_end(int drawn_linked_targets, bool gate_was_closed, FrameKind kind)
 {
 	const int total = s_gx.end_frame(drawn_linked_targets);
-	if (total > 4)
+	if (kind == FrameKind::Present && total > 4)
 		printf("[c3d] warning: %d GX queue entries in one present frame (design: <= 4)\n", total);
+	else if (kind == FrameKind::View && total > 27)
+		printf("[c3d] warning: %d GX queue entries in one view frame (design 2.4: <= 27)\n", total);
 	if (gate_was_closed)
 		++s_frames_gate_closed;
 	C3D_FrameEnd(GX_CMDLIST_FLUSH);
 	s_in_frame = false;
 	s_last_frame_end = svcGetSystemTick();
+}
+
+void gx_note_out_of_frame()
+{
+	s_gx.note_out_of_frame();
+	if (s_gx.last_total() > 27)
+		printf("[c3d] warning: %d GX queue entries in one view frame with its readback (design 2.4: <= 27)\n",
+		       s_gx.last_total());
+}
+
+void note_view_frame()
+{
+	s_view_frame_ran = true;
 }
 
 bool gx_take()
@@ -501,6 +529,12 @@ void count_odd_surface()
 
 void sample_drawing_time(GpuTime which)
 {
+	if (which == GpuTime::Draw && s_view_frame_ran)
+	{
+		// The last finished queue is a view frame's (and its readback's), not the previous present's.
+		s_view_frame_ran = false;
+		return;
+	}
 	const int i = which == GpuTime::Upload ? 1 : 0;
 	s_gpu_ms[i] += static_cast<double>(C3D_GetDrawingTime());
 	++s_gpu_n[i];

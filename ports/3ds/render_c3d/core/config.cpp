@@ -77,6 +77,55 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.close_frame);
 	if (key == "two_frame")
 		return parse_flag(value, cfg.two_frame);
+	if (key == "renderer")
+	{
+		if (value != "sw" && value != "c3d")
+			return false;
+		cfg.renderer_c3d = value == "c3d";
+		return true;
+	}
+	if (key == "mode")
+	{
+		if (value == "null")
+			cfg.mode = Mode::Null;
+		else if (value == "readback")
+			cfg.mode = Mode::Readback;
+		else if (value == "direct")
+			cfg.mode = Mode::Direct;
+		else
+			return false;
+		return true;
+	}
+	if (key == "diff")
+	{
+		long v = 0;
+		if (!parse_int(value, 0, 100000, v))
+			return false;
+		cfg.diff = static_cast<unsigned>(v);
+		return true;
+	}
+	if (key == "diff_frames")
+	{
+		long v = 0;
+		if (!parse_int(value, 0, 1000000, v))
+			return false;
+		cfg.diff_frames = static_cast<unsigned>(v);
+		return true;
+	}
+	if (key == "classes")
+	{
+		uint32_t mask = 0;
+		if (!parse_classes(value, mask))
+			return false;
+		cfg.classes = mask;
+		return true;
+	}
+	if (key == "fullbright")
+		return parse_flag(value, cfg.fullbright);
+	if (key == "dump")
+		return parse_flag(value, cfg.dump);
+	if (key == "readback_cal")
+		return parse_flag(value, cfg.readback_cal);
 	if (key == "retire_wait_ms")
 	{
 		long v = 0;

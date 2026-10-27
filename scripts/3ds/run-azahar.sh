@@ -191,6 +191,7 @@ else
 	rm -f "$userdir/debug-audio"
 fi
 rm -f "$userdir"/screen-*.bmp
+rm -f "$userdir"/c3d-*.bmp   # the citro3d harness dumps (c3d-diff-*, c3d-rbcal-*)
 if [ -n "$perf_level" ]; then
 	printf 'level %s\nsettle %s\nmeasure %s\nquit 1\nlog 1\n' "$perf_level" \
 		"${PERF_SETTLE:-8}" "${PERF_MEASURE:-20}" > "$userdir/debug-perf"
@@ -311,7 +312,7 @@ if [ "$screens" = 1 ] || [ -n "$script" ]; then
 	out="$repo/build-3ds/azahar-screens"
 	rm -rf "$out"
 	mkdir -p "$out"
-	for bmp in "$userdir"/screen-*.bmp; do
+	for bmp in "$userdir"/screen-*.bmp "$userdir"/c3d-*.bmp; do
 		[ -f "$bmp" ] || continue
 		png="$out/$(basename "${bmp%.bmp}").png"
 		sips -s format png "$bmp" --out "$png" >/dev/null && echo "run-azahar: $png"

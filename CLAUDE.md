@@ -17,9 +17,12 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   (2026-10-19):** keep the GPU present, G1 = build the renderer aiming at M7 (supersampling) and M9 (stereo),
   try the zero-copy present. The plan is the end of `docs/3ds/NEXT-SPRINT.md`. **Plan A (the fixes) is complete and
   verified on the console (2026-10-26):** the HOME > Close hang (A5/A6), the fatal-error hand-off, the 3dslink
-  mirror stall, Power Off, and the fatal fallback's exit (A7, also carried to `3ds-port`). **Next: B, the zero-copy
-  present** (one engine edit, `PATCHES.md` 55+; the user's go is the 2026-10-19 decision), **then C: M0-M6, M7, M9.**
-  Stage 10 is not paused and needs no further decision before B. G0 and G1 are behind us.
+  mirror stall, Power Off, and the fatal fallback's exit (A7, also carried to `3ds-port`). **B** (zero-copy
+  present): B-a measured on the console below the 0.5 ms rule; B-b is being built on its own branch `stage10-bb`
+  (not merged; user decision 2026-10-26). **C (the renderer) on `stage10-c3d`: M0 done** (2026-10-27, tag
+  `port-stage10-M0`, `PATCHES.md` 45); next M1, or first the "M0 console check" runbook in `NEXT-SPRINT.md`
+  (the user's choice). Another session may run Azahar on the same emulated card: take
+  `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
 - Hardware: one **New 3DS / New 2DS**. Every Old 3DS figure comes from Azahar's Old 3DS mode and is unverified.
@@ -75,8 +78,8 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
 2. **Every engine edit** (anything under `Source_Files/`) is fenced with `#ifdef A1_PLATFORM_3DS`, gets a numbered
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
-   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45-48 are reserved by
-   stage 10 for M0/M2/M6/M8; 49-53 are used; take 54+ for anything else.
+   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's (used), 46-48 are reserved by
+   stage 10 for M2/M6/M8; 49-55 are used or taken (55: B-b on `stage10-bb`); take 56+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

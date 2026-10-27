@@ -1247,6 +1247,62 @@ Preferences, new game, HOME > Close): PASS. `present_diff final: 151 checks, 0 w
 returned`, exit; the launcher came back, no Luma screen, dumps unchanged (0-6). The 3dslink transcript ends
 at the lid ("Connection reset by peer"); the rest is in the card's `log.txt` (`b0/fn-b-log.txt`).
 
+## Stage 10 M0: renderer harness, calibration, null mode (Azahar — non-authoritative)
+
+Recorded 2026-10-26/27 on `stage10-c3d` (the M0 commit). Design `CITRO3D_DESIGN.md` 1.2 (hook 1,
+`PATCHES.md` 45) and section 7 "M0 specification": `a1_c3d::render_frame()` behind the seam, a
+diff harness that records **one** traversal and replays it (the weapon layer calls `rand()`, so
+a second traversal is not side-effect free), a class/fullbright filter, null mode (`R`), and a
+readback calibration of an unlinked view target. No C3D rasteriser yet: both diff sides are SW.
+Builds `build-3ds-c3d(-prof)`, 0 warnings; the OFF builds' `objdump -d` is identical to the
+previous commit's and `nm` finds no citro3d symbol. Azahar 2126.2, runs serialised with the
+stage10-bb session through a shared lock (`~/Applications/Azahar-2126.2/user/.run-lock`).
+
+| Acceptance | Result |
+| --- | --- |
+| (a) `ppcheck.sh` on `render.cpp` | **IDENTICAL** on both volumes (127 509 / 120 992 lines), `-fsyntax-only` 0 diagnostics |
+| (b) `m0-readback-cal.cfg` (`readback_cal 1`), L0 | `readback_cal summary: 30 frames, orientation ok 30, current frame ok 30, channels ok 30, skipped 0` with the design's starting values (below); GX high-water 3 (clear + frame end + the readback's +1); no guest fault |
+| (c) `m0-diff.cfg` (`renderer sw`, `diff 1`, `diff_frames 20`, `classes all`), L0 / L6 / L20 (perf runs) and the menu demo (script 12) | `DIFF summary frames=20 checks=200 differ_total=0 dropped=0` in all four; `c3d-diff.py log --expect-zero` passes |
+| (c), spread: `diff 15`, `diff_frames 40`, menu demo and L20 | `frames=40 checks=400 differ_total=0 dropped=0` both |
+| (d) `m0-null.cfg` (`renderer c3d`, `mode null`), L0 / L6 / L20, HUD + Map @30 | table below |
+| P1 scripts 08, 13, 14 (`p1-diff.cfg`) | `present_diff final`: 130 / 51 / 11 checks, **0 with RGB differences**; `release done`, 0 false returns |
+| script 13 with `present_diff 30` + `readback_cal 1` | calibration 30/30 ok and `present_diff final: 50 checks, 0 with RGB differences`: the view frames do not disturb the present (its vertex buffer is restored) |
+| script 07 (`p1-diff.cfg`) | runs to the 150 s timeout as in B-a, no mismatch line |
+| script 22 (`p1-gpu.cfg`, HOME > Close in a game) | `gate closed`, 3 skipped presents, `release done`, linear 17 728 KiB free after |
+
+Classes the (c) runs exercised (checks with coverage): walls, floors, replay and frame in every
+frame; landscape on L0/L6; sprites on L0 and the demo; **weapons** in 19 of 20 frames (40 of 40
+spread), so the fluttering weapon is covered by record/replay; static on 4 L0 frames (the
+level-start teleport); **tinted never** (needs invisibility: M4's Lua plugin).
+
+Null mode vs SW, ON-prof, HUD + Map @30, 1 run each (ms per frame; `R` = `c3d_null`, nested in
+`render`; `R_est = R / render × 5.78 ms`, design 0.5):
+
+| Level | SW busy | null busy | render (SW) | R | R_est | V max / p99 | I max / p99 | polys max | rects max | state changes max / p99 | (texture, table) pairs max |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | --- | ---: |
+| L0 | 18.22 | 18.88 | 11.20 | 0.66 | 0.34 | 375 / 371 | 591 / 585 | 71 | 18 | 80 / 78 | 26 |
+| L6 | 15.30 | 16.38 | 8.98 | 0.96 | 0.62 | 387 / 387 | 597 / 597 | 89 | 5 | 83 / 83 | 11 |
+| L20 | 15.63 | 16.11 | 8.63 | 0.50 | 0.33 | 174 / 174 | 276 / 276 | 41 | 1 | 25 / 23 | 9 |
+
+`R` (traversal, clipping, classification and the state-key test, no rasterisation) is a small
+part of `render`, so G2-a's front-end floor (`R_est ≤ 3 ms`) has a wide margin; the counts are
+deterministic and so authoritative in Azahar, the times are not. State changes are close to the
+primitive count: consecutive-state merging (2.1) will save little, so M1 should expect about one
+draw per polygon. Ring sizes (9.2) at 2 × max: **1 024 vertices and 2 048 indices per frame**. These
+come from three bench spots; a busier view overflows to a discard (1.5), and M1 logs the ring's
+high-water mark.
+
+**Found on the way:** libctru's `shaderInstanceFree()` frees the instance itself
+(`shaderProgram.o` +0x28-0x2c), so `back/view.cpp`'s throwaway instance (to look up the present
+shader's `projection` uniform) must come from `malloc`; a stack instance corrupted the heap right
+after the first calibration frame (`_free_r` faults, reproduced with and without the BMP dump).
+
+**Needs console verification (M0):** the unlinked target's readback orientation and flags (design
+section 10 item 8); that a view frame's `C3D_FrameEnd` with no linked target causes no top-screen
+swap; that the out-of-frame `C3D_SyncDisplayTransfer` waits for its own completion; the TEV
+constant colour's byte order (0xAABBGGRR, the corners came out right in Azahar); `R` on the
+console.
+
 ## Next candidates (not done)
 
 Ranked by the profile after a' in Azahar: `render` (9.7-12.4 ms) is now

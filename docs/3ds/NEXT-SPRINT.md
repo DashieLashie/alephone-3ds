@@ -1140,6 +1140,13 @@ B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
 C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
    Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
    is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
+   **Status (2026-10-27): M0 done** (tag `port-stage10-M0`; `PERF.md` "Stage 10 M0", Azahar —
+   non-authoritative): the seam (`PATCHES.md` 45), the record/replay diff harness (SW-vs-SW 0
+   differing pixels on L0/L6/L20 and the menu demo), null mode (`R_est` 0.33-0.62 ms, far under
+   G2-a's 3 ms), the readback calibration (30/30 ok in Azahar with the design's starting values).
+   **Next: the user's choice: M1 (flat-shaded walls, its own kickoff), or first the short "M0
+   console check" below** (the readback orientation is the one M0 fact Azahar cannot settle; M1+
+   build on it).
 
 ## B-a console runbook (plan B's go / no-go; when the user is at the console)
 
@@ -1347,3 +1354,41 @@ C), plan A item 7; `CITRO3D_DESIGN.md` 5.6.4 items 5 and 6 (VERIFIED or REFUTED)
 text mirrored identically to `3ds-port`. If F1-F3 pass, carrying A7 to `3ds-port` (the shipping
 build still has the old fallback) is the user's decision (cherry-pick of the A7 commit, or the
 next merge).
+
+## M0 console check (the readback calibration on hardware; when the user is at the console)
+
+**Not run yet.** Written 2026-10-27. Settles `CITRO3D_DESIGN.md` section 10 item 8 for the
+renderer's readback (every M1-M5 frame is read back this way) and takes `R` on the console. Driving
+as in "How to drive the console" (ask the IP; ftpd for card files, the Homebrew Launcher netloader
+(Y) for launches). About 6 launches, ~20 min.
+
+**Builds** (from the `stage10-c3d` worktree at `port-stage10-M0` or later): `build-3ds-c3d-prof`
+(all runs below). Check first: `cmake --build build-3ds-c3d-prof` (nothing to do / 0 warnings).
+**Setup:** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw`, `mkdir -p $H/m0`, a run helper
+from G0-b's: `sed 's#build-3ds/hw/g0b/#build-3ds/hw/m0/#' $H/g0b/run.sh > $H/m0/run.sh; chmod +x
+$H/m0/run.sh`. Kill stale 3dslink first. ftpd: fetch the user's `Marathon 2 Preferences` into
+`$H/m0/prefs-user` (put back at the end), then `$H/sprint8/setprefs.sh IP 0 30` (HUD + Map @30).
+
+**1. Calibration, HUD + Map (400x240).** ftpd: `debug-perf` = `$H/sprint8/debug-perf-L0`,
+`debug-c3d` = `scripts/3ds/tests/c3d/m0-readback-cal.cfg` (copied to files named `debug-perf` /
+`debug-c3d` first, as in the B-a runbook). `run.sh build-3ds-c3d-prof m0-cal-hm`; the user presses A
+twice; the game quits after the BENCH line. **Pass:** `[c3d] readback_cal summary: 30 frames,
+orientation ok 30, current frame ok 30, channels ok 30`. Fetch `c3d-rbcal-0.bmp` and
+`c3d-rbcal-29.bmp` into `$H/m0/` (red top left, green top right, blue bottom left, white bottom
+right).
+**2. The same in Classic (480x240):** `setprefs.sh IP 2 30`, `run.sh build-3ds-c3d-prof m0-cal-cl`.
+Same pass line. Then `setprefs.sh IP 0 30`.
+**3. `R` on the console (optional, 3 runs):** `debug-c3d` = `m0-null.cfg`, `debug-perf-L<N>` for N =
+0, 6, 20: `run.sh build-3ds-c3d-prof m0-null-L<N>`. Read `c3d_null` and `render` from the BENCH
+lines (`perf-table.py`) and the `[c3d] null` count lines (they must equal Azahar's: the counts are
+deterministic). G2-b's front-end part: `R ≤ 3 ms`.
+**End:** delete `debug-perf` and `debug-c3d` and the `c3d-*.bmp` from the card, put
+`$H/m0/prefs-user` back.
+
+**Reading a failure:** a line with `orientation rows flipped` / `columns flipped`: the hardware
+disagrees with Azahar; record the line, stop: the fix (design 7, M0 block) is one change in
+`back/view.cpp` and one re-run, made in the next session, and Azahar's result must be re-checked
+against it. `transposed` or `unknown`: record the corners, stop (a design change). `current frame
+NO`: record which `k` the centre shows (the out-of-frame transfer did not wait for its own frame),
+stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
+fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at 0x28), stop.

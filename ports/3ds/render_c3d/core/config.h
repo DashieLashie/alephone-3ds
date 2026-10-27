@@ -40,6 +40,23 @@
 	                    U, then the quad); only to measure the cost structure of plan B-b. With
 	                    suspend_gate 1 the gate is checked again between U and D
 
+	Keys of M0 (design 7, "M0 specification"; the renderer harness):
+
+	  renderer sw|c3d   default sw. c3d: the citro3d renderer (in M0 only the null mode runs)
+	  mode null|readback|direct
+	                    default readback. null: count what the rasteriser would draw, draw nothing
+	                    (defines R); readback / direct: not before M1 / M6
+	  diff N            0..100000, default 0 = off: every N-th world frame is a diff frame
+	  diff_frames N     0..1000000, default 20: diff frames in all, then diffing stops and a summary
+	                    is logged; 0 = no limit
+	  classes LIST      default all: comma list, no spaces, of walls floors landscape static sprites
+	                    weapons tinted other frame, or "all"; an unknown name or an empty item
+	                    rejects the whole value
+	  fullbright 0|1    every forwarded textured primitive is drawn with the brightest shading table
+	  dump 0|1          diff frames and calibration frames are written as c3d-*.bmp
+	  readback_cal 0|1  the readback calibration (the first 30 world frames; P1's "calibrate" is the
+	                    present-target test, a different thing)
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -48,10 +65,15 @@
 #ifndef A1_C3D_CORE_CONFIG_H
 #define A1_C3D_CORE_CONFIG_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "classify.h"
+
 namespace a1_c3d {
+
+enum class Mode { Null, Readback, Direct };
 
 struct Config
 {
@@ -66,6 +88,15 @@ struct Config
 	bool force_abandon = false;
 	bool close_frame = false;
 	bool two_frame = false;
+	// M0
+	bool renderer_c3d = false;
+	Mode mode = Mode::Readback;
+	unsigned diff = 0;                      // every N-th world frame is a diff frame; 0 = off
+	unsigned diff_frames = 20;              // 0 = no limit
+	uint32_t classes = kAllClassesMask;
+	bool fullbright = false;
+	bool dump = false;
+	bool readback_cal = false;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.

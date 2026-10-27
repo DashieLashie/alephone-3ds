@@ -46,16 +46,27 @@ public:
 	{
 		const int total = used_ + kFrameEndEntries + linked_targets;
 		high_water_ = std::max(high_water_, total);
+		last_total_ = total;
 		return total;
+	}
+
+	// The out-of-frame readback transfer (C3D_SyncDisplayTransfer after the frame ended) adds one
+	// entry to the queue of the frame that just ended (2.4).
+	void note_out_of_frame()
+	{
+		++last_total_;
+		high_water_ = std::max(high_water_, last_total_);
 	}
 
 	int used() const { return used_; }
 	int high_water() const { return high_water_; }
+	int last_total() const { return last_total_; }   // the last end_frame total, plus note_out_of_frame()s
 	unsigned refused() const { return refused_; }
 
 private:
 	int used_ = 0;
 	int high_water_ = 0;
+	int last_total_ = 0;
 	unsigned refused_ = 0;
 };
 

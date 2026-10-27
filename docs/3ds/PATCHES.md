@@ -18,8 +18,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
 36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 and an update to 19
-in the sprint after it (`NEXT-SPRINT.md`), 49 in stage 10 (`CITRO3D_DESIGN.md`; 45-48 are
-reserved there for the engine hooks of M0, M2, M6 and M8).
+in the sprint after it (`NEXT-SPRINT.md`), 49 and 45 in stage 10 (`CITRO3D_DESIGN.md`; 46-48 are
+reserved there for the engine hooks of M2, M6 and M8).
 
 ## Summary
 
@@ -69,6 +69,7 @@ reserved there for the engine hooks of M0, M2, M6 and M8).
 | 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
 | 43 | `Source_Files/Sound/SoundFile.cpp` | a sound header, and a sound's samples, read with one read each and parsed from memory | none |
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
+| 45 | `Source_Files/RenderMain/render.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M0: hook 1, the world view goes through `a1_c3d::render_frame()` | none |
 | 49 | `ports/3ds/source/video_3ds.cpp`, `a1_3ds_platform.cpp`, `profile_3ds.cpp`, `include/a1_3ds_profile.h`, `CMakeLists.txt`, `render_c3d/` (new port files, no upstream edit; `A1_RENDER_C3D=ON` builds only) | stage 10 P1: citro3d owns the top screen, GPU present | none (the CPU present stays as `debug-c3d` `present cpu` and in the default build) |
 
 The complete list of stubs and lost functionality, including items not tied
@@ -998,3 +999,31 @@ item 14 in `NEXT-SPRINT.md`).
 "Source_Files/CSeries/csalerts_sdl.cpp"`, both volumes): DIFFER (2 lines), **0 lines with
 numbers normalised** (only `__LINE__` moved); `-fsyntax-only` exit 0, 0 diagnostics
 (167 934 and 89 269 preprocessed lines).
+
+## Stage 10 M0: the renderer seam (45)
+
+Added 2026-10-26 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` 1.2 and section 7, "M0
+specification"). The first engine edit of stage 10, fenced
+`#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)`: the default build
+(`A1_RENDER_C3D=OFF`) and every non-3DS build preprocess as before.
+
+45. **`RenderMain/render.cpp`: hook 1 in `render_view()`.** `#include "a1_c3d.h"` after
+    `screen.h`, and the block that picks the rasteriser and draws the sorted tree (upstream
+    lines 466-506) is, in the C3D build, replaced by the design's 1.2 code: the draw is wrapped
+    in a captureless lambda (`SetView`, `Begin`, `Render_Classic.render_tree()`, the viewer
+    sprite layer unless the tree draws it, `End`) and handed with `Rasterizer_SW` to
+    `a1_c3d::render_frame()`, which either does the frame itself (true: in M0 only on a
+    `debug-c3d diff` frame, where the harness records one traversal and replays it into the
+    view) or returns false, and the lambda then draws it with `Rasterizer_SW` exactly as
+    upstream. The upstream lines are kept unchanged in the `#else` branch; an `#error` guards
+    the fence against `HAVE_OPENGL`. Port side (no engine edit): `ports/3ds/render_c3d/`
+    `include/a1_c3d.h`, `front/{frame,filter}.cpp`, `back/view.cpp`, `core/{diff,bmp,stats,
+    calibrate}.cpp`, `core/classify.h`; `CMakeLists.txt` adds `render_c3d/include` to the
+    engine targets' include path in C3D builds. Without a `debug-c3d` file `render_frame()`
+    returns false after one flag test.
+
+**Non-3DS check** (2026-10-26, `ppcheck.sh Source_Files/RenderMain/render.cpp
+Source_Files/RenderMain/render.cpp`, both volumes): **IDENTICAL** (127 509 and 120 992
+preprocessed lines, stderr 0); `-fsyntax-only` exit 0, 0 diagnostics. The OFF 3DS builds
+(`build-3ds`, `build-3ds-prof`): `objdump -d` of `alephone.elf` identical to the previous commit's,
+`nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0, 0 warnings.

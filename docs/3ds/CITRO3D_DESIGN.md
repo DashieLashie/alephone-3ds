@@ -1850,6 +1850,11 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   item 16).
 
 ### M0 — renderer harness, calibration, null mode (after G1)
+- **Status (2026-10-27): built and accepted in Azahar** (`PERF.md` "Stage 10 M0"; tag
+  `port-stage10-M0`). (a) ppcheck IDENTICAL; (b) calibration 30/30 ok with the starting values
+  unchanged (recorded in the block below); (c) SW-vs-SW 0 differing pixels in every check;
+  (d) `R` 0.66 / 0.96 / 0.50 ms on L0 / L6 / L20, rings fixed in 9.2. The calibration's
+  hardware half is section 10 item 8.
 - Add: `include/a1_c3d.h`; `front/frame.cpp` (`render_frame`, config, null
   mode, diff harness, stats); `front/filter.cpp` (class/fullbright filter);
   `core/{diff,bmp}.cpp`; `scripts/3ds/tests/c3d-host/`; `c3d-diff.py`
@@ -2024,7 +2029,13 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     converted red is `0xFFFF0000` → `channels ok` (else the conversion is changed).
     One `[c3d] readback_cal k=… orientation … current frame … channels …` line per
     frame and a summary after 30; with `dump 1` the readback of frames 0 and 29 as
-    `c3d-rbcal-<k>.bmp`. The values that pass are written into this block. **State
+    `c3d-rbcal-<k>.bmp`. The values that pass are written into this block.
+    **Passed (Azahar 2126.2, 2026-10-27, 30/30 frames, 400x240):** exactly the starting values,
+    no change needed: `Mtx_Ortho(0, w, h, 0, 0, 1, true)`; `GX_BUFFER_DIM(w, h)` in and out,
+    `FLIP_VERT(0) | OUT_TILED(0) | RAW_COPY(0) | IN/OUT_FORMAT(RGBA8) | SCALING(NO)`;
+    conversion `(rgba >> 8) | 0xFF000000`; TEV constant colour `0xAABBGGRR` (R in the low byte,
+    UNVERIFIED locally; the corners came out right). Classic's 480x240 was not run (the
+    calibration runs on the game's view, HUD + Map here). Console: section 10 item 8. **State
     hygiene with the present** (`back/present.cpp` is not edited in M0: plan B-b
     edits it): `view.cpp` copies `*C3D_GetBufInfo()` into a local, binds its own
     buffer, and after its draws restores the copy with `C3D_SetBufInfo(&saved)`
@@ -2206,11 +2217,11 @@ hold in every mode with the default caps.
 | command buffer (one buffer, 0.3; 512 default, up to 1 024 by M1) | 512-1 024 |
 | present staging 512x256 RGBA8 (P1 calibration, 5.1) | 512 |
 | zero-copy `main_surface` 512x256 (plan B, 5.7.8; from the first HUD + Map game) | 512 |
-| vertex ring 2 × 16 384 × 32 B (re-sized from M0) | 1 024 |
-| index ring 2 × 32 768 × 2 B | 128 |
+| vertex ring 2 × 1 024 × 32 B (M0: 2 × max 387, rounded up to 1 024) | 64 |
+| index ring 2 × 2 048 × 2 B (M0: 2 × max 597) | 8 |
 | readback staging 480x240 | 450 |
 | linear texture pool (cap; holds promotions pending) | 4 096 |
-| **total** | ≤ 7 746 |
+| **total** | ≤ 6 666 |
 
 No change to `__ctru_linear_heap_size` needed on the New 3DS
 (`a1_3ds_platform.cpp`:43-50 "revisit then": revisited). Azahar's split is
@@ -2263,6 +2274,10 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
    (`present_diff`: 153 checks, 0 differences). Readback (M0+): not reached.
+   **Azahar 2026-10-27 (M0, non-authoritative):** the unlinked 400x240 view target reads back
+   right with `Mtx_Ortho(0, w, h, 0, …)`, `FLIP_VERT(0)`, untiled RGBA8 out (7, M0 block). On the
+   console: the same 30-frame `readback_cal` run (`NEXT-SPRINT.md` "M0 console check"), plus
+   that a view frame causes no top-screen swap and the out-of-frame transfer waits for itself.
 9. `C3D_FrameEnd(GX_CMDLIST_FLUSH)` + ranged flushes vs the whole-heap flush.
 10. Level-start hitch with the promotion cap (TextureCopy throughput, PPF
     latency); whether pre-warming is needed.

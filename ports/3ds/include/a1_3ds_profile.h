@@ -40,6 +40,9 @@ enum Zone
 	C3dFill,    // the present's staging fill (inside Present; design 5.7.11)
 	C3dUpload,  // two_frame: frame D's C3D_FrameBegin(0), the wait for the upload (inside Present)
 	C3dVblank,  // the present's gspWaitForVBlank() (inside Present)
+	C3dNull,    // M0 null mode: the traversal with a counting rasteriser (nested in Render)
+	C3dDiff,    // M0 diff harness, the whole of a diff frame (nested in Render; diff frames are not benchmark frames)
+	C3dReadback, // M0 view readback: out-of-frame transfer + cache invalidate + conversion (nested in Render)
 #endif
 	kZoneCount
 };

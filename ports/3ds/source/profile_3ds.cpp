@@ -55,7 +55,7 @@ const char kDebugPerfFile[] = "debug-perf";
 const char* const kZoneNames[kZoneCount] = {
 	"world", "render", "hud", "blit", "present", "bottom", "idle", "overlay"
 #ifdef A1_RENDER_C3D
-	, "c3d_wait", "c3d_fill", "c3d_upload", "c3d_vblank"
+	, "c3d_wait", "c3d_fill", "c3d_upload", "c3d_vblank", "c3d_null", "c3d_diff", "c3d_readback"
 #endif
 };
 

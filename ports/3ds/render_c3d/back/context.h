@@ -52,9 +52,22 @@ enum class FrameZone { Wait, Upload };
 // suspend_gate 0, or between frames U and D) the wait is bounded: retire_wait(), and on timeout
 // citro3d is abandoned.
 FrameStart frame_begin(FrameZone zone = FrameZone::Wait);
+// What a frame is, for the queue warning of frame_end(): a present (design: <= 4 entries) or an M0
+// view frame (back/view.cpp: the calibration frame, whose out-of-frame readback adds one more
+// entry; design 2.4: <= 27).
+enum class FrameKind { Present, View };
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) with the queue accounting of the frame closed.
 // `gate_was_closed`: the gate condition held when the present began (diagnostic d2).
-void frame_end(int drawn_linked_targets, bool gate_was_closed = false);
+void frame_end(int drawn_linked_targets, bool gate_was_closed = false, FrameKind kind = FrameKind::Present);
+// The out-of-frame C3D_SyncDisplayTransfer of the view readback was issued right after a frame_end():
+// one more entry in that frame's queue (design 2.4); warns when the frame's total exceeds 27.
+void gx_note_out_of_frame();
+// A view frame ran (back/view.cpp). The present's next sample_drawing_time(GpuTime::Draw) is skipped
+// once: its "last finished queue" would be the view frame and its readback, not the previous present.
+void note_view_frame();
+// A release was requested from another thread and not served yet (serve_release()). Main thread
+// callers that run between presents (back/view.cpp) draw nothing while it is pending.
+bool release_pending();
 // An operation that enters citro3d's GX queue is about to be issued: false = over the
 // budget, do not issue it. Call right before each C3D_Sync* / C3D_RenderTargetClear.
 bool gx_take();
@@ -96,6 +109,10 @@ void stats_tick();   // logs "[c3d] stats ..." once a second
 // upload (after two_frame's frame D's begin).
 enum class GpuTime { Draw, Upload };
 void sample_drawing_time(GpuTime which);
+
+// --- defined in front/frame.cpp (M0 piece 2b), called by release_and_fini() just before the final
+// stats line: logs the null-mode and diff summaries.
+void frame_final_stats();
 
 // --- teardown, called by context.cpp; defined in present.cpp ---
 // close_frame (console run 1): one frame that draws the present quad from the present texture

@@ -277,6 +277,10 @@ foreach(_u IN LISTS A1AM_UNITS)
     "${CMAKE_CURRENT_SOURCE_DIR}"
     ${A1AM_${_u}_INCLUDES}
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  if(A1_RENDER_C3D)
+    # a1_c3d.h, included by RenderMain/render.cpp (hook 1, docs/3ds/CITRO3D_DESIGN.md 1.2)
+    target_include_directories(${_t} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/render_c3d/include")
+  endif()
   target_compile_definitions(${_t} PRIVATE ${A1AM_${_u}_DEFINES})
   if(A1AM_${_u}_OPTIONS)
     target_compile_options(${_t} PRIVATE ${A1AM_${_u}_OPTIONS})
@@ -343,8 +347,15 @@ if(A1_RENDER_C3D)
   set(_a1_c3d_dir "${CMAKE_CURRENT_SOURCE_DIR}/render_c3d")
   target_sources(alephone PRIVATE
     "${_a1_c3d_dir}/core/config.cpp"
+    "${_a1_c3d_dir}/core/diff.cpp"
+    "${_a1_c3d_dir}/core/bmp.cpp"
+    "${_a1_c3d_dir}/core/stats.cpp"
+    "${_a1_c3d_dir}/core/calibrate.cpp"
     "${_a1_c3d_dir}/back/context.cpp"
-    "${_a1_c3d_dir}/back/present.cpp")
+    "${_a1_c3d_dir}/back/present.cpp"
+    "${_a1_c3d_dir}/back/view.cpp"
+    "${_a1_c3d_dir}/front/frame.cpp"
+    "${_a1_c3d_dir}/front/filter.cpp")
   target_include_directories(alephone PRIVATE "${_a1_c3d_dir}/include")
   ctr_add_shader_library(a1_c3d_shaders "${_a1_c3d_dir}/shaders/present.v.pica")
   dkp_add_embedded_binary_library(a1_c3d_shbin a1_c3d_shaders)
