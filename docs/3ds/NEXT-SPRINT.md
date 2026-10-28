@@ -1147,8 +1147,10 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    **M1 done (2026-10-27**, tag `port-stage10-M1`; `PERF.md` "Stage 10 M1", Azahar — non-authoritative):
    citro3d draws opaque walls on diff frames; coverage equals SW's except tie pixels (0 non-edge
    mismatches on L0/L6/L20 and 200 film frames); reserves 508 + 20 words; rings and `C3D_Init`
-   unchanged; `debug-c3d film`. **Next: the user's choice: M2 (textured walls and floors, patch 46),
-   or the "M1 console check" first (at the end of this file; it carries the M0 console check).**
+   unchanged; `debug-c3d film`. **Next (user decision 2026-10-27): M2** (textured walls and floors, patch 46;
+   kickoff `KICKOFF_M2.md`), console checks deferred; **M2's texture upload code waits for "M1 console
+   check, short version"** (at the end of this file) to pass. The full "M1 console check" (it carries
+   the M0 console check) waits for a longer session.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.

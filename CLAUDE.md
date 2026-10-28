@@ -21,8 +21,9 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   present): B-a measured on the console below the 0.5 ms rule; B-b is being built on its own branch `stage10-bb`
   (not merged; user decision 2026-10-26). **C (the renderer) on `stage10-c3d`: M0 done** (2026-10-27, tag
   `port-stage10-M0`, `PATCHES.md` 45); **M1 done** (2026-10-27, tag `port-stage10-M1`, Azahar only, no engine edit:
-  walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **next: the user's choice: M2, or the "M1 console
-  check"** in `NEXT-SPRINT.md` first (it carries the deferred M0 console check). Another session may run Azahar on the same emulated card: take
+  walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **next: M2** (user decision 2026-10-27; kickoff
+  `docs/3ds/KICKOFF_M2.md`). The console checks are deferred, but M2's texture upload code waits for
+  `NEXT-SPRINT.md` "M1 console check, short version" (two launches) to pass on the console. Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.

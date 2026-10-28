@@ -2407,6 +2407,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (play mode, M4), any engine edit.
 
 ### M2 — textured walls and floors (full bright), texture cache v1
+- **Next (user decision 2026-10-27):** kickoff `KICKOFF_M2.md`. The upload code is written only after
+  `NEXT-SPRINT.md` "M1 console check, short version" has passed on the console.
 - Add: `core/tex_convert.cpp`, `core/tiling.cpp`, `back/texcache.cpp` (3.3);
   floors/ceilings/liquids, transparent walls, `_SCALE_2X/4X`; hooks 2a/2b
   (`PATCHES.md` 46).
