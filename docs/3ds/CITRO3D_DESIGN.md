@@ -2120,6 +2120,265 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   `C3D_FrameEnd` logged, reserves set; `cmdbuf_kib 32` run discards and
   falls back without a crash; host: w vs SW `world_x`
   (`scottish_textures.cpp`:916-954) rel. error ≤ 1e-3.
+- **M1 specification (revision of 2026-10-27, before code; Review log "M1
+  pre-implementation").** The five lines above predate M0. Where they and the code disagree,
+  this block rules. Citations are the code as of `fc4e1e493`. M1 runs **only on diff frames**
+  (the C3D side B of a check); play frames stay SW until M4 (1.5). No engine edit.
+  - *Keys* (`core/config.*` + host test; the `[c3d] debug-c3d:` line prints every one):
+    `renderer c3d` with `diff N` now draws side B of each check in C3D (M0: SW, `frame.cpp`:213-217
+    logged it); `renderer c3d` without `diff`, `mode readback` → logged once "play frames are
+    software before M4", `false`; `mode null` unchanged. New:
+    `cmdbuf_kib N` (16..4096, default 512: the `C3D_Init` size, today the constant
+    `context.cpp`:43; below 16 KiB the present's own frames, which check no reserve, are not
+    guaranteed); `gxq_budget N` (1..24, default 24: `GxQueue::kBudget` becomes a runtime value,
+    `gx_queue.h`:22); `ring_vertices N`, `ring_indices N` (vertices / indices **per half**, 64..32768
+    / 64..65536; defaults set by the measurement below, until then M0's 1 024 / 2 048); `film PATH`
+    (**rest of the line**, trimmed: `config_parse` reads one token today, `config.cpp`:153, and film
+    names have spaces; a `#` still starts a comment, so a path with `#` is not supported; relative to
+    `a1_3ds::user_dir()` unless it starts with `sdmc:/` or `/`); `reserve_extra N` (0..1 000 000
+    words, default 0: added to the command-buffer reserve test, to force a `cmdbuf` discard; revise 1).
+  - *Side B in the harness* (record/replay, `frame.cpp`:209-283, unchanged in shape). Step (1) and
+    the `replay` check stay SW-vs-SW. Step (3), per selected class with `renderer c3d`: side A is
+    M0's SW replay of `filter(class)` into scratch A; side B is **one C3D view frame**: the same
+    recording replayed through `FilterRasterizer(&c3d, class, fullbright)` into the new `front/`
+    `C3dRasterizer`, which hands draw items to `back/draw.cpp`; the frame is read back keeping alpha
+    into scratch B; `core/diff.cpp` compares. Step (4), the real frame into `dest`, stays SW. The
+    noise seed is set to `s0` before each side as in M0. One view frame per C3D check, so a diff frame
+    with `classes walls` costs one GPU frame plus its retirement wait (not a benchmark frame; zone
+    `c3d_diff` as M0).
+  - *What C3D draws in M1.* `texture_vertical_polygon` with `_textured_transfer` (class walls) whose
+    texture is opaque. Everything else reaching `C3dRasterizer` is **unsupported**: the view frame is
+    **discarded** (1.5: no more draws, `C3D_FrameEnd` normally, no readback) and the check is logged
+    `[c3d] DIFF frame=F class=C discarded (unsupported|ring|cmdbuf|gx|begin)` and not compared (a check
+    that could not start is `skipped (down|gate|size)` instead, see *Back end*).
+    So with `classes all` every check but `walls` (and `replay`) is discarded in M1; that is
+    expected. **Transparent walls** (`texture->flags & _TRANSPARENT_BIT`: SW skips texel 0,
+    `low_level_textures.h` `write_pixel<…, check_transparent>`) are drawn with holes by SW and would
+    be solid in flat C3D, a non-edge coverage difference that M1 cannot fix (M2 brings textures).
+    They are therefore **excluded on both sides** of a C3D check: `FilterRasterizer` gets a flag
+    `c3d_only` (set only for C3D checks) that drops the primitives a pure `c3d_supports()` (M1:
+    walls, opaque) rejects, so a level with a grate keeps its walls check; the DIFF line counts them
+    (`excluded=N`). Excluded is not unsupported: only primitives of a class the filter passes are
+    tested, and only C3D checks exclude.
+  - *Polygon acceptance* (2.1, mirrored from SW so that C3D never draws what SW skips): a vertex
+    outside `[0, w] × [0, h]` (`scottish_textures.cpp`:449-456), `min x == max x` (:459), or a walk
+    that `build_y_table` refuses (negative dx on the clockwise walk from the leftmost vertex or on the
+    counter-clockwise one, :479-505, `build_y_table` returns NULL at :1288) → the polygon is skipped
+    (not unsupported); a non-positive signed area in y-down screen space is skipped too (SW then
+    has `y1 < y0` in every column and writes nothing, `low_level_textures.h`:322-326). The pure test
+    is in `core/geometry.cpp`, host-tested against a transliteration of those lines.
+  - *Coverage rule check (why 8.3's "0 outside the band" is reachable).* `build_y_table`'s
+    x-dominant walk (`scottish_textures.cpp`:1262-1270) records, for column `k`, `y0 + ceil(s·(k+½) −
+    ½)` (`d` starts at `adx − ady` and gains `−2·ady` per column, `+2·adx` per step down): the
+    line sampled at the **column centre**, and rows `[y0(x), y1(x))` are written
+    (`low_level_textures.h`:322-326). That is the GPU's pixel-centre rule; the two differ only on
+    exact ties (the line through a pixel centre; PICA's tie rule is UNVERIFIED) and by the
+    rasteriser's sub-pixel precision, both inside the edge band. The y-dominant walk (:1274-1281) is
+    the same midpoint form. No half-pixel offset is applied to positions.
+  - *Vertex data and the shader.* 2.1's 32-byte vertex: `(sx, sy, w)` float3, texcoord0/1 float2
+    each (constant 0 in M1), colour ubyte4. `w` per 2.2's wall row, evaluated at the vertex's
+    integer `sx` (SW evaluates `world_x` at the column `x0 − hw`, `scottish_textures.cpp`:906, 916-954;
+    the ½-pixel question is M2's, with the texcoords), `|w|` as SW (:954), clamped to `[16, 32767]`
+    (2.3), denominator 0 → SW's guard (:943, 950). `shaders/world.v.pica` exactly as 2.1, assembled
+    into **its own** shader library and embedded binary (`a1_c3d_world_shaders`,
+    `a1_c3d_world_shbin.h`), so the present's shbin and its `DVLE[0]` (`present.cpp`:431, `view.cpp`
+    `find_projection_location`) do not change. Colour: a hash of `ShapeDesc` to RGB, alpha 0xFF,
+    via TEV stage 0 = `GPU_PRIMARY_COLOR`, `GPU_REPLACE`, RGB and alpha (`texenv.h`). GPU state per
+    2.4's "World draws" column (cull none, depth off, stencil off, alpha test `GEQUAL 128`, blend
+    `ONE, ZERO`), projection `Mtx_Ortho(0, w, h, 0, 0, 1, true)` (M0's calibrated value).
+  - *State save and restore around a view frame* (the present sets only its own state again before
+    each draw, M0 block "State hygiene"). M0 restored the BufInfo; M1 also changes the **program** and
+    the **AttrInfo**, which the present sets once at init (`present.cpp`:432, 435-438) and never
+    again. AttrInfo: copy `*C3D_GetAttrInfo()`, restore with `C3D_SetAttrInfo(&saved)` — copy
+    semantics VERIFIED (libcitro3d.a 1.7.1 `attribs.o` `C3D_SetAttrInfo`+0x14-0x48: 24 bytes copied
+    into the context at +0x28, dirty bit 4 set; a no-op when the context is inactive). Program:
+    citro3d has no getter and `present.cpp`'s `s_program` is in an anonymous namespace (:65, :100),
+    and `present.cpp` is not edited (plan B-b), so `-Wl,--wrap=C3D_BindProgram` (the
+    `--wrap=gfxExit` pattern, `CMakeLists.txt`:363-365) records the last program bound in
+    `back/context.cpp` and calls the real one (`base.o` `C3D_BindProgram`: stores the pointer at
+    context +0x24 and sets dirty bits, +0x10-0x44; with different code it also sets the re-upload
+    flags, +0x7c-0xa8, and reloads the bound shader's constants, `C3Di_LoadShaderUniforms`, so the
+    world shader's `.constf` cannot leak into the present's registers). **`back/draw.cpp` binds
+    through `__real_C3D_BindProgram` only** (both the world program and the restore), so the record
+    always holds the program bound by everyone else, i.e. the present's (revise 1, critic finding
+    2: through the wrapper the "recorded" program would be the world program, and nothing would show
+    it: the present's z = 0.5 makes the world shader give the same NDC, and its TEV reads only texture
+    0). The save happens **before** any bind of the view frame. Testable: the wrapper logs the first
+    pointer it records (`present_init`) and counts later binds; after every restore `draw.cpp` checks
+    that the recorded pointer is the one it re-bound and counts `prog_restore_mismatch` (in the
+    `[c3d] cmdbuf` line; must be 0). The re-bind makes citro3d upload the present's shader at the
+    present's next draw (dirty flags): more command words in that present frame, measured below.
+    The world program is created at the first C3D view frame and freed by `draw_free()` after
+    `C3D_Fini` (the abandon path skips it, as it skips `present_free()`). TEV stages 1-5,
+    `C3D_TexBind(0)` and the viewport (set by `C3D_FrameDrawOn`) are not touched.
+  - *Back end* (`back/draw.cpp` behind a plain `back/draw.h`; the view target and readback move from
+    `view.cpp`'s calibration into shared `view.cpp` functions used by both). Per C3D view frame:
+    `is_up()`, `release_pending()` and the gate checked first as M0, and a view size the readback
+    does not support (`view.cpp`:40-41, multiples of 8, ≤ 1 024 per side, ≤ 262 144 pixels) → the
+    check is **skipped** (`skipped (down|gate|size)`, not a discard: nothing was drawn; revise 1,
+    critic finding 8); target create/resize **out of frame** (M0 `ensure_resources`); the staging is
+    filled with a per-frame sentinel and flushed before the frame, as M0's calibration does
+    (`view.cpp`:254-262), so a pixel the transfer never wrote is recognisable (counted as
+    `sentinel=N` on the DIFF line, must be 0; the colour hash never produces the sentinel's RGB)
+    and no dirty line is written back over the GPU's output; `frame_begin()` (return checked: not
+    `Ok` → discard `begin`); `gx_op` clear to `0x00000000` (`C3D_RenderTargetClear`,
+    `renderqueue.h`:72) — **only before the first draw**: `C3D_FrameBufClear` calls
+    `GX_MemoryFill` directly without a split (`framebuffer.o`), so a clear after draws would run before
+    them; `C3D_FrameDrawOn`; **save** BufInfo/AttrInfo/the recorded program; then bind the world
+    program (`__real_C3D_BindProgram`), AttrInfo, BufInfo and state; per primitive: append its vertices to
+    the **current ring half** and its fan indices (`3(n−2)`) to the index half; consecutive polygons
+    with an equal key (M0's null-mode key: class, texture, shading tables, transfer mode and data,
+    `_SHADELESS_BIT`; so M1's draw count is what M2 will see) merge into one
+    `C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, idx)` (`base.h`:24); a half that
+    cannot take the polygon → discard `ring`. Before **every** draw and before the readback, the
+    command-buffer reserve (2.4): `gpuCmdBufSize − gpuCmdBufOffset ≥ kDrawReserveWords +
+    kEndReserveWords` (`gpu.h`:13-15; a split shrinks the size and zeroes the offset, so the
+    difference is the space left), else discard `cmdbuf`. After the last draw: restore program,
+    AttrInfo, BufInfo; **one ranged `GSPGPU_FlushDataCache` each of exactly the vertex and index
+    bytes written** this frame (before the split below; the GPU runs nothing before `C3D_FrameEnd`,
+    0.3) — on **every** path that issued at least one draw, the discard path included: the draws
+    issued before a discard still run at `C3D_FrameEnd(GX_CMDLIST_FLUSH)`, which skips the whole-heap
+    flush (0.3; revise 1, critic finding 4); then M0's readback sequence unchanged:
+    `gx_op(C3D_FrameSplit(GX_CMDLIST_FLUSH))`, `gx_op`
+    in-frame `C3D_SyncDisplayTransfer`, `frame_end(0, false, FrameKind::View)`, the empty
+    `frame_begin()`/`frame_end()` retirement pair, `GSPGPU_InvalidateDataCache`, conversion. A refused
+    `gx_op` → discard `gx`. A discarded frame still restores the state, flushes the ring bytes it
+    wrote and ends normally; no readback. Vertex/index addressing (revise 1, critic finding 10):
+    `BufInfo_Init` (base `0x18000000`) and `BufInfo_Add` of the **current half's** vertex start, so
+    fan indices are relative to that half (0-based per half); the index ring is linear memory, whose
+    physical address must lie above the BufInfo base and within the 28-bit offset `C3D_DrawElements`
+    writes unchecked (`drawElements.o` +0x18-0x30: below the base it silently draws nothing):
+    checked once at allocation (logged; failure = the C3D side off for the run) — and the same
+    physical-range check for **both halves of the vertex ring** (the attribute offset register is 28
+    bits too; New 3DS FCRAM above `0x28000000` lies ≥ `0x10000000` past the base), and
+    `BufInfo_Add`'s return checked every frame (`buffers.o` +0x18-0x38: below the base it returns −2
+    with a half-built slot; < 0 → the C3D side off for the run; round 2, critic finding 3).
+    Halves alternate per view frame (M1 retires every view frame before returning, so one half would
+    do; the second is M6's frame in flight, 9.2). Rings, the world program and the staging are
+    allocated at the first C3D view frame (diff runs only) and freed by `draw_free()` / `view_free()`
+    in `release_and_fini()` after `C3D_Fini`.
+  - *The alpha-keeping readback* (8.1; carried from M0). Side B is converted with
+    `rgba_to_argb_keep(rgba) = (rgba >> 8) | (rgba << 24)` (`core/calibrate.h`, beside M0's forcing
+    `rgba_to_argb`), so B's coverage is alpha ≠ 0 and `Coverage::TopByte` applies to both sides. The
+    calibration (`readback_cal`) gains an **alpha check**: a fifth 16x16 quad at the top centre
+    (`x ∈ [w/2 − 8, w/2 + 8)`, `y ∈ [0, 16)`), ARGB `0x80206090`, drawn with blend `ONE, ZERO`; the
+    calibration converts with the keeping form; the full-image check expects alpha 0xFF everywhere
+    except that quad (alpha 0x80, RGB as drawn), placed by the detected orientation (rows flipped →
+    bottom centre). The calibration line and summary gain `alpha ok|NO` / `alpha ok N`; all of M0's
+    other figures are unchanged, so the M0 configs re-run as they are.
+  - *GX queue* (2.4, the M0 nit). `GxQueue` charges the flushing split **exactly 1** (it is one queue
+    entry; the following transfer then finds an empty buffer and costs 1): a C3D view frame takes
+    clear 1 + split 1 + transfer 1 = **3** entries; `C3D_FrameEnd` adds **none** when the buffer is
+    empty, as it is after the in-frame transfer (`renderqueue.o` `C3D_FrameEnd`+0x134-0x144:
+    `C3Di_SplitFrame` returns 0), so `GxQueue::end_frame`'s `kFrameEndEntries` 1 is margin there
+    (kept: conservative); the retirement pair 0-1. Host test updated. Hence `gxq_budget 4` must pass
+    with **no** discard and `gxq_budget 2` must refuse the readback (discard `gx`, SW for that check)
+    without a crash; both are run.
+  - *Reserves and the command buffer, measured* (2.4; revise 1, critic finding 1). `C3D_FrameEnd`
+    zeroes `gpuCmdBuf`, `gpuCmdBufSize` and `gpuCmdBufOffset` (`renderqueue.o`
+    `C3D_FrameEnd`+0x44-0x5c), and `C3D_GetCmdBufUsage()` returns a context field written only in
+    `C3Di_SplitFrame` (+0x3c-0x6c: the end of the last split relative to the buffer start), so every
+    measurement is taken **inside the frame**, where the globals are valid. The write position `P =
+    gpuCmdBuf + gpuCmdBufOffset` (a split advances `gpuCmdBuf`, 0.3, so `P` only grows within a frame)
+    is read: right after `frame_begin()` returned (`P0`, the rewound buffer start); before and after
+    every draw call (words per draw, citro3d's lazy state flush included); after the last draw and
+    after the flushing `C3D_FrameSplit` + the transfer (the readback's words); and **right before**
+    `C3D_FrameEnd` in `frame_end()` (`P1`; `P1 − P0` = the frame's words before its end, per frame
+    kind: view frames and present frames, the latter including the shader re-upload after a view
+    frame). `C3D_FrameEnd`'s own words matter only where the buffer is not empty at it (the discard
+    path, and presents that drew): they are `lroundf(C3D_GetCmdBufUsage() × size) − (P1 − P0)` read
+    **after** `C3D_FrameEnd`, **only if `gpuCmdBufOffset != 0` at `P1`** (round 2, critic finding 2:
+    with an empty buffer `C3D_FrameEnd` does not split, `renderqueue.o` +0x13c-0x144, and the usage is
+    a stale value from an earlier frame; then 0 is recorded: two_frame's frame U, gate-closed and
+    `close_frame` presents, calibrate presents, a view frame discarded before its first draw); `size`
+    = the `C3D_Init` size in words; the validity flag is an input of the host-tested `core/` function. End reserve = max(readback words, `C3D_FrameEnd`'s words on a discard path).
+    The arithmetic is a pure `core/` function, host-tested. Max of each, plus the max
+    `C3D_GetCmdBufUsage()` read after each `C3D_FrameEnd`, in a `[c3d] cmdbuf …` line once a second
+    (with draws, polygons, vertices, indices, ring high-water per half, discards and skips by reason,
+    `prog_restore_mismatch`) and at release/exit. `kDrawReserveWords` / `kEndReserveWords` start at
+    1 024 and are set to **2 × the measured worst case** over the acceptance runs; `C3D_Init` stays
+    512 KiB unless the max usage asks for more (deterministic: authoritative in Azahar).
+    **Discard tests** (critic finding 7): `cmdbuf_kib 32` must run without a crash (recorded whether
+    or not it discards: a walls-only view frame may need well under 8 192 words); the `cmdbuf` discard
+    itself is forced deterministically by a test key **`reserve_extra N`** (0..1 000 000 words, default
+    0, added to the reserve test), run at a value that refuses the first draw of every view frame and
+    at one that refuses mid-frame (after some draws: exercises the discard-path ring flush).
+  - *Ring sizes, measured first* (carried from M0). Before the defaults are fixed: `mode null` over
+    the menu demo (script 12; done 2026-10-27 on the M0 build: 4 580 frames, V max 374, I max 582,
+    below the bench's 387 / 597) and over the film (below), added to M0's three bench views; defaults =
+    2 × the max `V` / `I` over all five, rounded up to 1 024, per half. Ring high-water logged as
+    above; a `ring_vertices 64` run must discard `ring` and fall back without a crash.
+  - *Diff line and tolerance* (8.3, walls flat). Every DIFF line gains ` band=N` (A's edge-band
+    pixels, `core/diff.cpp`) and, on C3D checks, ` b=c3d excluded=N`. Walls flat (8.3): **coverage
+    only**, the colour figures of a C3D walls check are meaningless (flat colour vs texture) and are
+    not judged. Pass: `cov_mismatch` non-edge **0** in every check, and edge mismatches **≤ 2 % of
+    the band** summed over the run's walls checks (per-check worst ratio logged, informative).
+    `c3d-diff.py log LOG --coverage CLASS[,CLASS] --band-pct 2 --min-checks N` checks exactly that,
+    also failing on a missing summary, a dropped frame, a discarded check of a listed class, a
+    `sentinel` > 0, or fewer than N **compared** checks of a listed class (so skipped checks, e.g.
+    citro3d not up yet when a film reaches its first diff frames, can neither fail nor pass a run
+    silently; `skipped` lines are tabulated by reason); `--expect-zero` (M0's SW-vs-SW test) keeps
+    its meaning and skips `b=c3d` lines.
+  - *Film* (`debug-c3d film PATH`). `a1_3ds::boot_begin(int&, char**&)` (`a1_3ds_platform.cpp`:1034,
+    port code, called before `shell_options.parse`, `main.cpp`:15, 45) asks a new
+    `a1_c3d_boot_film()` (`a1_c3d_port.h`, defined in `back/context.cpp`; it loads `debug-c3d`, which
+    so happens earlier than today, after `boot_begin` registers its `atexit` handlers, so the summary
+    handler still runs before `close_outputs`) and, if the file exists, appends its absolute path to
+    argv (static storage), under `#ifdef A1_RENDER_C3D`. `shell_options.parse` puts an existing
+    non-option path into `shell_options.files` (`shell_options.cpp`:176-189) and `main.cpp`:60-66
+    calls `handle_open_document()` on it (`shell.cpp`:190, `_typecode_film` by the `.filA`
+    extension, `FileHandler.cpp`:584, 606-617), i.e. the upstream command-line film path, as
+    `replay_film_test.cpp`:68. A missing file is logged (`[c3d] film: … not found`) and **not**
+    appended (`shell_options` would `exit(1)` on an unknown argument). **To the card:**
+    `run-azahar.sh --film FILE` copies FILE to `sdmc:/3ds/alephone/c3d-film.filA` (removed
+    otherwise) and the configs say `film c3d-film.filA`; on the console `sd-ftp.sh IP put`. Films
+    must match the scenario's maps (the Tooncinator films are Marathon 2's). First film:
+    `M2 L01 Waterloo Waterpark.46857.filA`; 200 diff frames at `diff 2`.
+  - *Zones* (`a1_3ds_profile.h`, `profile_3ds.cpp`, `perf-table.py`): new **`c3d_draw`** (the C3D
+    side's replay through `C3dRasterizer` and the back end's draw submission, ring writes and flush;
+    nested in `c3d_diff`); `c3d_readback` and `c3d_wait` as M0. Diff frames are not benchmark frames.
+  - *Configs* (`scripts/3ds/tests/c3d/`): `m1-diff-walls.cfg` (`renderer c3d`, `diff 1`,
+    `diff_frames 20`, `classes walls`, `dump 1`), `m1-film.cfg` (the same with `diff 2`,
+    `diff_frames 200`, `film c3d-film.filA`), `m1-null-ring.cfg` (`mode null`, with `--script` 12 or
+    `film`), `m1-cmdbuf32.cfg`, `m1-gxq4.cfg`, `m1-gxq2.cfg`, `m1-ring-small.cfg`,
+    `m1-reserve-first.cfg` and `m1-reserve-mid.cfg` (`reserve_extra`, values set from the measured
+    words: the first refuses the first draw, the second a later one).
+  - *Host tests* (8.4). **w** (revise 1, critic finding 3; a tolerance change, so recorded in the
+    Review log and reported to the user): SW's own `world_x` is not exact. After the shifts at
+    `scottish_textures.cpp`:933-939 the numerator is cut to [16 384, 32 767] and the denominator
+    truncated with it, so `tx` carries a relative error up to about `t/16 384` before cancellation;
+    the critic's transliteration put 90 of 46 267 random samples outside `max(1e-3·sw, 2)` (worst 9 %)
+    at `|o| ≤ 12 000`, `t ≤ 8`, and 23 % at wider ranges. So three gates over generated walls and
+    columns (`wx` 160-320 for a 400-px view, `|o| ≤ 40 000`, `t ≤ 64`), **restricted to SW's domain**
+    (round 2, critic finding 1): `scottish_textures.cpp`:954 computes `int32(1LL·tx·v.i) >> 16`, which
+    wraps once `|tx·v.i| ≥ 2³¹`, so samples with `|tx·v.i| ≥ 2³¹` or `|o.x + t·v.i| > 32 767` are
+    excluded and **counted** (printed). The gates compare the **unclamped** `w`; 2.3's clamp to
+    `[16, 32767]` is tested on its own. (a) the **accuracy gate**: the float `w` vs a double-precision
+    evaluation of 2.2's formula, `|w_f − w_d| ≤ 1e-4·|w_d| + 0.05` everywhere (the absolute term
+    covers cancellation near `w ≈ 0`, below the clamp); (b) the kickoff's **rel ≤ 1e-3 vs SW `world_x`** on every sample where SW's own
+    quantisation bound `q = 1 + |v.i|·(|t|·(1/|n_r| + 1/|d_r|) + 2⁻¹⁶)` (`n_r`, `d_r` the shifted
+    numerator and denominator of :933-944) is ≤ 0.5e-3 · sw, i.e. where SW is precise enough to judge;
+    (c) `|w − sw| ≤ q + |w_f − w_d|` on every other sample (the float error budgeted). The test prints how many samples each gate judged.
+    **Coverage model** (critic finding 9): on generated convex polygons (3-8 vertices, integer, in a
+    400x240 view, both windings, degenerate ones included) the SW coverage transliterated in full
+    (acceptance tests :449-505, both `build_y_table` walks, rows `[y0(x), y1(x))` per column of
+    `low_level_textures.h`:322-326) vs `core/geometry`'s acceptance test plus an ideal pixel-centre
+    rasterisation of the fan: identical except pixels whose centre lies exactly on an edge (counted
+    apart; the PICA tie rule is UNVERIFIED). Also: fan indices; the batching key; `rgba_to_argb_keep`;
+    the calibration with the alpha quad (all four orientations); `GxQueue` with the split at 1 and a
+    runtime budget; the new keys including `film` with spaces and a `#`, `reserve_extra`; the
+    command-buffer arithmetic of the measurement bullet.
+  - *Accept* (Azahar, non-authoritative except the deterministic counts): `m1-diff-walls.cfg` on
+    L0/L6/L20 (perf runs, `--min-checks 20`) and `m1-film.cfg` (`--min-checks 200`): 0 non-edge,
+    ≤ 2 % band, 0 discards, `sentinel` 0, 0 ring overflows (`c3d-diff.py --coverage walls`); the
+    `[c3d] cmdbuf` maxima recorded and the reserves set to 2 ×; `prog_restore_mismatch` 0;
+    `cmdbuf_kib 32` (no crash; discards recorded), `gxq_budget 4` (no discard), `gxq_budget 2`,
+    `ring_vertices 64` and both `reserve_extra` configs (discards of the expected reason, SW fallback,
+    no crash, no guest fault); M0's two calibration configs
+    30/30 with `alpha ok 30`; P1 scripts 07, 08, 13, 14, 22 as in M0; the OFF builds' `objdump -d`
+    unchanged and `nm` clean.
+  - *Not in M1:* textures, floors, sprites, play-mode C3D frames, the "10 discards in a row" rule
+    (play mode, M4), any engine edit.
 
 ### M2 — textured walls and floors (full bright), texture cache v1
 - Add: `core/tex_convert.cpp`, `core/tiling.cpp`, `back/texcache.cpp` (3.3);
@@ -2712,3 +2971,58 @@ in order by every replay. (3) The copy is taken before forwarding; replays hand 
 end of the traversal. (5) Null mode is benchmark-only (its second traversal shifts `rand()`).
 Console items carried: readback orientation/flags; no top-screen swap from a view frame; the
 out-of-frame transfer waits for its own completion; whether `C3D_SetBufInfo` copies its argument.
+
+### M1 pre-implementation (coordinator, 2026-10-27)
+
+M1's five lines were written before M0. Checked against the code (`fc4e1e493`), with the result in
+section 7's "M1 specification" block: (1) the present binds its program and AttrInfo once
+(`present.cpp`:432, 435-438) and its program is private, so a world shader needs
+`--wrap=C3D_BindProgram` to restore it (and `C3D_SetAttrInfo` copies: verified); (2) transparent
+walls cannot pass a flat coverage test (SW leaves holes), so C3D checks exclude them on both sides,
+counted; (3) `build_y_table` samples edges at column centres, the GPU's rule, so "0 outside the band"
+needs no position offset; (4) with the split charged 1, a view frame takes 3 queue entries (clear, split, transfer;
+corrected in round 1), so `gxq_budget 4` cannot show a refusal: `gxq_budget 2` is added; (5) `cmdbuf_kib 32` may be enough for
+a walls-only frame: 16 is the fallback value, and smaller is refused (the present checks no reserve);
+(6) the film enters through `boot_begin`'s argv (by reference) and the upstream command-line path,
+no engine edit; (7) "≤ 2 % inside the band" needs the band size: the DIFF line gains `band=`;
+(8) the world shader gets its own shbin so the present's `DVLE[0]` is unchanged.
+
+### M1 pre-implementation, round 1 (critic: REVISE, 3 major, 7 minor)
+
+1. **Command-buffer measurements read zeroed globals — accepted.** `C3D_FrameEnd` zeroes
+   `gpuCmdBuf/Size/Offset` and `C3D_GetCmdBufUsage()` is written only by a split; every measurement is
+   now taken inside the frame (`P0` after `frame_begin`, around draws, before `C3D_FrameEnd`), and
+   `C3D_FrameEnd`'s own words from the usage after it where its split ran on a non-empty buffer.
+2. **The program restore would re-bind the world program — accepted.** `draw.cpp` binds through
+   `__real_C3D_BindProgram`; save before any bind; `prog_restore_mismatch` counted, must be 0.
+3. **w tolerance — accepted; a tolerance change (reported to the user).** SW's `world_x` carries a
+   relative error up to about `t/16 384` (`scottish_textures.cpp`:933-939), so `max(1e-3·sw, 2)`
+   fails on 0.2-23 % of honest samples. Gates: float vs double rel ≤ 1e-4 everywhere; the kickoff's
+   rel ≤ 1e-3 vs SW where SW's own quantisation bound is ≤ 0.5e-3·sw; elsewhere within that bound.
+4. **Discard path flushes the ring bytes it wrote — accepted.** 5. **Staging sentinel and flush kept
+   for diff frames, `sentinel=N` on the line — accepted.** 6. **`C3D_FrameEnd` adds no queue entry on
+   an empty buffer (3 entries per view frame); clear only before the first draw — accepted.**
+7. **A deterministic `cmdbuf` discard — accepted:** `reserve_extra N`, two configs.
+8. **Skipped checks (`down|gate|size`) apart from discards, `--min-checks` — accepted.**
+9. **Coverage-model host test (full SW per-column coverage vs acceptance + pixel-centre fan) —
+   accepted.** 10. **Indices relative to the current half's `BufInfo_Add` base, physical range checked
+   at allocation — accepted.**
+Console items: PICA's tie rule and float24 near ties (inside the band); readback orientation/flags
+(M0); the present's shader re-upload words after a view frame (deterministic, Azahar suffices).
+
+### M1 pre-implementation, round 2 (critic: REVISE, 1 major, 3 minor; applied as prescribed)
+
+Round 1's findings 1, 2 and 4-10 resolved; the scheme of finding 1 verified (`C3D_FrameBegin`+0x78-0x9c
+and `C3Di_SplitFrame`+0x3c-0x6c share the base, `GPUCMD_Split` keeps `size − offset` the space left).
+The second round is the last (kickoff: max 2), so its fixes were applied by the coordinator exactly as
+the critic prescribed, and are re-checked in the critic's review of the M1 commit:
+(1, major) the w gates: samples restricted to SW's domain (`|tx·v.i| < 2³¹`, `|world_x| ≤ 32 767`),
+excluded ones counted; unclamped w compared, clamp tested apart; gate (a) gains an absolute 0.05 term;
+gate (c) budgets the float error. (2) `C3D_FrameEnd`'s words only when `gpuCmdBufOffset != 0` before
+it, `lroundf`. (3) the vertex ring halves get the physical-range check and `BufInfo_Add`'s return is
+checked. (4) the coordinator entry's "4 entries" corrected to 3.
+**Superseded kickoff bullets** (`KICKOFF_M1.md` "Accept"): `gxq_budget 4` now must pass *without*
+a discard (a view frame takes 3 entries) and `gxq_budget 2` is the refusal test; `cmdbuf_kib 32`
+must run without a crash, discards recorded, and the deterministic `cmdbuf` discard comes from
+`reserve_extra`; the w host test's plain rel ≤ 1e-3 holds only where SW's own quantisation allows
+judging it (gates (a)-(c)). These three changes are to be reported to the user.
