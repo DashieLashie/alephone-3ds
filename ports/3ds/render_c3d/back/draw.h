@@ -26,7 +26,8 @@ namespace a1_c3d {
 namespace back {
 
 // Nothing was drawn and nothing is open: the check is "skipped (down|gate|size)". Down also covers a
-// release pending, citro3d off for the run (a failed ring or BufInfo check) and out of memory.
+// release pending and citro3d off for the run (a failed ring or BufInfo check); Size also covers no memory
+// for the view target and staging (view_ensure).
 enum class SkipReason : uint8_t { Down, Gate, Size, kCount };
 // The frame was started and is given up: no more draws, C3D_FrameEnd normally, no readback. The check
 // is "discarded (unsupported|ring|cmdbuf|gx|begin)" and not compared.

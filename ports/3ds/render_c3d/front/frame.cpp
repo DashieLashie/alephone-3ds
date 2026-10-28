@@ -227,7 +227,27 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 	FilterRasterizer fa(sw, c, cfg.fullbright, true);
 	s_recorder.replay(&fa);
 
-	const back::ViewBegin vb = back::view_begin(w, h);
+	// Zone c3d_draw (design 7, M1 "Zones"): the C3D side from view_begin to view_end, the front end's
+	// replay through C3dRasterizer included; the readback and its retirement wait inside view_end are
+	// timed in the nested c3d_readback / c3d_wait. One scope per check, none per polygon.
+	back::ViewBegin vb;
+	back::ViewEnd ve{false, back::DiscardReason::Begin};
+	unsigned sentinel = 0;
+	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dDraw);
+#endif
+		vb = back::view_begin(w, h);
+		if (vb.kind == back::ViewBegin::Kind::Ok)
+		{
+			texture_random_seed() = s0;
+			s_b.clear(0);
+			s_c3d_rast.set_target(w, h);
+			FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true);
+			s_recorder.replay(&fb);
+			ve = back::view_end(s_b.pixels.data(), s_b.w, &sentinel);
+		}
+	}
 	++s_diff_checks;
 	if (vb.kind == back::ViewBegin::Kind::Skipped)
 	{
@@ -242,13 +262,6 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 		return;
 	}
 
-	texture_random_seed() = s0;
-	s_b.clear(0);
-	s_c3d_rast.set_target(w, h);
-	FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true);
-	s_recorder.replay(&fb);
-	unsigned sentinel = 0;
-	const back::ViewEnd ve = back::view_end(s_b.pixels.data(), s_b.w, &sentinel);
 	s_c3d_drawn += s_c3d_rast.drawn();
 	for (int i = 1; i < 5; ++i)
 		s_c3d_accept_skips[i] += s_c3d_rast.skipped(static_cast<Accept>(i));

@@ -151,9 +151,19 @@ bool world_init()
 	AttrInfo_AddLoader(&s_attr, 1, GPU_FLOAT, 2);
 	AttrInfo_AddLoader(&s_attr, 2, GPU_FLOAT, 2);
 	AttrInfo_AddLoader(&s_attr, 3, GPU_UNSIGNED_BYTE, 4);
+	printf("[c3d] draw: world program %s (uniforms proj %d, stereo %d)\n", s_uloc_proj >= 0 ? "ready" : "unusable",
+	       s_uloc_proj, s_uloc_stereo);
+	if (s_uloc_proj < 0)
+	{
+		// Without the projection uniform nothing can be placed: freed now, so a later call starts afresh
+		// and draw_free() has nothing to free.
+		shaderProgramFree(&s_prog);
+		DVLB_Free(s_dvlb);
+		s_dvlb = nullptr;
+		return false;
+	}
 	s_prog_ready = true;
-	printf("[c3d] draw: world program ready (uniforms proj %d, stereo %d)\n", s_uloc_proj, s_uloc_stereo);
-	return s_uloc_proj >= 0;
+	return true;
 }
 
 // Both rings, at the first view frame: 2 halves of ring_vertices vertices (32 B) and ring_indices u16
@@ -357,9 +367,6 @@ ViewBegin view_begin(int w, int h)
 		return discarded_at_begin(DiscardReason::Begin);
 	s_f.open = true;
 
-#ifdef A1_PROFILE
-	A1_PROF_SCOPE(C3dDraw);
-#endif
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
 	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered".
 	if (!view_clear_target(0x00000000u))
@@ -412,9 +419,6 @@ bool view_polygon(const Vertex* v, int n, const DrawKey& key)
 {
 	if (!s_f.open || s_f.discarded)
 		return false;
-#ifdef A1_PROFILE
-	A1_PROF_SCOPE(C3dDraw);
-#endif
 	if (n < 3 || n > kMaxPolygonVertices)
 	{
 		discard(DiscardReason::Unsupported);
@@ -460,9 +464,6 @@ ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count)
 	if (!s_f.open)
 		return ViewEnd{false, DiscardReason::Begin};
 	{
-#ifdef A1_PROFILE
-		A1_PROF_SCOPE(C3dDraw);
-#endif
 		issue_pending();
 		restore_state();
 		// On every path that wrote anything, the discard path included: the draws issued before a discard
