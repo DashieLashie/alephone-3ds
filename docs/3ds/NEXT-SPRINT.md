@@ -1404,6 +1404,49 @@ the draw segment ran unflushed, design 0.3 "`C3D_FrameSplit(GX_CMDLIST_FLUSH)`" 
 fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at 0x28), stop.
 
 
+## M1 console check, short version (15-20 min; when the user has little time)
+
+**Not run yet.** Written 2026-10-27 (user's choice: start M2, defer the full check below). Two launches
+that settle what M2's texture uploads would otherwise build on blind: the readback on hardware, the GPU
+sync and cache order (Azahar completes transfers synchronously and has no CPU cache), and the ring
+buffers' physical addresses. **Run it before M2's texture upload code is written.** The rest of the full
+runbook below (Classic, `R`, the present check, the discard paths, L6/L20) waits for a longer session.
+
+**Needs:** the console on Wi-Fi, ftpd for two card files, then the Homebrew Launcher's netloader (Y)
+for each launch; the Mac side as in "How to drive the console". The console's preferences are left as
+they are, but the game must be in **HUD + Map** (Bottom Screen setting, the default).
+**Mac setup** (once): `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw; mkdir -p $H/m1`;
+`sed 's#build-3ds/hw/g0b/#build-3ds/hw/m1/#' $H/g0b/run.sh > $H/m1/run.sh; chmod +x $H/m1/run.sh`
+(it sends to 192.168.100.72; edit if the IP changed); `cmake --build build-3ds-c3d-prof` in the
+`stage10-c3d` worktree (tag `port-stage10-M1` or later; nothing to do / 0 warnings); kill stale 3dslink
+(`pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`).
+
+**1. Readback calibration** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf`
+and `scripts/3ds/tests/c3d/m0-readback-cal.cfg` as `/3ds/alephone/debug-c3d`. Close ftpd, Y in the
+launcher, `$H/m1/run.sh build-3ds-c3d-prof m1s-cal`; the user presses A twice (BEGIN NEW GAME); the
+game quits by itself after the BENCH line. **Pass:** `grep -a "readback_cal summary" $H/m1/m1s-cal.txt`
+shows `30 frames, orientation ok 30, current frame ok 30, channels ok 30, alpha ok 30, mismatched pixels
+0 (sentinel 0), skipped 0`.
+
+**2. Walls diff on L0** (~5 min). ftpd: put `scripts/3ds/tests/c3d/m1-diff-walls.cfg` as
+`/3ds/alephone/debug-c3d` (`debug-perf` stays). Same launch: `$H/m1/run.sh build-3ds-c3d-prof m1s-walls`.
+Then: `python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m1s-walls.txt --coverage walls --band-pct 2 --min-checks 20`.
+**Pass:** exit 0 (20 compared checks, 0 non-edge mismatches, `sentinel=0` everywhere, 0 discards), and
+`grep -a "draw: rings" $H/m1/m1s-walls.txt` ends in `physical range check ... ok`. **Record:** the
+`c3d-diff.py` table with `ties` / `tie_mismatch` (Azahar: 440 / 140; ≈ 0 mismatches would mean the 3DS
+treats pixels exactly on an edge as SW does), and the `[c3d] cmdbuf final` line (Azahar:
+`view_frame_words=952 draw_words=254 readback_words=8`; command words are deterministic, so a
+difference means something real).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf` and `/3ds/alephone/debug-c3d`. Optionally fetch
+`c3d-diff-*-walls-*.bmp` and `c3d-rbcal-*.bmp` into `$H/m1/`. Results to `PERF.md` ("Stage 10 M1 —
+console, short check") and `CITRO3D_DESIGN.md` section 10 item 8.
+
+**Reading a failure:** as the full runbook below ("Reading a failure"): `sentinel > 0` = the CPU read the
+staging before the transfer finished; whole spans missing in the C3D picture = stale ring data (a
+missing flush); rows/columns flipped = the readback orientation (one change in `back/view.cpp`). Any of
+these: record the log and stop; M2's upload code waits for the fix.
+
 ## M1 console check (M0's readback calibration, then M1's walls diff, on hardware; when the user is at the console)
 
 **Not run yet.** Written 2026-10-27 for `port-stage10-M1`. It carries the deferred "M0 console
