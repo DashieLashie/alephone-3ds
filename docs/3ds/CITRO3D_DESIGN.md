@@ -2110,6 +2110,14 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     bullet above.
 
 ### M1 — flat-shaded walls only
+- **Status (2026-10-27): built and accepted in Azahar** (`PERF.md` "Stage 10 M1"; commits `54d1e03c4`,
+  `ac9a0241a`; tag `port-stage10-M1`; critic: APPROVE, six minors, three fixed in revise 1, the others
+  recorded). Walls coverage: 0 non-edge mismatches on L0/L6/L20 × 20 and 200 film frames, every edge
+  mismatch a tie pixel (0.11-0.32 % of the band). **Reserves:** `kDrawReserveWords` 508,
+  `kEndReserveWords` 20 (2 × 254 and 2 × 10 words). **Rings:** 1 024 vertices and 2 048 indices per
+  half, unchanged (re-measured: max V 387, I 597 over five views). **`C3D_Init`:** 512 KiB (worst usage
+  0.82 %). Console: section 10 items 6 and 8 (`NEXT-SPRINT.md` "M1 console check", which carries
+  M0's).
 - Add: `core/geometry.cpp`, `front/rasterizer.cpp` (walls → draw items; others
   `unsupported`), `back/draw.cpp` (rings, batching, reserves 2.4, constant
   colour per `ShapeDesc`); `debug-c3d film` via `handle_open_document()`
@@ -2533,7 +2541,7 @@ hold in every mode with the default caps.
 | command buffer (one buffer, 0.3; 512 default, up to 1 024 by M1) | 512-1 024 |
 | present staging 512x256 RGBA8 (P1 calibration, 5.1) | 512 |
 | zero-copy `main_surface` 512x256 (plan B, 5.7.8; from the first HUD + Map game) | 512 |
-| vertex ring 2 × 1 024 × 32 B (M0: 2 × max 387, rounded up to 1 024) | 64 |
+| vertex ring 2 × 1 024 × 32 B (M0: 2 × max 387, rounded up to 1 024; M1 re-measured over the menu demo and a film: unchanged) | 64 |
 | index ring 2 × 2 048 × 2 B (M0: 2 × max 597) | 8 |
 | readback staging 480x240 | 450 |
 | linear texture pool (cap; holds promotions pending) | 4 096 |
@@ -2586,6 +2594,10 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    bank placement.
 6. TEV, rasteriser and bilinear precision vs Azahar (one `diff 30` run over
    3dslink; M7 SSAA).
+   **M1 (Azahar, 2026-10-27):** walls coverage equals SW's except tie pixels (a centre exactly on an
+   edge), which Azahar leaves out on top edges where SW covers them. On the console: PICA's tie rule
+   from the DIFF lines' `ties` / `tie_mismatch`, and whether float24 positions (clip × w) ever move a
+   non-tie pixel on a shared edge (`NEXT-SPRINT.md` "M1 console check" step 5).
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -2601,6 +2613,10 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    deleted and created every frame, no svcBreak). **Revise 2:** the draws before the in-frame
    transfer are split off with `C3D_FrameSplit(GX_CMDLIST_FLUSH)` (0.3); on the console both
    calibration configs must give `mismatched 0 (sentinel 0)` on all 30 frames.
+   **M1:** the calibration also checks alpha (`alpha ok 30` in Azahar); the walls diff frames are the
+   first readbacks of real draws: on the console `sentinel=0` and 0 non-edge mismatches prove the ring
+   flushes, the flushing split, the retirement and the invalidate (`NEXT-SPRINT.md` "M1 console
+   check").
 9. `C3D_FrameEnd(GX_CMDLIST_FLUSH)` + ranged flushes vs the whole-heap flush.
 10. Level-start hitch with the promotion cap (TextureCopy throughput, PPF
     latency); whether pre-warming is needed.
@@ -3054,3 +3070,18 @@ edge band" assumed ties lie on A's coverage outline. Changed: the band also hold
 every drawn polygon (exact integer test), and ties and tie mismatches are reported apart, so the
 tolerance stays 0 for every non-tie pixel and the console run measures PICA's tie rule. No vertex
 bias (Azahar's rule is not the hardware's, and 1/16-px snapping would defeat a small bias).
+
+### M1 commit review (critic: APPROVE, 0 major, 6 minor; 2026-10-27)
+
+Review of `54d1e03c4`, with round 2's spec fixes re-checked: sync and cache order verified against the
+1.7.1 disassembly (`C3D_FrameBegin(0)` retires the half before ring writes; nothing runs before
+`C3D_FrameEnd`'s `gxCmdQueueRun`, so the ranged ring flush is in time on every path; `C3Di_SplitFrame`
+never calls `C3Di_UpdateContext`, so restoring state before the split adds no shader upload and the
+20-word end reserve holds; `C3D_BindProgram` writes no command words). Minors: (1) acceptance logs
+predated the final constants — the whole set was re-run on `ac9a0241a` (`PERF.md` "Stage 10 M1");
+(2) results not yet recorded — this entry, the M1 status and `PERF.md`; (3) the no-memory skip comment
+— fixed; (4) zone `c3d_draw` per polygon in the back end — one scope per check in `frame.cpp`, front
+end included; (5) `world_init` marked an unusable program ready — freed instead; (6)
+`prog_restore_mismatch` proves little — `m1-present-diff.cfg` (present self-check with walls view
+frames interleaved, scripts 13 and 08: 0 RGB differences) is the recorded evidence. Console items:
+section 10 items 6 and 8, the ring physical-range check on the console, the discard paths on hardware.

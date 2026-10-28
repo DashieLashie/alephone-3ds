@@ -1363,3 +1363,66 @@ and blit work comes first there.
 | `scripts/3ds/tests/perf-bench.sh`, `perf-table.py` (new) | benchmark series and tables |
 | `scripts/3ds/tests/input/11-perf-bench.txt`, `12-sprite-check.txt` (new) | start a benchmark game; capture the demo replay |
 | `scripts/3ds/tests/sdwrite-test/` (new, 2026-10-15) | SD card write speed on the console (`build.sh` → `build/sdwrite-test/sdwrite.3dsx`, run with 3dslink `-s`); "Load times", saves |
+
+## Stage 10 M1: flat-shaded walls (Azahar — non-authoritative)
+
+Recorded 2026-10-27 on `stage10-c3d` (`54d1e03c4` M1, `ac9a0241a` revise 1; tag `port-stage10-M1`).
+Design `CITRO3D_DESIGN.md` section 7 "M1 specification": side B of the diff harness is drawn by
+citro3d — opaque textured walls through `front/c3d_rasterizer` and `back/draw.cpp` into the unlinked
+view target, read back keeping alpha; play frames stay software (M4). No engine edit. Builds
+`build-3ds-c3d(-prof)` 0 warnings; the OFF builds' `objdump -d` is **identical** to the M0 commit's
+(`build-3ds` and `build-3ds-prof`), `nm` finds no citro3d symbol. Host tests: 93 744 checks, 0
+failures. Every run below is on the final binary (`ac9a0241a`, `build-3ds-c3d-prof`), HUD + Map
+400x240, Azahar 2126.2 with the 8.2 settings, runs serialised through the shared card lock.
+
+| Acceptance | Result |
+| --- | --- |
+| `m1-diff-walls.cfg` L0 (`--perf 0`) | 20 compared, cov_mismatch **140 / 0** (edge / non-edge), band 103 878 → 0.135 %; ties 440, tie mismatches 140; `sentinel` 0; 0 discards |
+| same, L6 | 20 compared, **60 / 0**, band 56 180 → 0.107 %; ties 420 / 60; 0 discards |
+| same, L20 | 20 compared, **72 / 0**, band 22 510 → 0.320 %; ties 92 / 72; 0 discards |
+| `m1-film.cfg`, film `M2 L01 Waterloo Waterpark.46857.filA` (`run-azahar.sh --film`) | 200 compared (diff 2 over ~14 000 frames), **1 021 / 0**, band 399 258 → 0.256 % (worst check 1.77 %); ties 2 351 / 1 021; 0 discards, 0 dropped; the film is handed over as `argv[1]` |
+| `c3d-diff.py log … --coverage walls --band-pct 2 --min-checks 20 / 200` | exit 0 on all four |
+| `m1-gxq4.cfg` (`gxq_budget 4`) | 20 compared, 0 discards (a view frame takes 3 queue entries) |
+| `m1-gxq2.cfg` (`gxq_budget 2`) | 20 × `discarded (gx)` (the readback refused), SW fallback, no crash |
+| `m1-ring-small.cfg` (`ring_vertices 64`) | 20 × `discarded (ring)` after 10 draws each (`view_end_words` 8: the discard path's flush and `C3D_FrameEnd`), no crash |
+| `m1-cmdbuf32.cfg` (`cmdbuf_kib 32`, 8 192 words) | no crash, **no discard** (a walls view frame needs ≤ 1 104 words; `usage_max` 0.1162) |
+| `m1-reserve-first.cfg` (`reserve_extra 131072`) | 20 × `discarded (cmdbuf)`, 0 draws |
+| `m1-reserve-mid.cfg` (`reserve_extra 130020`) | 220 draws, then 20 × `discarded (cmdbuf)` (`view_end_words` 10), no crash |
+| `m1-present-diff.cfg` + script 13 / script 08 (walls view frames interleaved with the present) | `present_diff final`: 35 / 112 checks, **0 with RGB differences**; walls 40 compared each, 0 non-edge; `prog_restore_mismatch` 0 |
+| P1 scripts 07 (`p1-diff.cfg`), 14 (`p1-diff.cfg`, `--terminal-test`), 22 (`p1-gpu.cfg`) | 07 to its 150 s timeout, every `present_diff` 0; 14 `present_diff final: 11 checks, 0`; 22 `gate closed`, 2 skipped presents, `release done` (17 704 KiB linear free) |
+| M0 calibration `m0-readback-cal.cfg` / `-resize.cfg` (now with the alpha quad) | `30 frames, orientation ok 30, current frame ok 30, channels ok 30, alpha ok 30, mismatched pixels 0 (sentinel 0), skipped 0`, both |
+
+**Coverage.** 0 non-edge mismatches everywhere, and **every edge mismatch is a tie pixel** (a pixel
+centre exactly on a drawn edge: 140 = 140, 60 = 60, 72 = 72, 1 021 = 1 021): Azahar's GPU excludes
+top-edge ties, SW's midpoint walk includes them. Before tie pixels joined the band (design
+"Implementation notes" (a)), the film run had 1-2 non-edge mismatches on 1-px sliver walls whose tie
+pixel was surrounded by other walls. Apart from ties the C3D wall coverage equals SW's exactly, as
+the host coverage model predicts (16 400 tie pixels, 0 other mismatches). PICA's own tie rule is a
+console item.
+
+**Command buffer** (deterministic, so authoritative in Azahar; `[c3d] cmdbuf final`):
+
+| | L0 | L6 | L20 | film (max) |
+| --- | ---: | ---: | ---: | ---: |
+| words per view frame (`P1 − P0`) | 952 | 1 072 | 564 | 1 072 |
+| words per draw, max (the first draw: world program upload + state) | 254 | 254 | 254 | 254 |
+| readback words (flushing split + transfer) | 8 | 8 | 10 | 10 |
+| `C3D_FrameEnd` words on a view frame (empty buffer) | 0 | 0 | 0 | 0 |
+| words per present frame / its `C3D_FrameEnd` | 286 / 10 | 286 / 10 | 286 / 10 | 286 / 10 |
+| `C3D_GetCmdBufUsage()` max (512 KiB) | 0.0073 | 0.0082 | 0.0043 | 0.0082 |
+| draws / polygons / vertices / indices (20 frames) | 480 / 680 / 2 720 / 4 080 | 560 / 960 / 3 880 / 5 880 | 144 / 263 / 1 110 / 1 752 | 2 050 / 2 698 / 11 053 / 16 971 (200) |
+| ring high-water per half, vertices / indices | 136 / 204 | 194 / 294 | 65 / 99 | 147 / 225 |
+
+Discard path `C3D_FrameEnd` words: 8-10 (`ring-small`, `reserve-mid`). Reserves set to 2 × the worst
+case: **`kDrawReserveWords` 508, `kEndReserveWords` 20**. `C3D_Init` stays **512 KiB** (worst usage
+under 1 %). A present after a view frame re-uploads its shader; the present frame words stayed 286
+(the measured present maximum). Draws per polygon 0.55-0.76 (consecutive equal keys merge more for
+walls than M0's all-class count suggested).
+
+**Ring sizes** (re-measured, carried from M0): `mode null` over the menu demo (script 12, 4 580 frames:
+V max 374 / p99 353, I max 582 / p99 549) and over the film (`m1-null-ring.cfg`, 3 920 frames: V 362 /
+329, I 570 / 510), with M0's bench views (max V 387, I 597): 2 × max rounded up to 1 024 gives
+**1 024 vertices and 2 048 indices per half**, unchanged. Walls alone used at most 194 / 294.
+
+Not measured: time. Diff frames are not benchmark frames (each C3D check waits for its own
+retirement); M1 brings no speedup by design. Classic's world view was not exercised (HUD + Map only).

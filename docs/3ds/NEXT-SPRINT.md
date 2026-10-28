@@ -1144,7 +1144,12 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    non-authoritative): the seam (`PATCHES.md` 45), the record/replay diff harness (SW-vs-SW 0
    differing pixels on L0/L6/L20 and the menu demo), null mode (`R_est` 0.33-0.62 ms, far under
    G2-a's 3 ms), the readback calibration (30/30 ok in Azahar with the design's starting values).
-   **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
+   **M1 done (2026-10-27**, tag `port-stage10-M1`; `PERF.md` "Stage 10 M1", Azahar — non-authoritative):
+   citro3d draws opaque walls on diff frames; coverage equals SW's except tie pixels (0 non-edge
+   mismatches on L0/L6/L20 and 200 film frames); reserves 508 + 20 words; rings and `C3D_Init`
+   unchanged; `debug-c3d film`. **Next: the user's choice: M2 (textured walls and floors, patch 46),
+   or the "M1 console check" first (at the end of this file; it carries the M0 console check).**
+   *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
 
@@ -1357,7 +1362,7 @@ next merge).
 
 ## M0 console check (the readback calibration on hardware; when the user is at the console)
 
-**Not run yet; deferred by the user (2026-10-27), to be folded into M1's console runbook.** Written 2026-10-27. Settles `CITRO3D_DESIGN.md` section 10 item 8 for the
+**Not run yet; deferred by the user (2026-10-27); folded into the "M1 console check" below (its steps 1, 1b, 2, 3), which supersedes this one.** Written 2026-10-27. Settles `CITRO3D_DESIGN.md` section 10 item 8 for the
 renderer's readback (every M1-M5 frame is read back this way) and takes `R` on the console. Driving
 as in "How to drive the console" (ask the IP; ftpd for card files, the Homebrew Launcher netloader
 (Y) for launches). About 6 launches, ~20 min.
@@ -1397,3 +1402,75 @@ NO`: record which `k` the centre shows and the `mismatched N (sentinel S)` count
 had not finished when the CPU read; a missing retirement wait; wrong or missing corners with S = 0:
 the draw segment ran unflushed, design 0.3 "`C3D_FrameSplit(GX_CMDLIST_FLUSH)`" row), stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
 fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at 0x28), stop.
+
+
+## M1 console check (M0's readback calibration, then M1's walls diff, on hardware; when the user is at the console)
+
+**Not run yet.** Written 2026-10-27 for `port-stage10-M1`. It carries the deferred "M0 console
+check" (its steps 1, 1b, 2 and 3 are steps 1-4 here) and adds M1's walls diff. Azahar completes GPU
+transfers synchronously and has no CPU cache, so **this is the first real test of the renderer's sync
+and cache order**: the ring flushes, the flushing `C3D_FrameSplit` before the in-frame readback, the
+retirement wait and the invalidate (`CITRO3D_DESIGN.md` 0.3, 5.2, section 7 M1). Driving as in "How
+to drive the console" (ask the IP; ftpd for card files, the Homebrew Launcher netloader (Y) for
+launches). About 12 launches, ~50 min.
+
+**Builds** (from the `stage10-c3d` worktree at `port-stage10-M1` or later): `build-3ds-c3d-prof` for
+every run. Check first: `cmake --build build-3ds-c3d-prof` (nothing to do / 0 warnings).
+**Setup:** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw`, `mkdir -p $H/m1`, a run helper
+from G0-b's: `sed 's#build-3ds/hw/g0b/#build-3ds/hw/m1/#' $H/g0b/run.sh > $H/m1/run.sh; chmod +x
+$H/m1/run.sh`. Kill stale 3dslink first. ftpd: fetch the user's `Marathon 2 Preferences` into
+`$H/m1/prefs-user` (put back at the end), then `$H/sprint8/setprefs.sh IP 0 30` (HUD + Map @30).
+The config files below are copied to a file named `debug-c3d` (and `debug-perf-L<N>` to
+`debug-perf`) before each put, as in the B-a runbook.
+
+**1. Calibration, HUD + Map (M0 step 1, now with the alpha check).** `debug-perf` = L0, `debug-c3d` =
+`scripts/3ds/tests/c3d/m0-readback-cal.cfg`; `run.sh build-3ds-c3d-prof m1-cal-hm`; the user presses A
+twice; the game quits after the BENCH line. **Pass:** `[c3d] readback_cal summary: 30 frames,
+orientation ok 30, current frame ok 30, channels ok 30, alpha ok 30, mismatched pixels 0 (sentinel
+0), skipped 0`. Fetch `c3d-rbcal-0.bmp` / `c3d-rbcal-29.bmp` into `$H/m1/`.
+**2. The resize path (M0 step 1b):** `debug-c3d` = `m0-readback-cal-resize.cfg`; same pass line; `target
+deleted` / `unlinked RGBA8 target` pairs in the log, no Luma dump.
+**3. Classic (M0 step 2):** `setprefs.sh IP 2 30`, `run.sh build-3ds-c3d-prof m1-cal-cl` with
+`m0-readback-cal.cfg`. Same pass line, or `view: ... is not supported ... calibration skipped` if
+Classic's world view is larger than the readback handles (record which). Then `setprefs.sh IP 0 30`.
+**4. `R` on the console (M0 step 3, optional, 3 runs):** `debug-c3d` = `m0-null.cfg`, `debug-perf-L<N>`
+for N = 0, 6, 20: `run.sh build-3ds-c3d-prof m1-null-L<N>`. `c3d_null` and `render` from the BENCH
+lines (`perf-table.py`); the `[c3d] null` counts must equal Azahar's (`PERF.md` "Stage 10 M0").
+**5. M1 walls diff, L0 / L6 / L20 (3 runs):** `debug-c3d` = `scripts/3ds/tests/c3d/m1-diff-walls.cfg`,
+`debug-perf-L<N>`: `run.sh build-3ds-c3d-prof m1-walls-L<N>`. Then on the Mac:
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m1-walls-L<N>.txt --coverage walls --band-pct 2 --min-checks 20`.
+**Pass:** exit 0, i.e. 20 compared checks, `cov_mismatch` non-edge 0 in every one, edge ≤ 2 % of the
+band, **`sentinel=0`** on every line, 0 discards; `[c3d] cmdbuf final ... prog_restore_mismatch=0`,
+`discards=0/0/0/0/0`. Record per level: the `c3d-diff.py` table, the `ties` / `tie_mismatch` totals
+(Azahar: L0 440 / 140, L6 420 / 60, L20 92 / 72, `PERF.md` "Stage 10 M1"), the `[c3d] cmdbuf final`
+line (command words are deterministic: `draw_words=254`, `view_frame_words` 952 / 1 072 / 564 as in
+Azahar, else record), and the `[c3d] draw: rings: ... physical range check ... ok` line. Fetch
+`c3d-diff-*-walls-{sw,c3d}.bmp` (dump 1) into `$H/m1/`.
+**6. The present after view frames (1 run):** `debug-c3d` = `m1-present-diff.cfg`, no `debug-perf`;
+`run.sh build-3ds-c3d-prof m1-present`; the user waits ~1 minute at the menu demo (or plays a little),
+then HOME > Close. **Pass:** `present_diff final: N checks, 0 with RGB differences` and walls checks as
+in 5 (`c3d-diff.py ... --min-checks 1`); the top screen looks normal throughout.
+**7. Discard paths on hardware (3 runs, L0):** `m1-gxq2.cfg` (20 `discarded (gx)`), `m1-reserve-mid.cfg`
+(draws issued, then 20 `discarded (cmdbuf)`), `m1-ring-small.cfg` (20 `discarded (ring)`). **Pass:**
+the expected discards, the game runs on in SW, no hang, no Luma dump.
+**End:** delete `debug-perf`, `debug-c3d` and the `c3d-*.bmp` from the card; put `$H/m1/prefs-user`
+back. Results go to `PERF.md` (a "Stage 10 M1 — console" section) and `CITRO3D_DESIGN.md` section 10
+items 6 and 8.
+
+**Reading a failure.** Steps 1-3: as the "M0 console check" above (orientation / current frame /
+channels; S > 0 = the transfer had not finished when the CPU read; wrong corners with S = 0 = the draw
+segment ran unflushed). New: `alpha NO` with everything else ok: the readback or the TEV constant
+drops alpha; record the quad's pixels from `c3d-rbcal-0.bmp`, stop. Step 5:
+- `sentinel > 0`: the readback was read before the transfer finished (retirement) — stop, record.
+- non-edge mismatches with B **missing** coverage in whole polygons or spans (compare the BMP pair):
+  the ring bytes were not flushed before the GPU read them (stale vertices/indices) — stop, record
+  the frame and the dumps.
+- non-edge mismatches of single pixels on edges shared by two walls (`tie_mismatch` normal): float24
+  position precision (the shader multiplies clip by w; design 2.1 UNVERIFIED) — record the pixels and
+  the dumps; this is a design question for M2, not a stop.
+- `tie_mismatch` ≈ 0 where Azahar had ~30-60 % of `ties`: PICA's tie rule matches SW's (good news,
+  record it); `tie_mismatch` ≈ Azahar's: PICA excludes top-edge ties as Azahar does. Either way record.
+- `skipped (down)` on every check with `rings: ... physical range check FAILED` in the log: the linear
+  heap sits beyond the 28-bit offsets on this console; record the addresses, stop (a design change).
+- A Luma dump: fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at
+  0x28), stop.
