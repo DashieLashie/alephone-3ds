@@ -5,7 +5,10 @@
 	hard budget. Plain C++, host-testable.
 
 	Cost of one operation: 1 entry, plus 1 more if the frame's command buffer is not
-	empty at the call (citro3d then splits the command list first).
+	empty at the call (citro3d then splits the command list first). The flushing split itself
+	(take_split) is one queue entry, charged exactly 1: the transfer after it finds an empty
+	buffer and costs 1 (M1 specification, "GX queue"). The budget is a runtime value (config
+	gxq_budget), never above kMaxBudget.
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -22,23 +25,23 @@ namespace a1_c3d {
 class GxQueue
 {
 public:
-	static constexpr int kBudget = 24;         // operations; leaves room for C3D_FrameEnd + linked targets
+	static constexpr int kMaxBudget = 24;      // operations; leaves room for C3D_FrameEnd + linked targets
 	static constexpr int kFrameEndEntries = 1; // C3D_FrameEnd itself
 
 	void begin_frame() { used_ = 0; }
 
+	// 1..kMaxBudget (clamped); the default is kMaxBudget.
+	void set_budget(int budget) { budget_ = std::min(std::max(budget, 1), kMaxBudget); }
+	int budget() const { return budget_; }
+
 	// An operation about to be issued. False: refused (budget); do not issue it.
 	bool take(bool command_buffer_not_empty)
 	{
-		const int cost = 1 + (command_buffer_not_empty ? 1 : 0);
-		if (used_ + cost > kBudget)
-		{
-			++refused_;
-			return false;
-		}
-		used_ += cost;
-		return true;
+		return charge(1 + (command_buffer_not_empty ? 1 : 0));
 	}
+
+	// The flushing C3D_FrameSplit: one entry whatever the buffer holds.
+	bool take_split() { return charge(1); }
 
 	// The frame is being ended with `linked_targets` drawn linked targets; returns the
 	// frame's total queue entries and keeps the high-water mark.
@@ -56,6 +59,18 @@ public:
 	unsigned refused() const { return refused_; }
 
 private:
+	bool charge(int cost)
+	{
+		if (used_ + cost > budget_)
+		{
+			++refused_;
+			return false;
+		}
+		used_ += cost;
+		return true;
+	}
+
+	int budget_ = kMaxBudget;
 	int used_ = 0;
 	int high_water_ = 0;
 	int last_total_ = 0;

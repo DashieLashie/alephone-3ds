@@ -12,7 +12,7 @@ first file's, level by level.
 Logs of a citro3d profile build carry the zones c3d_wait, c3d_fill, c3d_upload
 and c3d_vblank (all inside "present", exclusive); when any file has them, those
 columns and "present total" (= present + the four, design 5.7.11) are added.
-The M0 zones c3d_null, c3d_diff and c3d_readback (nested in "render", exclusive) get their own
+The M0/M1 zones c3d_null, c3d_diff, c3d_readback and c3d_draw (nested in "render", exclusive) get their own
 columns after those, only when some file has them, and are not part of "present total".
 Logs with none of them (software builds) print exactly as before; a P1-era log (c3d_wait
 only, the fill still inside "present") gets the columns with "-" where a zone is missing.
@@ -25,7 +25,7 @@ COLS = ["fps", "frame", "busy", "max", "world", "render", "hud", "blit", "presen
 # Zones of the citro3d back end (A1_RENDER_C3D profile builds), inside "present".
 C3D_COLS = ["c3d_wait", "c3d_fill", "c3d_upload", "c3d_vblank"]
 # M0 zones, nested in "render" (null mode, the diff harness, the view readback); not part of "present total".
-M0_COLS = ["c3d_null", "c3d_diff", "c3d_readback"]
+M0_COLS = ["c3d_null", "c3d_diff", "c3d_readback", "c3d_draw"]
 
 
 def load(path):

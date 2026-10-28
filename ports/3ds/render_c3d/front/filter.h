@@ -43,8 +43,12 @@ class FilterRasterizer : public RasterizerClass
 public:
 	// fullbright: every forwarded _textured primitive without _SHADELESS_BIT gets
 	// ambient_shade = FIXED_ONE (the top shading table at any depth).
-	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright)
-		: inner_(inner), cls_(cls), fullbright_(fullbright) {}
+	// c3d_only (C3D checks only, on both sides): a wall whose texture is transparent (SW skips texel 0,
+	// flat C3D would draw it solid; M1 cannot, section 7 "What C3D draws in M1") is dropped and counted.
+	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright, bool c3d_only = false)
+		: inner_(inner), cls_(cls), fullbright_(fullbright), c3d_only_(c3d_only) {}
+
+	unsigned excluded() const { return excluded_; }
 
 	void SetView(view_data& View) override { inner_->SetView(View); }
 	void Begin() override { foreground_ = false; inner_->Begin(); }
@@ -62,6 +66,8 @@ private:
 	RasterizerClass* inner_;
 	int cls_;
 	bool fullbright_;
+	bool c3d_only_;
+	unsigned excluded_ = 0;
 	bool foreground_ = false;
 };
 

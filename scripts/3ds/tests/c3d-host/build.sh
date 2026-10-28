@@ -7,6 +7,6 @@ core=$here/../../../../ports/3ds/render_c3d/core
 out=$(mktemp -d "${TMPDIR:-/tmp}/c3d-host.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 CXX=${CXX:-c++}
-$CXX -std=c++17 -Wall -Wextra -Werror -I"$core" -o "$out/test_core" "$here/test_core.cpp" \
-	"$core/config.cpp" "$core/diff.cpp" "$core/bmp.cpp" "$core/stats.cpp" "$core/calibrate.cpp"
+$CXX -std=c++17 -O1 -Wall -Wextra -Werror -I"$core" -o "$out/test_core" "$here/test_core.cpp" \
+	"$core/config.cpp" "$core/diff.cpp" "$core/bmp.cpp" "$core/stats.cpp" "$core/calibrate.cpp" "$core/geometry.cpp"
 "$out/test_core"

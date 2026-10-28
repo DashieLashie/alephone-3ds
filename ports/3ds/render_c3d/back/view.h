@@ -30,6 +30,10 @@ namespace back {
 bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** pixels, int* out_w = nullptr,
                     int* out_h = nullptr);
 
+// M1: the readback is converted keeping the alpha byte, and the calibration has a fifth, half-transparent
+// quad at the top centre (core/calibrate.h). The target, staging and readback sequence are shared with
+// back/draw.cpp through the back-internal view_shared.h.
+
 // After C3D_Fini (release_and_fini): forgets the view target pointer (C3D_Fini destroyed it) and
 // frees the readback staging, the vertex buffer and the converted copy. Idempotent.
 void view_free();

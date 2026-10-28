@@ -18,7 +18,9 @@
 #include "../core/gate.h"
 #include "../core/gx_queue.h"
 #include "../include/a1_c3d_port.h"
+#include "draw.h"
 #include "view.h"
+#include "../core/geometry.h"
 #include "a1_3ds_platform.h"
 #include "a1_3ds_profile.h"
 
@@ -27,20 +29,19 @@
 
 #include <stdio.h>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <sstream>
 #include <string>
 
 extern "C" void __real_gfxExit(void);
+extern "C" void __real_C3D_BindProgram(shaderProgram_s* program);
 
 namespace a1_c3d {
 namespace back {
 
 namespace {
-
-// Design 2.4: C3D_Init(512 KiB); P1's present needs a few hundred words.
-constexpr size_t kCmdBufBytes = 512 * 1024;
 
 // How long a thread other than main waits for the main thread to release citro3d
 // (release_from_any_thread). The main thread presents every 33 ms in menus and in game;
@@ -70,6 +71,21 @@ unsigned s_frames_gate_closed = 0;
 uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
 bool s_view_frame_ran = false;       // a view frame ran since the present's last sample (note_view_frame)
 
+// M1: the program record (-Wl,--wrap=C3D_BindProgram) and the command-buffer measurements.
+shaderProgram_s* s_last_program = nullptr;
+unsigned s_program_binds = 0;
+const uint32_t* s_p0 = nullptr;      // gpuCmdBuf + gpuCmdBufOffset right after frame_begin() returned Ok
+struct CmdBufMax
+{
+	uint32_t frame_words[2] = {0, 0};   // by FrameKind: P1 - P0
+	uint32_t end_words[2] = {0, 0};     // C3D_FrameEnd's own words (only where the buffer was not empty)
+	uint32_t draw_words = 0;            // one C3D_DrawElements, citro3d's lazy state flush included
+	uint32_t readback_words = 0;        // the flushing split + the transfer
+	float usage = 0.0f;                 // C3D_GetCmdBufUsage() after any C3D_FrameEnd
+	unsigned frames[2] = {0, 0};
+} s_cb;
+unsigned s_cb_views_logged = 0;   // s_cb.frames[1] at the previous "[c3d] cmdbuf" stats line
+
 unsigned s_presents = 0, s_odd = 0, s_false_returns = 0, s_releases = 0, s_gfx_exits = 0;
 unsigned s_stats_presents = 0;   // presents at the previous stats line
 double s_gpu_ms[2] = {0, 0};     // C3D_GetDrawingTime() sums since the previous stats line, by GpuTime
@@ -93,13 +109,15 @@ void load_config()
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
 	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
-	       "dump %d, readback_cal %d, readback_cal_resize %d\n",
+	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
+	       "ring_indices %u, reserve_extra %u, film \"%s\"\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
 	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.renderer_c3d ? "c3d" : "sw",
 	       s_cfg.mode == Mode::Null ? "null" : s_cfg.mode == Mode::Direct ? "direct" : "readback",
 	       s_cfg.diff, s_cfg.diff_frames, static_cast<unsigned long>(s_cfg.classes), s_cfg.fullbright,
-	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize);
+	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
+	       s_cfg.ring_vertices, s_cfg.ring_indices, s_cfg.reserve_extra, s_cfg.film.c_str());
 	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
 	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
 	// own atexit handlers, so it runs before close_outputs flushes the log.
@@ -117,6 +135,7 @@ unsigned long kib(u32 bytes)
 
 void log_final_stats()
 {
+	cmdbuf_log("final");
 	printf("[c3d] final: presents=%u odd_surface=%u gx_high_water=%d gx_refused=%u "
 	       "present_screen_false_returns=%u gate_skipped=%u gate_episodes=%u frames_gate_closed=%u%s\n",
 	       s_presents, s_odd, s_gx.high_water(), s_gx.refused(), s_false_returns, s_gate.total_skipped(),
@@ -294,6 +313,7 @@ void release_and_fini()
 	C3D_Fini();
 	present_free();
 	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
+	draw_free();   // the world program and the rings (not on the abandon path, which returns above)
 	s_off = true;
 	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",
 	       kib(linearSpaceFree()), kib(vramSpaceFree()));
@@ -349,7 +369,8 @@ bool ensure_up()
 	if (gate_closed())   // design 5.6.1 a: init only ever happens with the gate open
 		return false;
 	const u32 linear0 = linearSpaceFree(), vram0 = vramSpaceFree();
-	if (!C3D_Init(kCmdBufBytes))
+	const size_t cmdbuf_bytes = static_cast<size_t>(s_cfg.cmdbuf_kib) * 1024;
+	if (!C3D_Init(cmdbuf_bytes))
 	{
 		s_off = true;
 		printf("[c3d] C3D_Init failed: CPU present\n");
@@ -368,9 +389,10 @@ bool ensure_up()
 	s_main_thread_id = current_thread_id();
 	s_up = true;
 	s_gx = GxQueue();
+	s_gx.set_budget(static_cast<int>(s_cfg.gxq_budget));
 	s_stats_tick = svcGetSystemTick();
 	printf("[c3d] init ok: command buffer %lu KiB; linear free %lu -> %lu KiB, VRAM free %lu -> %lu KiB\n",
-	       kib(kCmdBufBytes), kib(linear0), kib(linearSpaceFree()), kib(vram0), kib(vramSpaceFree()));
+	       kib(static_cast<u32>(cmdbuf_bytes)), kib(linear0), kib(linearSpaceFree()), kib(vram0), kib(vramSpaceFree()));
 	fflush(stdout);
 	return true;
 }
@@ -470,6 +492,8 @@ FrameStart frame_begin(FrameZone zone)
 		return FrameStart::AlreadyInFrame;
 	s_in_frame = true;
 	s_gx.begin_frame();
+	// P0: the rewound start of this frame's command buffer (M1 "Reserves and the command buffer, measured").
+	s_p0 = gpuCmdBuf + gpuCmdBufOffset;
 	return FrameStart::Ok;
 }
 
@@ -482,9 +506,22 @@ void frame_end(int drawn_linked_targets, bool gate_was_closed, FrameKind kind)
 		printf("[c3d] warning: %d GX queue entries in one view frame (design 2.4: <= 27)\n", total);
 	if (gate_was_closed)
 		++s_frames_gate_closed;
+	// P1, right before C3D_FrameEnd, inside the frame where gpuCmdBuf/Size/Offset are valid
+	// (C3D_FrameEnd zeroes them: libcitro3d.a renderqueue.o C3D_FrameEnd+0x44-0x5c).
+	const uint32_t* const p1 = gpuCmdBuf + gpuCmdBufOffset;
+	const bool offset_nonzero = gpuCmdBufOffset != 0;
 	C3D_FrameEnd(GX_CMDLIST_FLUSH);
 	s_in_frame = false;
 	s_last_frame_end = svcGetSystemTick();
+	// C3D_GetCmdBufUsage() is the end of the last split over the buffer (stale when the buffer was empty
+	// at P1; cmdbuf_words then records 0 for C3D_FrameEnd's words).
+	const float usage = C3D_GetCmdBufUsage();
+	const int k = kind == FrameKind::View ? 1 : 0;
+	const CmdBufWords w = cmdbuf_words(s_p0, p1, offset_nonzero, usage, cmdbuf_size_words());
+	s_cb.frame_words[k] = std::max(s_cb.frame_words[k], w.frame_words);
+	s_cb.end_words[k] = std::max(s_cb.end_words[k], w.end_words);
+	s_cb.usage = std::max(s_cb.usage, usage);
+	++s_cb.frames[k];
 }
 
 void note_view_frame()
@@ -495,6 +532,52 @@ void note_view_frame()
 bool gx_take()
 {
 	return s_gx.take(gpuCmdBufOffset != 0);
+}
+
+bool gx_take_split()
+{
+	return s_gx.take_split();
+}
+
+void* program_recorded()
+{
+	return s_last_program;
+}
+
+unsigned program_binds()
+{
+	return s_program_binds;
+}
+
+uint32_t cmdbuf_size_words()
+{
+	return static_cast<uint32_t>(s_cfg.cmdbuf_kib) * 256u;
+}
+
+void cmdbuf_note_draw(uint32_t words)
+{
+	s_cb.draw_words = std::max(s_cb.draw_words, words);
+}
+
+void cmdbuf_note_readback(uint32_t words)
+{
+	s_cb.readback_words = std::max(s_cb.readback_words, words);
+}
+
+void cmdbuf_log(const char* tag)
+{
+	if (s_cb.frames[0] + s_cb.frames[1] == 0)
+		return;
+	char draw[384];
+	draw_stats_text(draw, sizeof draw);
+	printf("[c3d] cmdbuf %s: size_words=%lu view_frame_words=%lu view_end_words=%lu present_frame_words=%lu "
+	       "present_end_words=%lu draw_words=%lu readback_words=%lu usage_max=%.4f binds=%u reserves=%lu+%lu%s\n",
+	       tag, static_cast<unsigned long>(cmdbuf_size_words()),
+	       static_cast<unsigned long>(s_cb.frame_words[1]), static_cast<unsigned long>(s_cb.end_words[1]),
+	       static_cast<unsigned long>(s_cb.frame_words[0]), static_cast<unsigned long>(s_cb.end_words[0]),
+	       static_cast<unsigned long>(s_cb.draw_words), static_cast<unsigned long>(s_cb.readback_words),
+	       static_cast<double>(s_cb.usage), s_program_binds, static_cast<unsigned long>(kDrawReserveWords),
+	       static_cast<unsigned long>(kEndReserveWords), draw);
 }
 
 void note_false_return()
@@ -554,12 +637,31 @@ void stats_tick()
 	       s_presents, s_presents - s_stats_presents, s_odd, s_gx.high_water(), s_gx.refused(),
 	       static_cast<double>(C3D_GetCmdBufUsage()), s_false_returns, s_gate.total_skipped(), gpu);
 	s_stats_presents = s_presents;
+	if (s_cb.frames[1] != s_cb_views_logged)   // a view frame ran since the previous line
+	{
+		s_cb_views_logged = s_cb.frames[1];
+		cmdbuf_log("stats");
+	}
 	s_gpu_ms[0] = s_gpu_ms[1] = 0;
 	s_gpu_n[0] = s_gpu_n[1] = 0;
 }
 
 } // namespace back
 } // namespace a1_c3d
+
+// -Wl,--wrap=C3D_BindProgram (CMakeLists.txt): records the program last bound by anyone but
+// back/draw.cpp, which binds through __real_C3D_BindProgram (M1 specification, "State save and restore
+// around a view frame"), so a view frame can put the present's program back. Logs the first pointer
+// (the present's, at present_init); later binds are counted in the cmdbuf line.
+extern "C" void __wrap_C3D_BindProgram(shaderProgram_s* program)
+{
+	namespace b = a1_c3d::back;
+	b::s_last_program = program;
+	if (++b::s_program_binds == 1)
+		printf("[c3d] program: first C3D_BindProgram recorded %p (the present's, at present_init)\n",
+		       static_cast<void*>(program));
+	__real_C3D_BindProgram(program);
+}
 
 // --- the port-internal API (a1_c3d_port.h) -------------------------------------
 
@@ -598,4 +700,31 @@ extern "C" void __wrap_gfxExit(void)
 		printf("[c3d] gfxExit skipped: citro3d is still up on the main thread\n");
 		fflush(stdout);
 	}
+}
+
+// Film for the command line (design 7 "Film"): see a1_c3d_port.h.
+const char* a1_c3d_boot_film()
+{
+	static std::string path;
+	static bool done = false;
+	if (!done)
+	{
+		done = true;
+		const std::string& f = a1_c3d::back::config().film;
+		if (!f.empty())
+		{
+			std::string p = f;
+			if (p.compare(0, 6, "sdmc:/") != 0 && p[0] != '/')
+				p = a1_3ds::user_dir() + "/" + p;
+			if (FILE* fp = fopen(p.c_str(), "rb"))
+			{
+				fclose(fp);
+				printf("[c3d] film: %s (handed to the engine as a command-line file)\n", p.c_str());
+				path = p;
+			}
+			else
+				printf("[c3d] film: %s not found: ignored\n", p.c_str());
+		}
+	}
+	return path.empty() ? nullptr : path.c_str();
 }

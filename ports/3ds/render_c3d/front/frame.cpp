@@ -27,7 +27,9 @@
 #include "low_level_textures.h"   // texture_random_seed()
 
 #include "filter.h"
+#include "c3d_rasterizer.h"
 #include "../back/context.h"
+#include "../back/draw.h"
 #include "../back/view.h"
 #include "../core/bmp.h"
 #include "../core/calibrate.h"
@@ -63,7 +65,7 @@ uint64_t s_stats_ms = 0;
 
 // calibration
 unsigned s_cal_done = 0, s_cal_skipped = 0;
-unsigned s_cal_orient_ok = 0, s_cal_frame_ok = 0, s_cal_channels_ok = 0;
+unsigned s_cal_orient_ok = 0, s_cal_frame_ok = 0, s_cal_channels_ok = 0, s_cal_alpha_ok = 0;
 unsigned long long s_cal_mismatched = 0, s_cal_sentinel = 0;
 bool s_cal_summary = false;
 
@@ -74,7 +76,10 @@ unsigned s_diff_checks = 0;
 uint64_t s_diff_differ_total = 0;
 unsigned s_dump_files = 0;
 bool s_diff_summary_printed = false;
-bool s_logged_c3d_sw = false;
+unsigned s_c3d_compared = 0, s_c3d_discarded = 0, s_c3d_skipped = 0;
+unsigned long long s_c3d_ties = 0, s_c3d_tie_mismatch = 0;
+unsigned s_c3d_drawn = 0, s_c3d_accept_skips[5] = {0, 0, 0, 0, 0};
+C3dRasterizer s_c3d_rast;
 
 // null
 unsigned s_null_frames = 0;
@@ -152,6 +157,7 @@ void run_calibration(const Config& cfg, int w, int h)
 	s_cal_orient_ok += res.orientation == Orientation::Ok;
 	s_cal_frame_ok += res.current_frame_ok;
 	s_cal_channels_ok += res.channels_ok;
+	s_cal_alpha_ok += res.alpha_ok;
 	s_cal_mismatched += res.mismatched;
 	s_cal_sentinel += res.sentinel;
 	if (cfg.dump && px && (s_cal_done == 0 || s_cal_done == kCalFrames - 1))
@@ -165,8 +171,8 @@ void run_calibration(const Config& cfg, int w, int h)
 	{
 		s_cal_summary = true;
 		printf("[c3d] readback_cal summary: %u frames, orientation ok %u, current frame ok %u, channels ok %u, "
-		       "mismatched pixels %llu (sentinel %llu), skipped %u\n", s_cal_done, s_cal_orient_ok, s_cal_frame_ok,
-		       s_cal_channels_ok, s_cal_mismatched, s_cal_sentinel, s_cal_skipped);
+		       "alpha ok %u, mismatched pixels %llu (sentinel %llu), skipped %u\n", s_cal_done, s_cal_orient_ok,
+		       s_cal_frame_ok, s_cal_channels_ok, s_cal_alpha_ok, s_cal_mismatched, s_cal_sentinel, s_cal_skipped);
 	}
 	fflush(stdout);
 }
@@ -200,9 +206,66 @@ void diff_summary()
 	if (s_diff_summary_printed)
 		return;
 	s_diff_summary_printed = true;
-	printf("[c3d] DIFF summary frames=%u checks=%u differ_total=%llu dropped=%u\n", s_diff_done, s_diff_checks,
-	       static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped);
+	printf("[c3d] DIFF summary frames=%u checks=%u differ_total=%llu dropped=%u c3d_compared=%u c3d_discarded=%u "
+	       "c3d_skipped=%u c3d_drawn=%u c3d_accept_skips=degenerate:%u,bounds:%u,walk:%u,area:%u c3d_ties=%llu c3d_tie_mismatch=%llu\n", s_diff_done,
+	       s_diff_checks, static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped, s_c3d_compared,
+	       s_c3d_discarded, s_c3d_skipped, s_c3d_drawn, s_c3d_accept_skips[1], s_c3d_accept_skips[2],
+	       s_c3d_accept_skips[3], s_c3d_accept_skips[4], s_c3d_ties, s_c3d_tie_mismatch);
 	fflush(stdout);
+}
+
+// One C3D check (M1): side A = SW replay of filter(class, c3d_only) into scratch A, side B = one C3D view
+// frame fed by the same replay. Logs one line.
+void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, RasterizerClass* sw, bool first)
+{
+	const char* cls = class_name(c);
+	const int w = s_a.w, h = s_a.h;
+
+	texture_random_seed() = s0;
+	s_a.clear(0);
+	swr->screen = s_a.get();
+	FilterRasterizer fa(sw, c, cfg.fullbright, true);
+	s_recorder.replay(&fa);
+
+	const back::ViewBegin vb = back::view_begin(w, h);
+	++s_diff_checks;
+	if (vb.kind == back::ViewBegin::Kind::Skipped)
+	{
+		++s_c3d_skipped;
+		printf("[c3d] DIFF frame=%u class=%s skipped (%s)\n", s_frame, cls, back::skip_name(vb.skip));
+		return;
+	}
+	if (vb.kind == back::ViewBegin::Kind::Discarded)
+	{
+		++s_c3d_discarded;
+		printf("[c3d] DIFF frame=%u class=%s discarded (%s)\n", s_frame, cls, back::discard_name(vb.discard));
+		return;
+	}
+
+	texture_random_seed() = s0;
+	s_b.clear(0);
+	s_c3d_rast.set_target(w, h);
+	FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true);
+	s_recorder.replay(&fb);
+	unsigned sentinel = 0;
+	const back::ViewEnd ve = back::view_end(s_b.pixels.data(), s_b.w, &sentinel);
+	s_c3d_drawn += s_c3d_rast.drawn();
+	for (int i = 1; i < 5; ++i)
+		s_c3d_accept_skips[i] += s_c3d_rast.skipped(static_cast<Accept>(i));
+	if (!ve.ok)
+	{
+		++s_c3d_discarded;
+		printf("[c3d] DIFF frame=%u class=%s discarded (%s)\n", s_frame, cls, back::discard_name(ve.discard));
+		return;
+	}
+	const DiffResult r = diff_images(s_a.image(), s_b.image(), Coverage::TopByte, 0, 0, s_c3d_rast.tie_mask());
+	printf("%s\n", diff_line_c3d(s_frame, cls, r, 0, fa.excluded(), sentinel).c_str());
+	++s_c3d_compared;
+	s_c3d_ties += r.ties;
+	s_c3d_tie_mismatch += r.tie_mismatch;
+	s_diff_differ_total += r.differ;
+	if (cfg.dump && (first || r.cov_mismatch_nonedge > 0))
+		dump_pair(s_frame, cls);
 }
 
 // Design 7, M0 "Diff frame". Returns true: the real frame is in dest. False: dropped, nothing written to dest.
@@ -211,11 +274,6 @@ bool run_diff_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 #ifdef A1_PROFILE
 	A1_PROF_SCOPE(C3dDiff);
 #endif
-	if (cfg.renderer_c3d && !s_logged_c3d_sw)
-	{
-		s_logged_c3d_sw = true;
-		printf("[c3d] diff: renderer c3d has no C3D rasteriser before M1; both sides are SW\n");
-	}
 	const bool first = s_diff_done == 0 && s_diff_dropped == 0;
 	const int w = dest->width, h = dest->height;
 	s_a.make(w, h);
@@ -247,11 +305,17 @@ bool run_diff_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	s_recorder.replay(sw);
 	check(cfg, s_frame, "replay", Coverage::TopByte, 0, first);
 
-	// (3) per selected class: the same filtered replay into A and into B (M0: both SW).
+	// (3) per selected class: the same filtered replay into A and into B (renderer sw: both SW; renderer c3d:
+	// B is a C3D view frame).
 	for (int c = 0; c <= kFrame; ++c)
 	{
 		if (!(cfg.classes & (1u << c)))
 			continue;
+		if (cfg.renderer_c3d)
+		{
+			c3d_check(cfg, c, s0, swr, sw, first);
+			continue;
+		}
 		const bool tinted = c == kTinted;
 		const uint32_t clear = tinted ? 0xFF808080u : 0u;
 		const Coverage cov = (tinted || c == kStatic) ? Coverage::NotClear : Coverage::TopByte;
@@ -385,8 +449,8 @@ bool render_frame(view_data& view, bitmap_definition* dest, RasterizerClass* sw,
 		if (!s_logged_mode)
 		{
 			s_logged_mode = true;
-			printf("[c3d] renderer c3d: mode %s not before M1/M6; software\n",
-			       cfg.mode == Mode::Direct ? "direct" : "readback");
+			printf("[c3d] renderer c3d: play frames are software before %s\n",
+			       cfg.mode == Mode::Direct ? "M6 (mode direct)" : "M4 (mode readback)");
 		}
 	}
 	return false;

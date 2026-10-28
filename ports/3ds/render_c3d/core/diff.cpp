@@ -35,7 +35,8 @@ inline unsigned channel_delta(uint32_t a, uint32_t b)
 
 } // namespace
 
-DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32_t clear, int tol)
+DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32_t clear, int tol,
+                       const uint8_t* tie_mask)
 {
 	DiffResult r;
 	const int w = std::min(a.width, b.width);
@@ -81,6 +82,14 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 				}
 			}
 
+			if (tie_mask && tie_mask[static_cast<size_t>(y) * w + x])
+			{
+				edge = true;
+				++r.ties;
+				r.tie_mismatch += ca != cb;
+			}
+
+			r.band += edge;
 			if (ca != cb)
 			{
 				if (edge)
@@ -104,13 +113,22 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 
 std::string diff_line(unsigned frame, const char* cls, const DiffResult& r, int tol)
 {
-	char buf[256];
+	char buf[320];
 	std::snprintf(buf, sizeof buf,
 	              "[c3d] DIFF frame=%u class=%s covered=%u/%u cov_mismatch=%u/%u common=%u within_tol=%.2f%% "
-	              "(tol %d) mean=%.2f max=%u differ=%u",
+	              "(tol %d) mean=%.2f max=%u differ=%u band=%u",
 	              frame, cls, r.covered_a, r.covered_b, r.cov_mismatch_edge, r.cov_mismatch_nonedge, r.common,
-	              r.within_pct(), tol, r.mean(), r.max_delta, r.differ);
+	              r.within_pct(), tol, r.mean(), r.max_delta, r.differ, r.band);
 	return std::string(buf);
+}
+
+std::string diff_line_c3d(unsigned frame, const char* cls, const DiffResult& r, int tol, unsigned excluded,
+                          unsigned sentinel)
+{
+	char tail[128];
+	std::snprintf(tail, sizeof tail, " b=c3d excluded=%u sentinel=%u ties=%u tie_mismatch=%u", excluded, sentinel,
+	              r.ties, r.tie_mismatch);
+	return diff_line(frame, cls, r, tol) + tail;
 }
 
 } // namespace a1_c3d

@@ -34,4 +34,10 @@ bool a1_c3d_owns_top();
 // present_screen() is about to return false: counted if citro3d is up (design 5.1).
 void a1_c3d_note_false_return();
 
+// The film to replay from the command line (debug-c3d "film PATH", design 7 "Film"). Loads the
+// config; the path is relative to a1_3ds::user_dir() unless it starts with sdmc:/ or /. Returns
+// the resolved path if the file exists (logged), nullptr if there is no film or it is not found
+// (logged). The string stays valid for the life of the process. boot_begin() appends it to argv.
+const char* a1_c3d_boot_film();
+
 #endif

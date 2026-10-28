@@ -39,6 +39,11 @@ void FilterRasterizer::texture_vertical_polygon(polygon_definition& p)
 {
 	if (!passes(classify(Entry::Vertical, to_transfer(p.transfer_mode), foreground_)))
 		return;
+	if (c3d_only_ && p.transfer_mode == _textured_transfer && p.texture && (p.texture->flags & _TRANSPARENT_BIT))
+	{
+		++excluded_;
+		return;
+	}
 	polygon_definition copy = p;
 	if (fullbright_ && copy.transfer_mode == _textured_transfer && !(copy.flags & _SHADELESS_BIT))
 		copy.ambient_shade = FIXED_ONE;

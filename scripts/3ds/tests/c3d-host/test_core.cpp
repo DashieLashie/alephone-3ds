@@ -2,18 +2,31 @@
 // (docs/3ds/CITRO3D_DESIGN.md 5.6.1, 8.4), and the M0 pieces (7, "M0 specification"): classify.h
 // (class mapping, class list), diff.* (the 8.1 metric and its log line), bmp.* (32-bit BMP),
 // gx_queue.h (2.4's worst case with the readback's +1), stats.* (nearest-rank percentile, the
-// bounded sample array, the pair table) and calibrate.* (the readback calibration's check).
+// bounded sample array, the pair table) and calibrate.* (the readback calibration's check); and the M1
+// pieces (7, "M1 specification"): geometry.* (the w gates (a)-(c) against a transliteration of the SW
+// mapper's world_x, the coverage model against a transliteration of SW's per-column coverage, the
+// acceptance test, fan indices, batching key, colour hash, command-buffer arithmetic, reserve test),
+// the alpha quad of the calibration, GxQueue's split and runtime budget, and the M1 config keys.
 #include "bmp.h"
 #include "calibrate.h"
 #include "classify.h"
 #include "config.h"
 #include "diff.h"
 #include "gate.h"
+#include "geometry.h"
 #include "gx_queue.h"
+#include "ring.h"
 #include "stats.h"
 
+#include <algorithm>
+#include <climits>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -316,13 +329,58 @@ static void test_diff()
 	// The log line, exactly.
 	DiffResult l;
 	l.covered_a = 100; l.covered_b = 98; l.cov_mismatch_edge = 4; l.cov_mismatch_nonedge = 1;
-	l.common = 80; l.within_tol = 60; l.sum_delta = 120; l.max_delta = 9; l.differ = 17;
+	l.common = 80; l.within_tol = 60; l.sum_delta = 120; l.max_delta = 9; l.differ = 17; l.band = 64;
 	CHECK(diff_line(12, "walls", l, 4) ==
 	      "[c3d] DIFF frame=12 class=walls covered=100/98 cov_mismatch=4/1 common=80 within_tol=75.00% (tol 4) "
-	      "mean=1.50 max=9 differ=17");
+	      "mean=1.50 max=9 differ=17 band=64");
 	CHECK(diff_line(0, "frame", DiffResult(), 0) ==
 	      "[c3d] DIFF frame=0 class=frame covered=0/0 cov_mismatch=0/0 common=0 within_tol=100.00% (tol 0) "
-	      "mean=0.00 max=0 differ=0");
+	      "mean=0.00 max=0 differ=0 band=0");
+	// M1: the C3D fields are appended after band, so an M0 parser (key=value pairs) still reads the rest.
+	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0) ==
+	      "[c3d] DIFF frame=12 class=walls covered=100/98 cov_mismatch=4/1 common=80 within_tol=75.00% (tol 4) "
+	      "mean=1.50 max=9 differ=17 band=64 b=c3d excluded=3 sentinel=0 ties=0 tie_mismatch=0");
+	l.ties = 5; l.tie_mismatch = 2;
+	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0).find(" sentinel=0 ties=5 tie_mismatch=2") != std::string::npos);
+	CHECK(diff_line_c3d(1, "walls", DiffResult(), 0, 0, 7).find(" band=0 b=c3d excluded=0 sentinel=7 ties=0 tie_mismatch=0") !=
+	      std::string::npos);
+
+	// The tie mask (M1 piece 5): a one-pixel hole in A's coverage that B fills is a non-edge mismatch... except
+	// that the hole's neighbours differ in coverage so it is edge anyway; use a pixel deep inside a covered
+	// block instead: B lacks it. Without a mask it is non-edge; with the mask it is an edge and a tie mismatch.
+	{
+		const int tw = 8, th = 8;
+		std::vector<uint32_t> ta = flat(tw, th, 0xFF000000u), tb = ta;
+		tb[3 * tw + 4] = 0;   // B does not cover (4,3); A covers all
+		std::vector<uint8_t> mask(static_cast<size_t>(tw) * th, 0);
+		const Image32 ita{ta.data(), tw, th, tw}, itb{tb.data(), tw, th, tw};
+		DiffResult t0 = diff_images(ita, itb, Coverage::TopByte, 0, 0);
+		CHECK(t0.cov_mismatch_nonedge == 1 && t0.cov_mismatch_edge == 0 && t0.ties == 0 && t0.tie_mismatch == 0);
+		DiffResult t1 = diff_images(ita, itb, Coverage::TopByte, 0, 0, mask.data());   // an all-zero mask = no ties
+		CHECK(t1.cov_mismatch_nonedge == 1 && t1.ties == 0 && t1.band == t0.band);
+		mask[3 * tw + 4] = 1;
+		mask[5 * tw + 5] = 1;   // a tie pixel where A and B agree
+		DiffResult t2 = diff_images(ita, itb, Coverage::TopByte, 0, 0, mask.data());
+		CHECK(t2.cov_mismatch_nonedge == 0 && t2.cov_mismatch_edge == 1 && t2.ties == 2 && t2.tie_mismatch == 1);
+		CHECK(t2.band == t0.band + 2);
+		CHECK(t2.common == t0.common - 1);   // the agreeing tie pixel leaves the common set
+	}
+
+	// The band: the 8x4 block of `a` in a 16x8 image has a ring of 10x6 - 8x4 = 28 outside pixels with a
+	// covered neighbour, plus its 20 own border pixels (every one but the 12 interior ones): 48.
+	{
+		const int bw = 16, bh = 8;
+		std::vector<uint32_t> ba = flat(bw, bh, 0);
+		for (int y = 2; y < 6; ++y)
+			for (int x = 4; x < 12; ++x)
+				ba[y * bw + x] = 0xFF102030u;
+		Image32 iba{ba.data(), bw, bh, bw};
+		const DiffResult br = diff_images(iba, iba, Coverage::TopByte, 0, 0);
+		CHECK(br.band == 48 && br.common == 12);
+		std::vector<uint32_t> none = flat(bw, bh, 0);
+		Image32 inone{none.data(), bw, bh, bw};
+		CHECK(diff_images(inone, inone, Coverage::TopByte, 0, 0).band == 0);   // nothing covered: no edge
+	}
 }
 
 static void test_bmp()
@@ -359,17 +417,64 @@ static void test_gx_queue_readback()
 	// non-empty command buffer) and the frame's total counts it.
 	GxQueue q;
 	q.begin_frame();
-	for (int i = 0; i < GxQueue::kBudget - 2; ++i)
+	for (int i = 0; i < GxQueue::kMaxBudget - 2; ++i)
 		CHECK(q.take(false));
 	CHECK(q.take(true));   // the readback transfer, splitting the command list
 	CHECK(!q.take(false) && q.refused() == 1);
-	CHECK(q.end_frame(0) == GxQueue::kBudget + 1);
+	CHECK(q.end_frame(0) == GxQueue::kMaxBudget + 1);
 	CHECK(q.last_total() == 25 && q.high_water() == 25 && q.high_water() < 32);
 
 	// A later, smaller frame does not lower the high-water mark.
 	q.begin_frame();
 	CHECK(q.take(true));
 	CHECK(q.end_frame(0) == 3 && q.last_total() == 3 && q.high_water() == 25);
+}
+
+static void test_gx_queue_m1()
+{
+	// The flushing split is exactly 1 whatever the buffer holds; the transfer after it costs 1: a C3D view
+	// frame is clear 1 + split 1 + transfer 1 = 3 entries (M1 specification, "GX queue").
+	GxQueue q;
+	q.begin_frame();
+	CHECK(q.budget() == 24 && GxQueue::kMaxBudget == 24);
+	CHECK(q.take(false));        // the clear, before the first draw
+	CHECK(q.take_split());       // the flushing split (the buffer holds draws)
+	CHECK(q.take(false));        // the transfer finds an empty buffer
+	CHECK(q.used() == 3 && q.refused() == 0);
+	CHECK(q.end_frame(0) == 3 + GxQueue::kFrameEndEntries && q.high_water() == 4);
+
+	// A non-empty buffer at a plain take still costs 2, the split never does.
+	q.begin_frame();
+	CHECK(q.take(true) && q.used() == 2);
+	CHECK(q.take_split() && q.used() == 3);
+
+	// Runtime budget: 4 passes the view frame, 2 refuses the transfer (clear, split, then no room).
+	GxQueue q4;
+	q4.set_budget(4);
+	q4.begin_frame();
+	CHECK(q4.take(false) && q4.take_split() && q4.take(false) && q4.refused() == 0);
+	GxQueue q2;
+	q2.set_budget(2);
+	q2.begin_frame();
+	CHECK(q2.take(false) && q2.take_split() && !q2.take(false) && q2.refused() == 1 && q2.used() == 2);
+	// Never above 24, never below 1; set_budget keeps the count of the frame in progress.
+	GxQueue qc;
+	qc.set_budget(100);
+	CHECK(qc.budget() == 24);
+	qc.set_budget(0);
+	CHECK(qc.budget() == 1);
+	qc.set_budget(-5);
+	CHECK(qc.budget() == 1);
+	qc.begin_frame();
+	CHECK(qc.take(false) && !qc.take_split() && !qc.take(false) && qc.refused() == 2);
+
+	// The worst case with the split at 1: 24 + 1 for C3D_FrameEnd = 25 < 32; 24 entries then a split is refused.
+	GxQueue qw;
+	qw.begin_frame();
+	for (int i = 0; i < 23; ++i)
+		CHECK(qw.take(false));
+	CHECK(qw.take_split() && !qw.take_split() && qw.used() == 24);
+	CHECK(qw.end_frame(0) == 25 && qw.high_water() == 25 && qw.high_water() < 32);
 }
 
 static void test_stats()
@@ -474,7 +579,13 @@ static void test_calibrate()
 			quad(w - kCalQuad, 0, cs.tr);
 			quad(0, h - kCalQuad, cs.bl);
 			quad(w - kCalQuad, h - kCalQuad, cs.br);
+			// The alpha quad where this orientation puts it (top centre for the unknown one).
+			const int ax = cs.o == Orientation::Transposed ? 0 : w / 2 - 8;
+			const int ay = (cs.o == Orientation::RowsFlipped || cs.o == Orientation::Rotated180) ? h - kCalQuad
+			               : cs.o == Orientation::Transposed ? h / 2 - 8 : 0;
+			quad(ax, ay, kCalAlphaQuad);
 			const CalResult r = cal_check(img.data(), w, h, w, k);
+			CHECK(r.alpha_ok);
 			CHECK(r.orientation == cs.o);
 			CHECK(r.observed_k == 17 && r.current_frame_ok == (cs.o != Orientation::Unknown));   // unknown: corners mismatch
 			CHECK(r.corner[0] == cs.tl && r.corner[1] == cs.tr && r.corner[2] == cs.bl && r.corner[3] == cs.br);
@@ -483,7 +594,7 @@ static void test_calibrate()
 			if (cs.o == Orientation::Ok)
 				CHECK(cal_line(k, r) ==
 				      "[c3d] readback_cal k=17 orientation ok current frame ok mismatched 0 (sentinel 0) "
-				      "channels ok corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+				      "channels ok alpha ok corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 		}
 	}
 
@@ -500,6 +611,7 @@ static void test_calibrate()
 		quad(w - kCalQuad, 0, kCalTopRight);
 		quad(0, h - kCalQuad, kCalBottomLeft);
 		quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+		quad(w / 2 - 8, 0, kCalAlphaQuad);
 		return im;
 	};
 	{
@@ -508,7 +620,7 @@ static void test_calibrate()
 		CHECK(p.current_frame_ok && p.mismatched == 0 && p.sentinel == 0 && p.orientation == Orientation::Ok);
 		CHECK(cal_line(17, p) ==
 		      "[c3d] readback_cal k=17 orientation ok current frame ok mismatched 0 (sentinel 0) channels ok "
-		      "corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+		      "alpha ok corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 
 		// One stale pixel (the previous frame's clear) away from every sample point.
 		im[100 * w + 100] = cal_clear_argb(16);
@@ -556,15 +668,15 @@ static void test_calibrate()
 	CalResult r = cal_check(img.data(), w, h, w, 17);
 	CHECK(r.orientation == Orientation::Ok && !r.current_frame_ok && r.observed_k == 16);
 	CHECK(cal_line(17, r) ==
-	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre k=16) mismatched 94976 (sentinel 0) "
-	      "channels ok corners "
+	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre k=16) mismatched 94720 (sentinel 0) "
+	      "channels ok alpha ok corners "
 	      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 	img[(h / 2) * w + w / 2] = 0xFF123456u;
 	r = cal_check(img.data(), w, h, w, 17);
 	CHECK(!r.current_frame_ok && r.observed_k == -1);
 	CHECK(cal_line(17, r) ==
-	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre 0xFF123456) mismatched 94976 "
-	      "(sentinel 0) channels ok corners "
+	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre 0xFF123456) mismatched 94720 "
+	      "(sentinel 0) channels ok alpha ok corners "
 	      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
 	CHECK(cal_check(img.data(), w, h, w, 0x111).observed_k == -1);   // k is taken mod 256 by the clear
 	img = perfect(0x111);   // k is taken mod 256 by the clear
@@ -592,9 +704,880 @@ static void test_calibrate()
 			wide[static_cast<size_t>(y) * 512 + (w - 1 - x)] = kCalTopRight;
 			wide[static_cast<size_t>(h - 1 - y) * 512 + x] = kCalBottomLeft;
 			wide[static_cast<size_t>(h - 1 - y) * 512 + (w - 1 - x)] = kCalBottomRight;
+			wide[static_cast<size_t>(y) * 512 + (w / 2 - 8 + x)] = kCalAlphaQuad;
 		}
 	r = cal_check(wide.data(), w, h, 512, 3);
 	CHECK(r.orientation == Orientation::Ok && r.current_frame_ok && r.channels_ok && r.mismatched == 0);
+}
+
+static void test_calibrate_m1()
+{
+	// The keeping conversion: 0xRRGGBBAA -> 0xAARRGGBB, alpha untouched (the forcing one sets it to 0xFF).
+	CHECK(rgba_to_argb_keep(0x20609080u) == kCalAlphaQuad);
+	CHECK(rgba_to_argb_keep(0x12345678u) == 0x78123456u);
+	CHECK(rgba_to_argb_keep(0xFF0000FFu) == 0xFFFF0000u && rgba_to_argb_keep(0x00000000u) == 0u);
+	CHECK(rgba_to_argb_keep(0xAABBCC00u) == 0x00AABBCCu && rgba_to_argb(0xAABBCC00u) == 0xFFAABBCCu);
+	for (unsigned k = 0; k < 256; ++k)   // the sentinel has alpha 0xFF: both forms agree
+		CHECK(rgba_to_argb_keep(cal_sentinel_rgba(k)) == cal_sentinel_argb(k));
+
+	// A wrong alpha quad is a mismatch and alpha NO; a perfect image (alpha 0xFF elsewhere) is alpha ok.
+	const int w = 400, h = 240;
+	const unsigned k = 9;
+	std::vector<uint32_t> im = flat(w, h, cal_clear_argb(k));
+	auto quad = [&](int x0, int y0, uint32_t v) {
+		for (int y = y0; y < y0 + kCalQuad; ++y)
+			for (int x = x0; x < x0 + kCalQuad; ++x)
+				im[static_cast<size_t>(y) * w + x] = v;
+	};
+	quad(0, 0, kCalTopLeft);
+	quad(w - kCalQuad, 0, kCalTopRight);
+	quad(0, h - kCalQuad, kCalBottomLeft);
+	quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+	CalResult r = cal_check(im.data(), w, h, w, k);   // no alpha quad drawn (M0's image)
+	CHECK(!r.alpha_ok && r.mismatched == 256 && !r.current_frame_ok && r.orientation == Orientation::Ok);
+	CHECK(cal_line(k, r).find("channels ok alpha NO corners") != std::string::npos);
+	quad(w / 2 - 8, 0, kCalAlphaQuad);
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(r.alpha_ok && r.mismatched == 0 && r.current_frame_ok);
+	im[3 * w + w / 2] = 0xFF206090u;   // alpha forced to 0xFF: the forcing conversion's signature
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(!r.alpha_ok && r.mismatched == 1 && !r.current_frame_ok);
+	im[3 * w + w / 2] = kCalAlphaQuad;
+	im[5 * w + 5 + 100] = 0x80123456u;   // alpha elsewhere is wrong too: a mismatch, alpha still ok
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(r.alpha_ok && r.mismatched == 1);
+	// The quad's edges: x in [192, 208), y in [0, 16), so (191, 0) and (208, 0) and (192, 16) are clear.
+	im = flat(w, h, cal_clear_argb(k));
+	quad(0, 0, kCalTopLeft);
+	quad(w - kCalQuad, 0, kCalTopRight);
+	quad(0, h - kCalQuad, kCalBottomLeft);
+	quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+	quad(w / 2 - 8, 1, kCalAlphaQuad);   // one row too low
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(!r.alpha_ok && r.mismatched == 2 * 16);
+
+	// All four orientations (and the unknown one, top centre): the quad follows the orientation.
+	const uint32_t R = kCalTopLeft, G = kCalTopRight, B = kCalBottomLeft, W = kCalBottomRight;
+	struct Case { uint32_t c[4]; Orientation o; int qx, qy; };
+	const Case cases[] = {
+		{{R, G, B, W}, Orientation::Ok, w / 2 - 8, 0},
+		{{B, W, R, G}, Orientation::RowsFlipped, w / 2 - 8, h - 16},
+		{{G, R, W, B}, Orientation::ColsFlipped, w / 2 - 8, 0},
+		{{W, B, G, R}, Orientation::Rotated180, w / 2 - 8, h - 16},
+		{{R, B, G, W}, Orientation::Transposed, 0, h / 2 - 8},
+	};
+	for (const Case& cs : cases)
+	{
+		im = flat(w, h, cal_clear_argb(k));
+		quad(0, 0, cs.c[0]);
+		quad(w - kCalQuad, 0, cs.c[1]);
+		quad(0, h - kCalQuad, cs.c[2]);
+		quad(w - kCalQuad, h - kCalQuad, cs.c[3]);
+		quad(cs.qx, cs.qy, kCalAlphaQuad);
+		r = cal_check(im.data(), w, h, w, k);
+		CHECK(r.orientation == cs.o && r.alpha_ok && r.mismatched == 0 && r.current_frame_ok && r.channels_ok);
+		// The quad on the other side (the wrong place for this orientation) is alpha NO with 2 x 256 mismatches
+		// (a quad missing where it belongs, one where it does not) unless both sides coincide.
+		im = flat(w, h, cal_clear_argb(k));
+		quad(0, 0, cs.c[0]);
+		quad(w - kCalQuad, 0, cs.c[1]);
+		quad(0, h - kCalQuad, cs.c[2]);
+		quad(w - kCalQuad, h - kCalQuad, cs.c[3]);
+		quad(cs.qx, cs.qy == 0 ? h - kCalQuad : 0, kCalAlphaQuad);
+		if (cs.o != Orientation::Transposed)
+		{
+			r = cal_check(im.data(), w, h, w, k);
+			CHECK(r.orientation == cs.o && !r.alpha_ok && r.mismatched == 512);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transliterations of the software mapper (Source_Files/RenderMain/scottish_textures.cpp) for the
+// geometry tests. They live here, not in core/.
+
+namespace sw
+{
+// scottish_textures.cpp:906-954 (_pretexture_vertical_polygon_lines), the part that yields world_x, for
+// the column x0 (screen_x = x0 - hw), TEXBITS 7. int32 arithmetic as in the original; the one product that
+// can leave int32 (:954) is done in 64 bits and reported, not wrapped.
+struct WorldX
+{
+	int32_t world_x;       // after the negation of :955
+	int32_t tx;            // fixed point 16.16
+	int32_t n_r, d_r;      // the shifted numerator and denominator that tx was divided from
+	int64_t product;       // tx * vector.i, whose int32 truncation :954 shifts
+};
+
+static WorldX world_x(int world_to_screen_x, int hw, int x0, int ox, int oy, int vi, int vj)
+{
+	const int32_t screen_x = x0 - hw;
+	int32_t tx_numerator = world_to_screen_x * oy - screen_x * ox;
+	int32_t tx_denominator = screen_x * vi - world_to_screen_x * vj;
+	int32_t an = tx_numerator, ad = tx_denominator;
+	const int bits = 7;   // VERTICAL_TEXTURE_WIDTH_BITS
+	while (an > ((1 << (31 - bits)) - 1) || an < -(1 << (31 - bits)))
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	while (an > INT16_MAX || an < INT16_MIN)
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	WorldX r;
+	r.n_r = an;
+	r.d_r = ad;
+	r.tx = static_cast<int32_t>((static_cast<int64_t>(an) * 65536) / ad);   // INTEGER_TO_FIXED(an) / ad
+	r.product = static_cast<int64_t>(r.tx) * vi;
+	r.world_x = ox + (static_cast<int32_t>(r.product) >> 16);
+	if (r.world_x < 0)
+		r.world_x = -r.world_x;
+	return r;
+}
+
+// scottish_textures.cpp:1231-1290 (build_y_table), on shorts as in the original. NULL = refused.
+static short* build_y_table(short* table, short x0, short y0, short x1, short y1)
+{
+	short dx, dy, adx, ady;
+	short x, y;
+	short d, delta_d, d_max;
+	short* record;
+	auto sgn = [](short v) -> short { return v < 0 ? -1 : (v > 0 ? 1 : 0); };
+
+	dx = x1 - x0, adx = std::abs(dx), dx = sgn(dx);
+	dy = y1 - y0, ady = std::abs(dy), dy = sgn(dy);
+	if (dx >= 0)
+	{
+		if (dy >= 0)
+		{
+			x = x0, y = y0;
+			record = table;
+		}
+		else
+		{
+			x = x1, y = y1;
+			record = table + adx;
+		}
+		if (adx >= ady)
+		{
+			d = adx - ady, delta_d = -2 * ady, d_max = 2 * adx;
+			while ((adx -= 1) >= 0)
+			{
+				if (d < 0)
+					y += 1, d += d_max;
+				if (dy >= 0)
+					*record++ = y;
+				else
+					*--record = y;
+				x += dx, d += delta_d;
+			}
+		}
+		else
+		{
+			d = ady - adx, delta_d = -2 * adx, d_max = 2 * ady;
+			while ((ady -= 1) >= 0)
+			{
+				if (d < 0)
+				{
+					x += dx, d += d_max, adx -= 1;
+					if (dy >= 0)
+						*record++ = y;
+					else
+						*--record = y;
+				}
+				y += 1, d += delta_d;
+			}
+			if (adx == 1)
+			{
+				if (dy >= 0)
+					*record++ = y;
+				else
+					*--record = y;
+			}
+		}
+	}
+	else
+		return nullptr;
+	(void)x;   // the original tracks x without reading it
+	return table;
+}
+
+enum Result { Drawn, RefusedBounds, RefusedDegenerate, RefusedWalk };
+
+// scottish_textures.cpp:429-520 (texture_vertical_polygon) down to the tables, then the row loop of
+// low_level_textures.h:322-326: `cov` (w x h, zeroed by the caller) gets 1 for every written pixel.
+// `wrote_outside` counts rows the original would write outside [0, h).
+static Result polygon_coverage(const std::vector<Point2>& pts, int w, int h, std::vector<uint8_t>& cov,
+                               unsigned& wrote_outside)
+{
+	const int n = static_cast<int>(pts.size());
+	int highest = 0, lowest = 0;
+	for (int v = 1; v < n; ++v)
+	{
+		if (pts[v].x < pts[highest].x)
+			highest = v;
+		if (pts[v].x > pts[lowest].x)
+			lowest = v;
+	}
+	for (int v = 0; v < n; ++v)
+		if (!(pts[v].x >= 0 && pts[v].x <= w && pts[v].y >= 0 && pts[v].y <= h))
+			return RefusedBounds;
+	if (highest == lowest)
+		return RefusedDegenerate;
+
+	std::vector<short> left_table(8192, -1), right_table(8192, -1);
+	short left_line_count = 0, right_line_count = 0, total_line_count;
+	short aggregate_left = 0, aggregate_right = 0;
+	short left_vertex = static_cast<short>(highest), right_vertex = static_cast<short>(highest), vertex;
+	total_line_count = static_cast<short>(pts[lowest].x - pts[highest].x);
+	const short aggregate_total = total_line_count;
+	while (total_line_count > 0)
+	{
+		if (left_line_count <= 0)
+		{
+			do
+			{
+				vertex = (left_vertex == n - 1) ? 0 : static_cast<short>(left_vertex + 1);
+				left_line_count = static_cast<short>(pts[vertex].x - pts[left_vertex].x);
+				if (!build_y_table(left_table.data() + aggregate_left, static_cast<short>(pts[left_vertex].x),
+				                   static_cast<short>(pts[left_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_left = static_cast<short>(aggregate_left + left_line_count);
+				left_vertex = vertex;
+			} while (!left_line_count);
+		}
+		if (right_line_count <= 0)
+		{
+			do
+			{
+				vertex = right_vertex ? static_cast<short>(right_vertex - 1) : static_cast<short>(n - 1);
+				right_line_count = static_cast<short>(pts[vertex].x - pts[right_vertex].x);
+				if (!build_y_table(right_table.data() + aggregate_right, static_cast<short>(pts[right_vertex].x),
+				                   static_cast<short>(pts[right_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_right = static_cast<short>(aggregate_right + right_line_count);
+				right_vertex = vertex;
+			} while (!right_line_count);
+		}
+		const short delta = std::min(left_line_count, right_line_count);
+		total_line_count = static_cast<short>(total_line_count - delta);
+		left_line_count = static_cast<short>(left_line_count - delta);
+		right_line_count = static_cast<short>(right_line_count - delta);
+	}
+	for (int k = 0; k < aggregate_total; ++k)
+	{
+		const int x = pts[highest].x + k;
+		const int y0 = left_table[k], y1 = right_table[k];
+		for (int y = y0; y < y1; ++y)
+		{
+			if (y < 0 || y >= h || x >= w)
+				++wrote_outside;
+			else
+				cov[static_cast<size_t>(y) * w + x] = 1;
+		}
+	}
+	return Drawn;
+}
+} // namespace sw
+
+static void test_wall_w()
+{
+	// Basics: a wall in the plane x = 1000 (v.i = 0) is at w = 1000 in every column.
+	for (int sx = 0; sx <= 400; sx += 50)
+		CHECK(wall_w(200, 256, 1000, 0, 0, 1000, sx) == 1000.0f);
+	// |w|: a negative world x is negated (:955).
+	CHECK(wall_w(200, 256, -1000, 0, 0, 1000, 123) == 1000.0f);
+	// The denominator guard (:943, 950): column sx = hw, vector.j = 0 -> denominator 0 -> 1, no inf / NaN.
+	const float g = wall_w(200, 256, 1000, 5000, 7, 0, 200);
+	CHECK(std::isfinite(g) && g == std::fabs(1000.0f + static_cast<float>(256 * 5000) * 7.0f));
+	// The clamp, apart: [16, 32767].
+	CHECK(clamp_w(0.0f) == 16.0f && clamp_w(15.9f) == 16.0f && clamp_w(16.0f) == 16.0f);
+	CHECK(clamp_w(500.5f) == 500.5f && clamp_w(32767.0f) == 32767.0f && clamp_w(32768.0f) == 32767.0f);
+	CHECK(clamp_w(1e30f) == 32767.0f && clamp_w(-5.0f) == 16.0f);
+	CHECK(wall_w_clamped(200, 256, 10, 0, 0, 1000, 123) == 16.0f && wall_w_clamped(200, 256, 40000, 0, 0, 1000, 5) == 32767.0f);
+
+	// The three gates over generated walls and columns (design 7, M1 "Host tests"). hw = 200 (a 400-px view),
+	// wx 160-320, |o| <= 40 000, t <= 64; three profiles of the vector's size. Restricted to SW's domain:
+	// samples with |tx * v.i| >= 2^31 or |o.x + t * v.i| > 32 767 are excluded and counted.
+	std::mt19937_64 rng(0xC3D001u);
+	auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	const int hw = 200;
+	unsigned long generated = 0, out_t = 0, excl_wrap = 0, excl_range = 0, judged_a = 0, judged_b = 0, judged_c = 0;
+	unsigned fail_a = 0, fail_b = 0, fail_c = 0;
+	double worst_a = 0, worst_b = 0;
+	const int o_max[3] = {12000, 40000, 40000}, v_max[3] = {2000, 8000, 32767};
+	for (int i = 0; i < 900000; ++i)
+	{
+		const int pr = i % 3;
+		const int wx = uni(160, 320);
+		const int ox = uni(-o_max[pr], o_max[pr]), oy = uni(-o_max[pr], o_max[pr]);
+		const int vi = uni(-v_max[pr], v_max[pr]), vj = uni(-v_max[pr], v_max[pr]);
+		const int sx = uni(0, 400);
+		++generated;
+		// Double-precision 2.2 (the reference for gate (a)).
+		const double s = sx - hw;
+		const double num = static_cast<double>(wx) * oy - s * ox;
+		double den = s * vi - static_cast<double>(wx) * vj;
+		if (den == 0)
+			den = 1;
+		const double t_d = num / den;
+		const double x_d = ox + t_d * vi;
+		if (std::fabs(t_d) > 64)
+		{
+			++out_t;
+			continue;
+		}
+		const sw::WorldX sw = sw::world_x(wx, hw, sx, ox, oy, vi, vj);
+		if (std::llabs(sw.product) >= (1LL << 31))
+		{
+			++excl_wrap;
+			continue;
+		}
+		if (std::fabs(x_d) > 32767.0)
+		{
+			++excl_range;
+			continue;
+		}
+		const double w_f = wall_w(hw, wx, ox, oy, vi, vj, sx);
+		const double w_d = std::fabs(x_d);
+		const double sw_w = sw.world_x;
+		// (a) the accuracy gate.
+		++judged_a;
+		const double err_a = std::fabs(w_f - w_d);
+		worst_a = std::max(worst_a, err_a / (1e-4 * w_d + 0.05));
+		if (err_a > 1e-4 * w_d + 0.05)
+		{
+			if (fail_a++ < 5)
+				std::printf("  gate (a): wx %d o (%d,%d) v (%d,%d) sx %d: w_f %.4f w_d %.4f\n", wx, ox, oy, vi, vj, sx, w_f, w_d);
+		}
+		// SW's own quantisation bound.
+		const double t_sw = std::fabs(t_d);
+		const double q = 1.0 + std::abs(vi) * (t_sw * ((sw.n_r ? 1.0 / std::abs(sw.n_r) : 0.0) + 1.0 / std::abs(sw.d_r)) + 1.0 / 65536);
+		if (q <= 0.5e-3 * sw_w)
+		{
+			// (b) the kickoff's rel <= 1e-3 vs SW world_x, where SW is precise enough to be judged.
+			++judged_b;
+			worst_b = std::max(worst_b, std::fabs(w_f - sw_w) / (1e-3 * sw_w));
+			if (std::fabs(w_f - sw_w) > 1e-3 * sw_w)
+			{
+				if (fail_b++ < 5)
+					std::printf("  gate (b): wx %d o (%d,%d) v (%d,%d) sx %d: w_f %.4f sw %d q %.3f\n", wx, ox, oy, vi, vj, sx, w_f, sw.world_x, q);
+			}
+		}
+		else
+		{
+			// (c) elsewhere within SW's own bound plus the float error.
+			++judged_c;
+			if (std::fabs(w_f - sw_w) > q + err_a)
+			{
+				if (fail_c++ < 5)
+					std::printf("  gate (c): wx %d o (%d,%d) v (%d,%d) sx %d: w_f %.4f sw %d q %.3f\n", wx, ox, oy, vi, vj, sx, w_f, sw.world_x, q);
+			}
+		}
+	}
+	std::printf("w gates: %lu samples generated; %lu outside the generator's t <= 64, %lu excluded (|tx*v.i| >= 2^31), "
+	            "%lu excluded (|world x| > 32767); judged: (a) %lu, (b) %lu, (c) %lu (a + b + c = %lu)\n",
+	            generated, out_t, excl_wrap, excl_range, judged_a, judged_b, judged_c, judged_b + judged_c);
+	std::printf("w gates: failures (a) %u (worst %.3f of the bound), (b) %u (worst %.3f of the bound), (c) %u\n",
+	            fail_a, worst_a, fail_b, worst_b, fail_c);
+	CHECK(judged_a > 100000 && judged_b > 10000 && judged_c > 10000 && judged_b + judged_c == judged_a);
+	CHECK(fail_a == 0 && fail_b == 0 && fail_c == 0);
+}
+
+static void test_fan_and_key()
+{
+	uint16_t idx[48];
+	std::memset(idx, 0xFF, sizeof idx);
+	CHECK(fan_indices(idx, 2, 5) == 0 && fan_indices(idx, 0, 5) == 0 && idx[0] == 0xFFFF);
+	CHECK(fan_indices(idx, 3, 10) == 3 && idx[0] == 10 && idx[1] == 11 && idx[2] == 12 && idx[3] == 0xFFFF);
+	CHECK(fan_indices(idx, 4, 0) == 6);
+	const uint16_t quad[6] = {0, 1, 2, 0, 2, 3};
+	CHECK(std::memcmp(idx, quad, sizeof quad) == 0 && idx[6] == 0xFFFF);
+	for (int n = 3; n <= 16; ++n)   // 3(n-2) indices, every triangle (base, base+i, base+i+1), all inside [base, base+n)
+	{
+		const unsigned base = 1000 + n;
+		CHECK(fan_indices(idx, n, base) == 3 * (n - 2));
+		bool ok = true;
+		for (int i = 0; i < n - 2; ++i)
+			ok = ok && idx[3 * i] == base && idx[3 * i + 1] == base + i + 1 && idx[3 * i + 2] == base + i + 2;
+		CHECK(ok);
+	}
+	CHECK(fan_indices(idx, 16, 65520) == 42 && idx[41] == 65535);   // u16 at the end of the range
+
+	int tex_a, tex_b, sh_a, sh_b;
+	const DrawKey k{kWalls, &tex_a, &sh_a, 0, 3, 0};
+	DrawKey k2 = k;
+	CHECK(k == k2 && !(k != k2));
+	k2 = k; k2.cls = kFloors;                CHECK(!(k == k2) && k != k2);
+	k2 = k; k2.texture = &tex_b;             CHECK(!(k == k2));
+	k2 = k; k2.shading_tables = &sh_b;       CHECK(!(k == k2));
+	k2 = k; k2.transfer_mode = 1;            CHECK(!(k == k2));
+	k2 = k; k2.transfer_data = 4;            CHECK(!(k == k2));
+	k2 = k; k2.shadeless = 0x0002;           CHECK(!(k == k2));
+
+	// c3d_supports: M1 draws vertical textured opaque polygons only.
+	CHECK(c3d_supports(Entry::Vertical, Transfer::Textured, false));
+	CHECK(!c3d_supports(Entry::Vertical, Transfer::Textured, true));
+	CHECK(!c3d_supports(Entry::Horizontal, Transfer::Textured, false));
+	CHECK(!c3d_supports(Entry::Rectangle, Transfer::Textured, false));
+	CHECK(!c3d_supports(Entry::Vertical, Transfer::BigLandscaped, false));
+	CHECK(!c3d_supports(Entry::Vertical, Transfer::Static, false) && !c3d_supports(Entry::Vertical, Transfer::Tinted, false));
+	CHECK(!c3d_supports(Entry::Vertical, Transfer::Other, false));
+}
+
+static void test_colour_and_cmdbuf()
+{
+	// The colour hash never produces the sentinel's G and B (so no RGB the sentinel can have, for any k).
+	std::set<uint32_t> distinct;
+	bool never = true;
+	for (unsigned s = 0; s < 65536; ++s)
+	{
+		const Rgb c = shape_colour(static_cast<uint16_t>(s));
+		never = never && !(c.g == 0xC3 && c.b == 0xA5);
+		for (unsigned k : {0u, 1u, 77u, 255u})
+		{
+			const uint32_t argb = 0xFF000000u | (static_cast<uint32_t>(c.r) << 16) | (static_cast<uint32_t>(c.g) << 8) | c.b;
+			never = never && argb != cal_sentinel_argb(k);
+		}
+		distinct.insert((static_cast<uint32_t>(c.r) << 16) | (static_cast<uint32_t>(c.g) << 8) | c.b);
+	}
+	CHECK(never);
+	CHECK(distinct.size() > 60000);   // a hash of 65 536 ids: nearly all different
+	std::printf("shape_colour: %zu distinct colours over 65536 shapes\n", distinct.size());
+	// The forced case: find a shape whose raw hash is the forbidden pair, if any, is covered by the loop above;
+	// the function is deterministic.
+	CHECK(shape_colour(1234).r == shape_colour(1234).r && shape_colour(1).b == shape_colour(1).b);
+
+	// Command-buffer arithmetic. P0 = buffer start, P1 = write position before C3D_FrameEnd.
+	uint32_t buf[16384];
+	const uint32_t size = 16384;
+	CmdBufWords c = cmdbuf_words(buf + 4, buf + 1000, false, 0.9f, size);   // empty at P1: usage is stale
+	CHECK(c.frame_words == 996 && c.end_words == 0);
+	// Offset non-zero: end = lroundf(usage * size) - frame words. usage 0.0625 * 16384 = 1024.
+	c = cmdbuf_words(buf + 4, buf + 1000, true, 0.0625f, size);
+	CHECK(c.frame_words == 996 && c.end_words == 28);
+	// lroundf: 1023.6 -> 1024, 1023.4 -> 1023 (usage = words / size).
+	c = cmdbuf_words(buf, buf + 1000, true, 1023.6f / 16384.0f, size);
+	CHECK(c.end_words == 24);
+	c = cmdbuf_words(buf, buf + 1000, true, 1023.4f / 16384.0f, size);
+	CHECK(c.end_words == 23);
+	// Rounding half away from zero (lroundf): 1000.5 -> 1001.
+	c = cmdbuf_words(buf, buf + 1000, true, 1000.5f / 16384.0f, size);
+	CHECK(c.end_words == 1 || c.end_words == 0);   // float(1000.5/16384) * 16384 is 1000.5 or a hair under
+	// A usage below the frame's own words (a stale or odd value) records 0, not a wrap-around.
+	c = cmdbuf_words(buf, buf + 1000, true, 0.01f, size);
+	CHECK(c.frame_words == 1000 && c.end_words == 0);
+	// P1 before P0 (cannot happen): 0.
+	c = cmdbuf_words(buf + 10, buf + 5, true, 0.5f, size);
+	CHECK(c.frame_words == 0);
+	// The offset-zero case: nothing recorded for the end whatever the usage says.
+	c = cmdbuf_words(buf, buf, false, 1.0f, size);
+	CHECK(c.frame_words == 0 && c.end_words == 0);
+	c = cmdbuf_words(buf, buf + 8, false, 1.0f, size);
+	CHECK(c.frame_words == 8 && c.end_words == 0);
+
+	// The reserve test: size - offset >= draw + end + extra.
+	CHECK(reserve_ok(131072, 0, kDrawReserveWords, kEndReserveWords, 0));
+	CHECK(kDrawReserveWords == 508 && kEndReserveWords == 20);
+	CHECK(reserve_ok(4096, 2048, 1024, 1024, 0) && !reserve_ok(4096, 2049, 1024, 1024, 0));
+	CHECK(reserve_ok(4096, 2048 - 5, 1024, 1024, 5) && !reserve_ok(4096, 2048 - 5, 1024, 1024, 6));
+	CHECK(!reserve_ok(131072, 0, 1024, 1024, 1000000));   // reserve_extra forces a refusal
+	CHECK(!reserve_ok(8192, 8193, 0, 0, 0) && reserve_ok(8192, 8192, 0, 0, 0));   // offset beyond size: refused
+	CHECK(!reserve_ok(0xFFFFFFFFu, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu));   // no 32-bit wrap
+	CHECK(reserve_ok(8192, 0, 4096, 4096, 0) && !reserve_ok(8192, 0, 4096, 4097, 0));
+	CHECK(sizeof(Vertex) == 32 && offsetof(Vertex, u0) == 12 && offsetof(Vertex, r) == 28);
+}
+
+static void test_config_m1()
+{
+	Config d;
+	CHECK(d.cmdbuf_kib == 512 && d.gxq_budget == 24 && d.ring_vertices == 1024 && d.ring_indices == 2048);
+	CHECK(d.reserve_extra == 0 && d.film.empty());
+
+	Config c;
+	CHECK(config_apply(c, "cmdbuf_kib", "32") && c.cmdbuf_kib == 32);
+	CHECK(config_apply(c, "cmdbuf_kib", "16") && c.cmdbuf_kib == 16);
+	CHECK(config_apply(c, "cmdbuf_kib", "4096") && c.cmdbuf_kib == 4096);
+	CHECK(!config_apply(c, "cmdbuf_kib", "15") && c.cmdbuf_kib == 4096);
+	CHECK(!config_apply(c, "cmdbuf_kib", "4097") && !config_apply(c, "cmdbuf_kib", "") && !config_apply(c, "cmdbuf_kib", "-1"));
+	CHECK(config_apply(c, "gxq_budget", "4") && c.gxq_budget == 4);
+	CHECK(config_apply(c, "gxq_budget", "1") && config_apply(c, "gxq_budget", "24") && c.gxq_budget == 24);
+	CHECK(!config_apply(c, "gxq_budget", "0") && !config_apply(c, "gxq_budget", "25") && c.gxq_budget == 24);
+	CHECK(config_apply(c, "ring_vertices", "64") && c.ring_vertices == 64);
+	CHECK(config_apply(c, "ring_vertices", "32768") && !config_apply(c, "ring_vertices", "32769") && !config_apply(c, "ring_vertices", "63"));
+	CHECK(config_apply(c, "ring_indices", "64") && config_apply(c, "ring_indices", "65536") && c.ring_indices == 65536);
+	CHECK(!config_apply(c, "ring_indices", "65537") && !config_apply(c, "ring_indices", "63"));
+	CHECK(config_apply(c, "reserve_extra", "0") && config_apply(c, "reserve_extra", "1000000") && c.reserve_extra == 1000000);
+	CHECK(!config_apply(c, "reserve_extra", "1000001") && !config_apply(c, "reserve_extra", "x"));
+
+	// film: the rest of the line, trimmed; spaces kept inside; '#' starts a comment.
+	Config f;
+	std::vector<std::string> problems;
+	config_parse(f,
+	             "renderer c3d\n"
+	             "film   M2 L01 Waterloo Waterpark.46857.filA   \n"
+	             "diff 2\n",
+	             problems);
+	CHECK(problems.empty() && f.film == "M2 L01 Waterloo Waterpark.46857.filA" && f.diff == 2 && f.renderer_c3d);
+	config_parse(f, "film\tc3d-film.filA   # a comment, not part of the name\n", problems);
+	CHECK(problems.empty() && f.film == "c3d-film.filA");
+	config_parse(f, "film sdmc:/3ds/alephone/my film.filA\n", problems);
+	CHECK(problems.empty() && f.film == "sdmc:/3ds/alephone/my film.filA");
+	config_parse(f, "film  /films/a b  c.filA\r\n", problems);
+	CHECK(problems.empty() && f.film == "/films/a b  c.filA");   // inner runs of spaces kept, the CR trimmed
+	config_parse(f, "film a#b.filA\n", problems);   // '#' is not supported inside a path: the name is cut there
+	CHECK(problems.empty() && f.film == "a");
+	// An empty value is rejected and leaves the old one.
+	config_parse(f, "film\n", problems);
+	CHECK(problems.size() == 1 && f.film == "a");
+	config_parse(f, "film    # nothing but a comment\n", problems);
+	CHECK(problems.size() == 2 && f.film == "a");
+	problems.clear();
+	// The other keys still read one token, and the new ones work in a file.
+	Config m;
+	config_parse(m, "cmdbuf_kib 32\ngxq_budget 4  # the queue\nring_vertices 64\nring_indices 128\nreserve_extra 5000\nmode readback\n", problems);
+	CHECK(problems.empty() && m.cmdbuf_kib == 32 && m.gxq_budget == 4 && m.ring_vertices == 64 && m.ring_indices == 128);
+	CHECK(m.reserve_extra == 5000 && m.mode == Mode::Readback);
+	config_parse(m, "gxq_budget 25\nring_vertices 10\n", problems);
+	CHECK(problems.size() == 2 && m.gxq_budget == 4 && m.ring_vertices == 64);
+}
+
+// A random convex polygon (or a degenerate one) of 3-8 integer vertices for the coverage model.
+static std::vector<Point2> random_polygon(std::mt19937_64& rng, int W, int H)
+{
+	auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	// Box size log-uniform: many small boxes (many exact ties), some as large as the view.
+	const double lg = std::uniform_real_distribution<double>(std::log(3.0), std::log(static_cast<double>(W)))(rng);
+	const int bw = std::min(W, static_cast<int>(std::exp(lg))), bh = std::min(H, std::max(2, static_cast<int>(std::exp(lg) * 0.6)));
+	const int bx = uni(0, W - bw), by = uni(0, H - bh);
+	const int count = uni(3, 8);
+	std::vector<Point2> pts;
+	for (int i = 0; i < count; ++i)
+		pts.push_back({bx + uni(0, bw), by + uni(0, bh)});
+	std::vector<Point2> poly;
+	if (uni(0, 9) == 0)
+		poly = pts;   // anything goes: duplicates, collinear, concave, wound either way
+	else
+	{
+		// Convex hull, counter-clockwise in math orientation (monotone chain, collinear dropped).
+		std::vector<Point2> p = pts;
+		std::sort(p.begin(), p.end(), [](const Point2& a, const Point2& b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
+		p.erase(std::unique(p.begin(), p.end(), [](const Point2& a, const Point2& b) { return a.x == b.x && a.y == b.y; }), p.end());
+		auto cross = [](const Point2& o, const Point2& a, const Point2& b) {
+			return static_cast<long long>(a.x - o.x) * (b.y - o.y) - static_cast<long long>(a.y - o.y) * (b.x - o.x);
+		};
+		std::vector<Point2> hull;
+		if (p.size() >= 3)
+		{
+			hull.resize(2 * p.size());
+			size_t k = 0;
+			for (size_t i = 0; i < p.size(); ++i)
+			{
+				while (k >= 2 && cross(hull[k - 2], hull[k - 1], p[i]) <= 0)
+					--k;
+				hull[k++] = p[i];
+			}
+			for (size_t i = p.size() - 1, t = k + 1; i > 0; --i)
+			{
+				while (k >= t && cross(hull[k - 2], hull[k - 1], p[i - 1]) <= 0)
+					--k;
+				hull[k++] = p[i - 1];
+			}
+			hull.resize(k - 1);
+		}
+		poly = hull.size() >= 3 ? hull : pts;
+		// Sometimes insert the midpoint of an edge (a collinear vertex), as clipping can produce.
+		if (poly.size() < 8 && hull.size() >= 3 && uni(0, 3) == 0)
+		{
+			const size_t e = static_cast<size_t>(uni(0, static_cast<int>(poly.size()) - 1));
+			const Point2 a = poly[e], b = poly[(e + 1) % poly.size()];
+			if (((a.x + b.x) % 2) == 0 && ((a.y + b.y) % 2) == 0)
+				poly.insert(poly.begin() + static_cast<long>(e) + 1, Point2{(a.x + b.x) / 2, (a.y + b.y) / 2});
+		}
+	}
+	if (uni(0, 1))
+		std::reverse(poly.begin(), poly.end());
+	const int rot = uni(0, static_cast<int>(poly.size()) - 1);
+	std::rotate(poly.begin(), poly.begin() + rot, poly.end());
+	return poly;
+}
+
+// Every vertex on one side of (or on) every edge: `clockwise` = the side of positive shoelace area in
+// y-down space (cross >= 0 below); otherwise either side. Repeated vertices are fine (zero-length edges skip).
+static bool is_convex(const std::vector<Point2>& poly, bool clockwise)
+{
+	const int n = static_cast<int>(poly.size());
+	bool pos = false, neg = false;
+	for (int i = 0; i < n; ++i)
+	{
+		const Point2 &a = poly[i], &b = poly[(i + 1) % n];
+		for (int j = 0; j < n; ++j)
+		{
+			const long long cr = static_cast<long long>(b.x - a.x) * (poly[j].y - a.y) - static_cast<long long>(b.y - a.y) * (poly[j].x - a.x);
+			pos = pos || cr > 0;
+			neg = neg || cr < 0;
+		}
+	}
+	return clockwise ? !neg : !(pos && neg);
+}
+
+static void test_acceptance_and_coverage()
+{
+	const int W = 400, H = 240;
+	// Hand-made cases.
+	auto acc = [&](std::vector<Point2> v) { return accept_polygon(v.data(), static_cast<int>(v.size()), W, H); };
+	CHECK(acc({{0, 0}, {10, 0}, {10, 10}, {0, 10}}) == Accept::Draw);        // clockwise on screen (y down)
+	CHECK(acc({{0, 0}, {0, 10}, {10, 10}, {10, 0}}) == Accept::Area);        // counter-clockwise
+	CHECK(acc({{0, 0}, {400, 0}, {400, 240}, {0, 240}}) == Accept::Draw);    // the whole view: the bounds are inclusive
+	CHECK(acc({{-1, 0}, {10, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {401, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, -1}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, 241}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{5, 0}, {5, 10}, {5, 20}}) == Accept::Degenerate);            // min x == max x
+	CHECK(acc({{-5, 0}, {5, 10}, {5, 20}}) == Accept::Bounds);               // the bounds test comes first
+	CHECK(acc({{0, 0}, {5, 5}}) == Accept::Degenerate);
+	CHECK(acc({{0, 0}, {10, 5}, {20, 10}}) == Accept::Area);                 // collinear: zero area
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}}) == Accept::Draw);                  // clockwise on screen
+	CHECK(acc({{0, 0}, {0, 10}, {20, 0}}) == Accept::Area);                  // counter-clockwise on screen
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}, {0, 5}}) == Accept::Draw);          // a collinear vertex on the left edge
+	// A walk build_y_table refuses: a concave "S" whose clockwise walk from the leftmost vertex runs back in x.
+	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {10, 10}, {0, 10}}) == Accept::Draw);        // concave but walkable
+	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {20, 10}, {0, 10}}) == Accept::Walk);        // 1 -> 2 runs back in x
+
+	// Random polygons, concave and degenerate included: the acceptance status is the SW walk's.
+	std::mt19937_64 rng(0xC3D002u);
+	unsigned long n_poly = 0, n_draw = 0, n_walk = 0, n_bounds = 0, n_degen = 0, n_area = 0;
+	unsigned long walk_mismatch = 0, area_sw_wrote = 0, refused_sw_wrote = 0, outside_writes = 0;
+	unsigned long identical_px = 0, tie_px = 0, tie_sw_covered = 0, tie_sw_clear = 0, bad_px = 0, drawn_cmp = 0, empty_drawn = 0;
+	std::vector<uint8_t> cov(static_cast<size_t>(W) * H);
+	for (int it = 0; it < 12000; ++it)
+	{
+		std::vector<Point2> poly = random_polygon(rng, W, H);
+		if (it % 40 == 7)   // out of the bounds now and then
+			poly[0].x = (it & 1) ? -1 : W + 1;
+		const int n = static_cast<int>(poly.size());
+		const Accept a = accept_polygon(poly.data(), n, W, H);
+		++n_poly;
+		n_draw += a == Accept::Draw; n_walk += a == Accept::Walk; n_bounds += a == Accept::Bounds;
+		n_degen += a == Accept::Degenerate; n_area += a == Accept::Area;
+
+		std::fill(cov.begin(), cov.end(), 0);
+		unsigned wrote_outside = 0;
+		const sw::Result sr = sw::polygon_coverage(poly, W, H, cov, wrote_outside);
+		outside_writes += wrote_outside;
+		size_t written = 0;
+		for (uint8_t v : cov)
+			written += v;
+
+		// The statuses that precede the area agree with SW's refusals one for one.
+		const bool sw_refused = sr != sw::Drawn;
+		if ((a == Accept::Bounds) != (sr == sw::RefusedBounds) || (a == Accept::Degenerate) != (sr == sw::RefusedDegenerate) ||
+		    (a == Accept::Walk) != (sr == sw::RefusedWalk))
+			++walk_mismatch;
+		if (sw_refused && written)
+			++refused_sw_wrote;
+		if (a == Accept::Area)
+		{
+			// "SW then has y1 < y0 in every column and writes nothing" -- for the convex ones. A concave polygon of
+			// negative area can still have pixels where its tables cross; those are not what the engine feeds.
+			if (written && is_convex(poly, false))
+				++area_sw_wrote;
+			continue;
+		}
+		if (a != Accept::Draw)
+			continue;
+
+		// Ideal pixel-centre rasterisation of the fan = the polygon's interior, in doubled coordinates.
+		// Only for convex polygons (all cross products of consecutive edges the same sign).
+		if (!is_convex(poly, true))
+			continue;
+		// Polygons with a repeated vertex are fan-degenerate but still convex: zero-length edges are skipped.
+		int minx = W, maxx = 0, miny = H, maxy = 0;
+		for (const Point2& p : poly)
+			minx = std::min(minx, p.x), maxx = std::max(maxx, p.x), miny = std::min(miny, p.y), maxy = std::max(maxy, p.y);
+		++drawn_cmp;
+		const unsigned long tie_before = tie_px;
+		unsigned covered_here = 0;
+		for (int y = miny; y < std::min(maxy + 1, H); ++y)
+			for (int x = minx; x < std::min(maxx + 1, W); ++x)
+			{
+				const long long px = 2LL * x + 1, py = 2LL * y + 1;
+				bool neg = false, zero = false;
+				for (int i = 0; i < n; ++i)
+				{
+					const Point2 &p0 = poly[i], &p1 = poly[(i + 1) % n];
+					if (p0.x == p1.x && p0.y == p1.y)
+						continue;
+					const long long cr = (2LL * (p1.x - p0.x)) * (py - 2LL * p0.y) - (2LL * (p1.y - p0.y)) * (px - 2LL * p0.x);
+					neg = neg || cr < 0;
+					zero = zero || cr == 0;
+				}
+				const bool swc = cov[static_cast<size_t>(y) * W + x] != 0;
+				if (neg)
+				{
+					// Outside the polygon: SW must not have written it.
+					if (swc)
+						++bad_px;
+					else
+						++identical_px;
+				}
+				else if (zero)
+				{
+					++tie_px;
+					(swc ? tie_sw_covered : tie_sw_clear) += 1;
+				}
+				else
+				{
+					covered_here += 1;
+					if (swc)
+						++identical_px;
+					else
+						++bad_px;
+				}
+			}
+		// The same definition as tie_pixels (M1 piece 5): the counts agree polygon by polygon.
+		if (tie_pixels(poly.data(), n, W, H, nullptr, nullptr) != static_cast<int>(tie_px - tie_before))
+			++bad_px;
+		// SW wrote nothing outside the box, either.
+		size_t in_box = 0;
+		for (int y = miny; y < std::min(maxy + 1, H); ++y)
+			for (int x = minx; x < std::min(maxx + 1, W); ++x)
+				in_box += cov[static_cast<size_t>(y) * W + x];
+		if (in_box != written)
+			++bad_px;
+		if (!covered_here)
+			++empty_drawn;
+	}
+	std::printf("coverage model: %lu polygons: %lu drawn (acceptance), %lu walk, %lu bounds, %lu degenerate, %lu area;"
+	            " %lu convex drawn compared, %lu of them with no strictly interior pixel\n",
+	            n_poly, n_draw, n_walk, n_bounds, n_degen, n_area, drawn_cmp, empty_drawn);
+	std::printf("coverage model: %lu pixels identical, %lu exact-tie pixels counted apart (SW covered %lu, SW clear %lu), "
+	            "%lu mismatches\n", identical_px, tie_px, tie_sw_covered, tie_sw_clear, bad_px);
+	CHECK(n_draw > 2000 && n_walk > 0 && n_bounds > 0 && n_degen > 0 && n_area > 1000);
+	std::printf("coverage model: acceptance vs SW refusals differ %lu; SW wrote after a refusal %lu, after area <= 0 %lu, outside the view %lu\n",
+	            walk_mismatch, refused_sw_wrote, area_sw_wrote, outside_writes);
+	CHECK(walk_mismatch == 0 && refused_sw_wrote == 0 && area_sw_wrote == 0 && outside_writes == 0);
+	CHECK(bad_px == 0 && drawn_cmp > 1500);
+	CHECK(tie_px > 0);
+}
+
+// tie_pixels vs a brute-force scan of every pixel centre against every edge, on generated polygons; and
+// against the coverage model's definition (the centre on an edge line and inside-or-on every other edge).
+static void tie_cb(void* ctx, int k, int m) { static_cast<std::vector<std::pair<int, int>>*>(ctx)->push_back({k, m}); }
+
+static void test_tie_pixels()
+{
+	const int W = 40, H = 30;
+	std::mt19937_64 rng(0x71E5u);
+	unsigned long polys = 0, ties = 0, model_ties = 0, convex = 0;
+	for (int it = 0; it < 20000; ++it)
+	{
+		std::vector<Point2> poly = random_polygon(rng, W, H);
+		if (it % 17 == 3)
+			poly[0].x = -3;   // clipping: vertices outside the view
+		const int n = static_cast<int>(poly.size());
+		std::vector<std::pair<int, int>> got;
+		const int cnt = tie_pixels(poly.data(), n, W, H, tie_cb, &got);
+		CHECK(cnt == static_cast<int>(got.size()));
+		std::vector<uint8_t> have(static_cast<size_t>(W) * H, 0), want(static_cast<size_t>(W) * H, 0);
+		for (auto& g : got)
+		{
+			CHECK(g.first >= 0 && g.first < W && g.second >= 0 && g.second < H);
+			++have[static_cast<size_t>(g.second) * W + g.first];
+		}
+		// Brute force: per edge, every pixel centre in the x-span, doubled coordinates.
+		for (int i = 0; i < n; ++i)
+		{
+			Point2 p0 = poly[i], p1 = poly[(i + 1) % n];
+			if (p0.x > p1.x)
+				std::swap(p0, p1);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					if (x < p0.x || x >= p1.x)
+						continue;
+					const long long cr = (2LL * (p1.x - p0.x)) * (2LL * y + 1 - 2LL * p0.y) -
+					                     (2LL * (p1.y - p0.y)) * (2LL * x + 1 - 2LL * p0.x);
+					if (cr == 0)
+						++want[static_cast<size_t>(y) * W + x];
+				}
+		}
+		CHECK(have == want);
+		++polys;
+		for (uint8_t v : have)
+			ties += v;
+		// The coverage model's definition, for convex polygons inside the view: counts must match.
+		if (poly[0].x < 0 || accept_polygon(poly.data(), n, W, H) != Accept::Draw || !is_convex(poly, true))
+			continue;   // the coverage test's population: accepted convex polygons
+		bool inside_view = true;
+		for (const Point2& p : poly)
+			inside_view = inside_view && p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H;
+		if (!inside_view)
+			continue;
+		++convex;
+		unsigned long model = 0, mine = 0;
+		for (int y = 0; y < H; ++y)
+			for (int x = 0; x < W; ++x)
+			{
+				const long long px = 2LL * x + 1, py = 2LL * y + 1;
+				bool neg = false, zero = false;
+				for (int e = 0; e < n; ++e)
+				{
+					const Point2 &q0 = poly[e], &q1 = poly[(e + 1) % n];
+					if (q0.x == q1.x && q0.y == q1.y)
+						continue;
+					const long long cr = (2LL * (q1.x - q0.x)) * (py - 2LL * q0.y) - (2LL * (q1.y - q0.y)) * (px - 2LL * q0.x);
+					neg = neg || cr < 0;
+					zero = zero || cr == 0;
+				}
+				if (!neg && zero)
+					++model;
+			}
+		for (uint8_t v : have)
+			mine += v != 0;
+		model_ties += model;
+		CHECK(model == mine);
+	}
+	std::printf("tie pixels: %lu polygons, %lu tie pixels (per edge, brute force identical); %lu convex in-view polygons: "
+	            "coverage-model exact-tie count %lu == tie_pixels count\n", polys, ties, convex, model_ties);
+	CHECK(ties > 0 && convex > 500);
+	// The film's sliver: its top edge (346,96)-(347,97) passes through the centre (346.5, 96.5).
+	const Point2 sl[4] = {{346, 96}, {347, 97}, {347, 125}, {346, 127}};
+	std::vector<std::pair<int, int>> got;
+	tie_pixels(sl, 4, 400, 240, tie_cb, &got);
+	bool has = false;
+	for (auto& g : got)
+		has = has || (g.first == 346 && g.second == 96);
+	CHECK(has);
+}
+
+static void test_ring()
+{
+	RingState r;
+	r.configure(100, 200);
+	r.begin_frame();
+	CHECK(r.half() == 0 && r.vertices_used() == 0 && r.index_used() == 0);
+	CHECK(r.fits(100, 200) && !r.fits(101, 0) && !r.fits(0, 201));
+	CHECK(r.take(4, 6) == 0 && r.take(3, 3) == 4);
+	CHECK(r.vertices_used() == 7 && r.index_used() == 9);
+	CHECK(r.fits(93, 191) && !r.fits(94, 0) && !r.fits(0, 192));
+	r.begin_frame();
+	CHECK(r.half() == 1 && r.vertices_used() == 0 && r.index_used() == 0);
+	CHECK(r.take(10, 24) == 0);
+	r.begin_frame();
+	CHECK(r.half() == 0);
+	CHECK(r.take(2, 3) == 0);
+	// high water is per half and survives the flip
+	CHECK(r.high_water_vertices(0) == 7 && r.high_water_indices(0) == 9);
+	CHECK(r.high_water_vertices(1) == 10 && r.high_water_indices(1) == 24);
+	// a full half fits exactly, one more does not
+	RingState f;
+	f.configure(64, 64);
+	f.begin_frame();
+	f.take(64, 64);
+	CHECK(!f.fits(1, 0) && !f.fits(0, 1) && f.fits(0, 0));
 }
 
 int main()
@@ -608,8 +1591,17 @@ int main()
 	test_diff();
 	test_bmp();
 	test_gx_queue_readback();
+	test_gx_queue_m1();
 	test_stats();
 	test_calibrate();
+	test_calibrate_m1();
+	test_wall_w();
+	test_fan_and_key();
+	test_colour_and_cmdbuf();
+	test_config_m1();
+	test_acceptance_and_coverage();
+	test_tie_pixels();
+	test_ring();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

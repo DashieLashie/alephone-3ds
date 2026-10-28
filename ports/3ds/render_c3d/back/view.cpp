@@ -8,12 +8,14 @@
 	(or, for another size, deleted and made again) OUT of frame, because C3D_RenderTargetDelete
 	svcBreaks inside one; the staging is filled with a sentinel and flushed; then, through
 	frame_begin() / frame_end(), the target is cleared to a colour that encodes k, four 16x16
-	corner quads are drawn with the present's shader and attribute layout, and the display
+	corner quads and (M1) a fifth, half-transparent one at the top centre, which checks that the
+	alpha byte survives, are drawn with the present's shader and attribute layout, and the display
 	transfer (tiled -> linear) is queued INSIDE the frame, behind the draws (which are first split
 	off with C3D_FrameSplit(GX_CMDLIST_FLUSH): see the transfer below). The frame ends; an
 	empty frame_begin() / frame_end() pair then returns only when the queue has retired
 	(C3D_FrameBegin(0) waits for every earlier entry, design 0.3); cache invalidate; conversion
-	RGBA -> ARGB. core/calibrate.cpp decides what came out. The out-of-frame C3D_SyncDisplayTransfer
+	RGBA -> ARGB (M1: keeping alpha). core/calibrate.cpp decides what came out. M1: the target,
+staging, readback and conversion are the shared functions of view_shared.h, used by back/draw.cpp too. The out-of-frame C3D_SyncDisplayTransfer
 	is not used: it waits on the PPF event, which the present's in-frame transfers leave signalled
 	(design 5.7.4 "Rejected"), so it can return before its own transfer is done.
 
@@ -34,6 +36,7 @@
 #include "view.h"
 
 #include "context.h"
+#include "view_shared.h"
 #include "../core/calibrate.h"
 
 #include <3ds.h>
@@ -56,10 +59,10 @@ namespace {
 
 constexpr int kMaxSide = 1024;             // design 1.5: a view side beyond it is not handled
 constexpr int kMaxPixels = 256 * 1024;     // bounds the staging and the converted copy to 1 MiB each
-constexpr int kQuads = 4;
+constexpr int kQuads = 5;   // four corners and the alpha quad (M1)
 
 // The present's vertex layout (present.cpp): float3 position in pixels, float2 texcoord (unused here).
-struct Vertex { float x, y, z, u, v; };
+struct CalVertex { float x, y, z, u, v; };
 
 // The readback transfer (design 7, M0 "Starting values"; the same flags as present.cpp's
 // kTargetTransferFlags, gx.h:51-ff): target tiled RGBA8 -> linear RGBA8, no flip, no scaling.
@@ -73,7 +76,7 @@ C3D_RenderTarget* s_target = nullptr;   // owned by citro3d's context: C3D_Fini 
 int s_w = 0, s_h = 0;                   // the target's size
 u32* s_staging = nullptr;               // linear, w*h*4 bytes
 uint32_t* s_argb = nullptr;             // malloc, w*h: the converted readback handed to the caller
-Vertex* s_vbo = nullptr;                // linear, kQuads*4 vertices
+CalVertex* s_vbo = nullptr;             // linear, kQuads*4 vertices
 int s_uloc_projection = -1;             // the present shader's "projection" uniform
 bool s_uloc_known = false;
 
@@ -137,13 +140,44 @@ int find_projection_location()
 	return loc;
 }
 
+// The four corner quads and the alpha quad (pixels, y down) as triangle strips in the present's vertex
+// order. The alpha quad is at the top centre, x in [w/2 - 8, w/2 + 8), y in [0, 16) (calibrate.h).
+void fill_vbo(int w, int h)
+{
+	const float x[kQuads] = {0.0f, static_cast<float>(w - kCalQuad), 0.0f, static_cast<float>(w - kCalQuad),
+	                         static_cast<float>(w / 2 - kCalQuad / 2)};
+	const float y[kQuads] = {0.0f, 0.0f, static_cast<float>(h - kCalQuad), static_cast<float>(h - kCalQuad), 0.0f};
+	const float s = static_cast<float>(kCalQuad);
+	for (int q = 0; q < kQuads; ++q)
+	{
+		CalVertex* v = s_vbo + 4 * q;
+		v[0] = CalVertex{x[q], y[q], 0.5f, 0.0f, 0.0f};
+		v[1] = CalVertex{x[q], y[q] + s, 0.5f, 0.0f, 0.0f};
+		v[2] = CalVertex{x[q] + s, y[q], 0.5f, 0.0f, 0.0f};
+		v[3] = CalVertex{x[q] + s, y[q] + s, 0.5f, 0.0f, 0.0f};
+	}
+	GSPGPU_FlushDataCache(s_vbo, kQuads * 4 * sizeof(CalVertex));   // gspgpu.h: the GPU reads the VBO from RAM
+}
+
+} // namespace
+
+// --- the shared target, staging and readback (view_shared.h) ---
+
+bool view_size_supported(int w, int h, int min_side)
+{
+	return w > 0 && h > 0 && !(w & 7) && !(h & 7) && w <= kMaxSide && h <= kMaxSide && w * h <= kMaxPixels &&
+	       w >= min_side && h >= min_side;
+}
+
 // The target and buffers for a w x h view, (re)created here OUT of frame (no frame_begin() open): an
 // earlier target of another size is deleted first. C3D_RenderTargetDelete svcBreaks (USERBREAK_PANIC)
 // when called inside a frame (libcitro3d.a renderqueue.o: it tests the in-frame flag first); outside
 // one, for an unlinked target, it waits for the queue itself (gxCmdQueueWait) and then destroys.
 // False: out of memory (logged once; the size is not retried).
-bool ensure_resources(int w, int h)
+bool view_ensure(int w, int h)
 {
+	if (w == s_fail_w && h == s_fail_h)
+		return false;
 	if (s_target && s_w == w && s_h == h)
 		return true;
 	if (s_target)
@@ -159,7 +193,7 @@ bool ensure_resources(int w, int h)
 	s_staging = static_cast<u32*>(linearAlloc(bytes));
 	s_argb = static_cast<uint32_t*>(malloc(bytes));
 	if (!s_vbo)
-		s_vbo = static_cast<Vertex*>(linearAlloc(kQuads * 4 * sizeof(Vertex)));
+		s_vbo = static_cast<CalVertex*>(linearAlloc(kQuads * 4 * sizeof(CalVertex)));
 	if (!s_target || !s_staging || !s_argb || !s_vbo)
 	{
 		if (s_target)
@@ -172,7 +206,7 @@ bool ensure_resources(int w, int h)
 		{
 			s_logged_nomem = true;
 			printf("[c3d] view: no memory for the %dx%d target and readback (%lu KiB linear, %lu KiB malloc): "
-			       "calibration skipped\n", w, h, static_cast<unsigned long>(bytes / 1024),
+			       "view frames skipped\n", w, h, static_cast<unsigned long>(bytes / 1024),
 			       static_cast<unsigned long>(bytes / 1024));
 		}
 		return false;
@@ -190,24 +224,114 @@ bool ensure_resources(int w, int h)
 	return true;
 }
 
-// The four corner quads (pixels, y down) as triangle strips in the present's vertex order.
-void fill_vbo(int w, int h)
+C3D_RenderTarget* view_target()
 {
-	const float x[kQuads] = {0.0f, static_cast<float>(w - kCalQuad), 0.0f, static_cast<float>(w - kCalQuad)};
-	const float y[kQuads] = {0.0f, 0.0f, static_cast<float>(h - kCalQuad), static_cast<float>(h - kCalQuad)};
-	const float s = static_cast<float>(kCalQuad);
-	for (int q = 0; q < kQuads; ++q)
-	{
-		Vertex* v = s_vbo + 4 * q;
-		v[0] = Vertex{x[q], y[q], 0.5f, 0.0f, 0.0f};
-		v[1] = Vertex{x[q], y[q] + s, 0.5f, 0.0f, 0.0f};
-		v[2] = Vertex{x[q] + s, y[q], 0.5f, 0.0f, 0.0f};
-		v[3] = Vertex{x[q] + s, y[q] + s, 0.5f, 0.0f, 0.0f};
-	}
-	GSPGPU_FlushDataCache(s_vbo, kQuads * 4 * sizeof(Vertex));   // gspgpu.h: the GPU reads the VBO from RAM
+	return s_target;
 }
 
-} // namespace
+int view_width()
+{
+	return s_w;
+}
+
+int view_height()
+{
+	return s_h;
+}
+
+const uint32_t* view_argb()
+{
+	return s_argb;
+}
+
+void view_fill_staging(uint32_t rgba)
+{
+	const size_t n = static_cast<size_t>(s_w) * s_h;
+	for (size_t i = 0; i < n; ++i)
+		s_staging[i] = rgba;
+	GSPGPU_FlushDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));   // gspgpu.h
+}
+
+bool view_clear_target(uint32_t rgba)
+{
+	// renderqueue.h:72; one GX queue entry, counted by gx_op.
+	if (gx_op([&] { C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, rgba, 0); }))
+		return true;
+	if (!s_logged_gx)
+	{
+		s_logged_gx = true;
+		printf("[c3d] GX budget: view clear refused\n");
+	}
+	return false;
+}
+
+Readback view_readback(bool keep_alpha)
+{
+	// The readback transfer, INSIDE the frame: C3D_SyncDisplayTransfer in a frame splits the command
+	// list (C3Di_SplitFrame, GX_ProcessCommandList of the part so far) and queues GX_DisplayTransfer
+	// behind the draws, without waiting (libcitro3d.a renderqueue.o; renderqueue.h:77). Its completion
+	// is confirmed below, by the next frame_begin().
+	// Its own split submits the draws with flags 0, i.e. without GSP's cache flush (renderqueue.o
+	// C3D_SyncDisplayTransfer+0xcc-0xdc; libctru gx.o GX_ProcessCommandList+0x1c-0x44: flush =
+	// (flags >> 1) & 1), and frame_end()'s C3D_FrameEnd(GX_CMDLIST_FLUSH) skips the whole-heap flush
+	// (C3D_FrameEnd+0x7c-0x90): the GPU could run the draw segment from RAM with its bytes still in
+	// the dcache. So the draws are split off first WITH the flush (C3D_FrameSplit, renderqueue.h:33,
+	// passes its flags to GX_ProcessCommandList); the transfer's split then finds an empty buffer.
+	// The flushing split is ONE queue entry (gx_split, M1 "GX queue"); the transfer then costs 1.
+	// Critic M0 round 2, finding 1.
+	#ifdef A1_PROFILE
+	A1_PROF_SCOPE(C3dReadback);   // the split, the transfer and the conversion; the retirement wait
+	                              // inside frame_begin() is timed in c3d_wait (zones are exclusive)
+	#endif
+	const int w = s_w, h = s_h;
+	const uint32_t* const pos0 = gpuCmdBuf + gpuCmdBufOffset;   // M1: the readback's own command words
+	const bool queued = gx_split([] { C3D_FrameSplit(GX_CMDLIST_FLUSH); }) && gx_op([&] {
+		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(w, h), s_staging,
+		                        GX_BUFFER_DIM(w, h), kReadbackFlags);
+	});
+	const uint32_t* const pos1 = gpuCmdBuf + gpuCmdBufOffset;
+	if (queued)
+		cmdbuf_note_readback(pos1 > pos0 ? static_cast<uint32_t>(pos1 - pos0) : 0);
+	frame_end(0, false, FrameKind::View);
+	note_view_frame();
+	if (!queued)
+	{
+		if (!s_logged_gx)
+		{
+			s_logged_gx = true;
+			printf("[c3d] GX budget: view readback refused\n");
+		}
+		return Readback::GxRefused;
+	}
+
+	// Retirement: C3D_FrameBegin(0) returns only when every earlier queue entry, the draws and the
+	// transfer, has finished (design 0.3); an empty frame closes it. The gate was open a moment ago.
+	const FrameStart done = frame_begin(FrameZone::Wait);
+	if (done != FrameStart::Ok)
+	{
+		if (!s_logged_wait)
+		{
+			s_logged_wait = true;
+			printf("[c3d] view: the retirement wait after the readback returned %s: view frame dropped\n",
+			       done == FrameStart::Abandoned ? "Abandoned" : "AlreadyInFrame");
+		}
+		return Readback::WaitFailed;
+	}
+	frame_end(0, false, FrameKind::View);
+
+	// The GPU wrote the staging: drop any stale cached copy before reading (gspgpu.h:246).
+	const size_t n = static_cast<size_t>(w) * h;
+	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));
+	if (keep_alpha)
+		for (size_t i = 0; i < n; ++i)
+			s_argb[i] = rgba_to_argb_keep(s_staging[i]);
+	else
+		for (size_t i = 0; i < n; ++i)
+			s_argb[i] = rgba_to_argb(s_staging[i]);
+	return Readback::Ok;
+}
+
+// --- M0's calibration ---
 
 bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** pixels, int* out_w, int* out_h)
 {
@@ -217,10 +341,7 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	// release pending. The present serves a pending release; this does not.
 	if (!is_up() || release_pending() || gate_closed())
 		return false;
-	auto supported = [](int ww, int hh) {
-		return ww > 0 && hh > 0 && !(ww & 7) && !(hh & 7) && ww <= kMaxSide && hh <= kMaxSide &&
-		       ww * hh <= kMaxPixels && ww >= 2 * kCalQuad && hh >= 2 * kCalQuad;
-	};
+	auto supported = [](int ww, int hh) { return view_size_supported(ww, hh, 2 * kCalQuad); };
 	if (!supported(w, h))
 	{
 		if (!s_logged_skip_size || s_skip_w != w || s_skip_h != h)
@@ -240,22 +361,14 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 		w -= 8;
 		h -= 8;
 	}
-	if (w == s_fail_w && h == s_fail_h)
-		return false;
 
 	// Out of frame, after the gate checks: a target of another size is deleted and the new one made
-	// (C3D_RenderTargetDelete must not run inside a frame, see ensure_resources).
-	if (!ensure_resources(w, h))
+	// (C3D_RenderTargetDelete must not run inside a frame, see view_ensure).
+	if (!view_ensure(w, h))
 		return false;
 	// Neither the clear of k nor a corner colour, flushed so that no dirty cache line is written back
 	// over what the transfer writes; whatever of it is left after the readback was never written.
-	{
-		const u32 sentinel = cal_sentinel_rgba(k);
-		const size_t n = static_cast<size_t>(w) * h;
-		for (size_t i = 0; i < n; ++i)
-			s_staging[i] = sentinel;
-		GSPGPU_FlushDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));   // gspgpu.h
-	}
+	view_fill_staging(cal_sentinel_rgba(k));
 
 	// frame_begin(): every earlier C3D frame has retired when it returns Ok (zone c3d_wait).
 	const FrameStart fs = frame_begin(FrameZone::Wait);
@@ -270,12 +383,7 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	}
 
 	// Clear to the colour that encodes k (0xRRGGBBAA, as present.cpp's calibrate; verified by P1).
-	// renderqueue.h:72; one GX queue entry, counted by gx_op.
-	if (!gx_op([&] { C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, cal_clear_rgba(k), 0); }) && !s_logged_gx)
-	{
-		s_logged_gx = true;
-		printf("[c3d] GX budget: view clear refused\n");
-	}
+	view_clear_target(cal_clear_rgba(k));
 	if (!C3D_FrameDrawOn(s_target))   // renderqueue.h:32
 	{
 		if (!s_logged_draw_on)
@@ -310,74 +418,29 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	// Our own buffer info for these draws, the present's restored afterwards (see the file head).
 	s_saved_buf = *C3D_GetBufInfo();
 	BufInfo_Init(&s_view_buf);
-	BufInfo_Add(&s_view_buf, s_vbo, sizeof(Vertex), 2, 0x10);   // buffers.h:17, as present.cpp
+	BufInfo_Add(&s_view_buf, s_vbo, sizeof(CalVertex), 2, 0x10);   // buffers.h:17, as present.cpp
 	C3D_SetBufInfo(&s_view_buf);
 
-	static const uint32_t corner[kQuads] = {kCalTopLeft, kCalTopRight, kCalBottomLeft, kCalBottomRight};
+	static const uint32_t colour[kQuads] = {kCalTopLeft, kCalTopRight, kCalBottomLeft, kCalBottomRight,
+	                                        kCalAlphaQuad};
 	for (int q = 0; q < kQuads; ++q)
 	{
 		// TEV stage 0 = the constant colour (texenv.h:49-88), fully reset per quad. C3D_GetTexEnv()
-		// marks the stage dirty.
+		// marks the stage dirty. For the alpha quad the constant carries alpha 0x80 (tev_constant keeps
+		// the top byte) and the blend is ONE, ZERO: the alpha byte reaches the target as drawn.
 		C3D_TexEnv* env = C3D_GetTexEnv(0);
 		C3D_TexEnvInit(env);
 		C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
 		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-		C3D_TexEnvColor(env, tev_constant(corner[q]));
+		C3D_TexEnvColor(env, tev_constant(colour[q]));
 		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * q, 4);   // the present's own primitive
 	}
 	C3D_SetBufInfo(&s_saved_buf);
 
-	// The readback transfer, INSIDE the frame: C3D_SyncDisplayTransfer in a frame splits the command
-	// list (C3Di_SplitFrame, GX_ProcessCommandList of the part so far) and queues GX_DisplayTransfer
-	// behind the draws, without waiting (libcitro3d.a renderqueue.o; renderqueue.h:77). Its completion
-	// is confirmed below, by the next frame_begin().
-	// Its own split submits the draws with flags 0, i.e. without GSP's cache flush (renderqueue.o
-	// C3D_SyncDisplayTransfer+0xcc-0xdc; libctru gx.o GX_ProcessCommandList+0x1c-0x44: flush =
-	// (flags >> 1) & 1), and frame_end()'s C3D_FrameEnd(GX_CMDLIST_FLUSH) skips the whole-heap flush
-	// (C3D_FrameEnd+0x7c-0x90): the GPU could run the draw segment from RAM with its bytes still in
-	// the dcache. So the draws are split off first WITH the flush (C3D_FrameSplit, renderqueue.h:33,
-	// passes its flags to GX_ProcessCommandList); the transfer's split then finds an empty buffer.
-	// Two GX entries, one gx_op each. Critic M0 round 2, finding 1.
-	#ifdef A1_PROFILE
-	A1_PROF_SCOPE(C3dReadback);   // the split, the transfer and the conversion; the retirement wait
-	                              // inside frame_begin() is timed in c3d_wait (zones are exclusive)
-	#endif
-	const bool queued = gx_op([] { C3D_FrameSplit(GX_CMDLIST_FLUSH); }) && gx_op([&] {
-		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(w, h), s_staging,
-		                        GX_BUFFER_DIM(w, h), kReadbackFlags);
-	});
-	frame_end(0, false, FrameKind::View);
-	note_view_frame();
-	if (!queued)
-	{
-		if (!s_logged_gx)
-		{
-			s_logged_gx = true;
-			printf("[c3d] GX budget: view readback refused\n");
-		}
+	// The readback: the split, the transfer, the frame's end, the retirement pair, the conversion,
+	// keeping the alpha byte (M1: the alpha check).
+	if (view_readback(true) != Readback::Ok)
 		return false;
-	}
-
-	// Retirement: C3D_FrameBegin(0) returns only when every earlier queue entry, the draws and the
-	// transfer, has finished (design 0.3); an empty frame closes it. The gate was open a moment ago.
-	const FrameStart done = frame_begin(FrameZone::Wait);
-	if (done != FrameStart::Ok)
-	{
-		if (!s_logged_wait)
-		{
-			s_logged_wait = true;
-			printf("[c3d] view: the retirement wait after the readback returned %s: calibration frame dropped\n",
-			       done == FrameStart::Abandoned ? "Abandoned" : "AlreadyInFrame");
-		}
-		return false;
-	}
-	frame_end(0, false, FrameKind::View);
-
-	// The GPU wrote the staging: drop any stale cached copy before reading (gspgpu.h:246).
-	const size_t n = static_cast<size_t>(w) * h;
-	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));
-	for (size_t i = 0; i < n; ++i)
-		s_argb[i] = rgba_to_argb(s_staging[i]);
 
 	out = cal_check(s_argb, w, h, w, k);
 	if (pixels)

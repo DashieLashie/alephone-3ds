@@ -43,6 +43,7 @@ enum Zone
 	C3dNull,    // M0 null mode: the traversal with a counting rasteriser (nested in Render)
 	C3dDiff,    // M0 diff harness, the whole of a diff frame (nested in Render; diff frames are not benchmark frames)
 	C3dReadback, // M0 view readback: out-of-frame transfer + cache invalidate + conversion (nested in Render)
+	C3dDraw,    // M1 view frame: the C3D side's draw submission, ring writes and flush (nested in c3d_diff)
 #endif
 	kZoneCount
 };

@@ -36,6 +36,15 @@ bool parse_int(const std::string& value, long lo, long hi, long& out)
 	return true;
 }
 
+bool parse_unsigned(const std::string& value, long lo, long hi, unsigned& out)
+{
+	long v = 0;
+	if (!parse_int(value, lo, hi, v))
+		return false;
+	out = static_cast<unsigned>(v);
+	return true;
+}
+
 } // namespace
 
 bool config_apply(Config& cfg, const std::string& key, const std::string& value)
@@ -136,6 +145,23 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		cfg.retire_wait_ms = static_cast<unsigned>(v);
 		return true;
 	}
+	if (key == "cmdbuf_kib")
+		return parse_unsigned(value, 16, 4096, cfg.cmdbuf_kib);
+	if (key == "gxq_budget")
+		return parse_unsigned(value, 1, 24, cfg.gxq_budget);
+	if (key == "ring_vertices")
+		return parse_unsigned(value, 64, 32768, cfg.ring_vertices);
+	if (key == "ring_indices")
+		return parse_unsigned(value, 64, 65536, cfg.ring_indices);
+	if (key == "reserve_extra")
+		return parse_unsigned(value, 0, 1000000, cfg.reserve_extra);
+	if (key == "film")
+	{
+		if (value.empty())
+			return false;
+		cfg.film = value;
+		return true;
+	}
 	return false;
 }
 
@@ -150,7 +176,15 @@ void config_parse(Config& cfg, const std::string& text, std::vector<std::string>
 		std::string key, value;
 		if (!(ls >> key))
 			continue;
-		ls >> value;
+		if (key == "film")   // a path: the rest of the line, trimmed (names have spaces)
+		{
+			std::getline(ls, value);
+			const std::string::size_type b = value.find_first_not_of(" \t\r\n");
+			const std::string::size_type e = value.find_last_not_of(" \t\r\n");
+			value = b == std::string::npos ? std::string() : value.substr(b, e - b + 1);
+		}
+		else
+			ls >> value;
 		if (!config_apply(cfg, key, value))
 			problems.push_back("ignored \"" + key + " " + value + "\"");
 	}

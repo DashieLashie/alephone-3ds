@@ -351,18 +351,26 @@ if(A1_RENDER_C3D)
     "${_a1_c3d_dir}/core/bmp.cpp"
     "${_a1_c3d_dir}/core/stats.cpp"
     "${_a1_c3d_dir}/core/calibrate.cpp"
+    "${_a1_c3d_dir}/core/geometry.cpp"
     "${_a1_c3d_dir}/back/context.cpp"
     "${_a1_c3d_dir}/back/present.cpp"
     "${_a1_c3d_dir}/back/view.cpp"
+    "${_a1_c3d_dir}/back/draw.cpp"
     "${_a1_c3d_dir}/front/frame.cpp"
-    "${_a1_c3d_dir}/front/filter.cpp")
+    "${_a1_c3d_dir}/front/filter.cpp"
+    "${_a1_c3d_dir}/front/c3d_rasterizer.cpp")
   target_include_directories(alephone PRIVATE "${_a1_c3d_dir}/include")
   ctr_add_shader_library(a1_c3d_shaders "${_a1_c3d_dir}/shaders/present.v.pica")
   dkp_add_embedded_binary_library(a1_c3d_shbin a1_c3d_shaders)
-  target_link_libraries(alephone PRIVATE a1_c3d_shbin citro3d ctru)
+  # The world vertex shader (2.1) in its own library and binary, so the present's shbin is unchanged.
+  ctr_add_shader_library(a1_c3d_world_shaders "${_a1_c3d_dir}/shaders/world.v.pica")
+  dkp_add_embedded_binary_library(a1_c3d_world_shbin a1_c3d_world_shaders)
+  target_link_libraries(alephone PRIVATE a1_c3d_shbin a1_c3d_world_shbin citro3d ctru)
   # Every teardown path (SDL_Quit, vhalt, the error screen) reaches gfxExit(): shut
   # citro3d down first (render_c3d/back/context.cpp).
   target_link_options(alephone PRIVATE "LINKER:--wrap=gfxExit")
+  # The program last bound by anyone else is recorded so a view frame can restore it (back/context.cpp).
+  target_link_options(alephone PRIVATE "LINKER:--wrap=C3D_BindProgram")
 endif()
 # Ogg Vorbis (Tremor) and MP3 (mpg123) decoders for Sound/Decoder.cpp.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/decoders_3ds.cpp")

@@ -2377,6 +2377,24 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     no crash, no guest fault); M0's two calibration configs
     30/30 with `alpha ok 30`; P1 scripts 07, 08, 13, 14, 22 as in M0; the OFF builds' `objdump -d`
     unchanged and `nm` clean.
+  - *Implementation notes (2026-10-27, during the build).* (a) **Tie pixels join the band**
+    (a tolerance-definition change, Review log "M1 implementation, tie pixels"; reported to the
+    user): the coverage-rule bullet above said exact ties lie "inside the edge band". That holds on
+    the outline of A's coverage but not on an edge two drawn polygons share: the film run's 1-px
+    sliver walls put a pixel centre exactly on a top edge with neighbouring walls all around it, SW
+    covered it (its walk includes top-edge ties) and Azahar's GPU did not, so it counted as
+    non-edge. A sub-pixel bias would encode Azahar's tie rule, unverified on PICA, and would not
+    survive the rasteriser's sub-pixel snap (Azahar keeps 1/16 px). So the C3D front end marks the
+    **tie pixels** of every polygon it draws (centre exactly on an edge: an exact integer test,
+    `core/geometry`, host-tested against the coverage model's tie count) in a per-check mask;
+    `core/diff.cpp` counts a tie pixel as band, and the C3D DIFF line reports ` ties=N
+    tie_mismatch=M` (not a failure condition; the console run reads PICA's rule from it).
+    (b) The front end is `front/c3d_rasterizer.{h,cpp}`, not `rasterizer.*`: on macOS's
+    case-insensitive file system `rasterizer.h` shadowed the engine's `Rasterizer.h` through the
+    `front/` include path. (c) The embedded shader header is `a1_c3d_world_shaders_shbin.h` (the
+    toolchain names it after the shader library, as the present's `a1_c3d_shaders_shbin.h`).
+    (d) `c3d_only` drops only the passed class's primitives that `c3d_supports` rejects (transparent
+    walls); other classes still reach the C3D side and discard as `unsupported`.
   - *Not in M1:* textures, floors, sprites, play-mode C3D frames, the "10 discards in a row" rule
     (play mode, M4), any engine edit.
 
@@ -3026,3 +3044,13 @@ a discard (a view frame takes 3 entries) and `gxq_budget 2` is the refusal test;
 must run without a crash, discards recorded, and the deterministic `cmdbuf` discard comes from
 `reserve_extra`; the w host test's plain rel ≤ 1e-3 holds only where SW's own quantisation allows
 judging it (gates (a)-(c)). These three changes are to be reported to the user.
+
+### M1 implementation, tie pixels (coordinator, 2026-10-27; tolerance definition)
+
+The film acceptance run (200 walls checks) found 1-2 non-edge coverage mismatches, each an exact
+tie on an edge shared with neighbouring walls (1-px slivers, e.g. `(346,96)(347,97)(347,125)(346,127)`:
+the centre (346.5, 96.5) lies on the top edge; SW covers it, Azahar does not). 8.3's "0 outside the
+edge band" assumed ties lie on A's coverage outline. Changed: the band also holds the tie pixels of
+every drawn polygon (exact integer test), and ties and tie mismatches are reported apart, so the
+tolerance stays 0 for every non-tie pixel and the console run measures PICA's tie rule. No vertex
+bias (Azahar's rule is not the hardware's, and 1/16-px snapping would defeat a small bias).

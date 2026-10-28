@@ -60,12 +60,24 @@ CalResult cal_check(const uint32_t* argb, int w, int h, int pitch_px, unsigned k
 		{R, G, B, W}, {B, W, R, G}, {G, R, W, B}, {W, B, G, R}, {R, B, G, W}};
 	const int li = r.orientation == Orientation::Unknown ? 0 : static_cast<int>(r.orientation);
 	const uint32_t clear = cal_clear_argb(k), sentinel = cal_sentinel_argb(k);
+	// The alpha quad's place under the detected orientation.
+	int ax0 = w / 2 - kCalQuad / 2, ay0 = 0;
+	if (r.orientation == Orientation::RowsFlipped || r.orientation == Orientation::Rotated180)
+		ay0 = h - kCalQuad;
+	else if (r.orientation == Orientation::Transposed)
+		ax0 = 0, ay0 = h / 2 - kCalQuad / 2;
+	unsigned alpha_bad = 0;
 	for (int y = 0; y < h; ++y)
 		for (int x = 0; x < w; ++x)
 		{
 			uint32_t want = clear;
 			if ((x < kCalQuad || x >= w - kCalQuad) && (y < kCalQuad || y >= h - kCalQuad))
 				want = layout[li][(y >= h - kCalQuad ? 2 : 0) + (x >= w - kCalQuad ? 1 : 0)];
+			else if (x >= ax0 && x < ax0 + kCalQuad && y >= ay0 && y < ay0 + kCalQuad)
+			{
+				want = kCalAlphaQuad;
+				alpha_bad += at(x, y) != kCalAlphaQuad;
+			}
 			const uint32_t got = at(x, y);
 			if (got != want)
 			{
@@ -74,6 +86,7 @@ CalResult cal_check(const uint32_t* argb, int w, int h, int pitch_px, unsigned k
 			}
 		}
 
+	r.alpha_ok = alpha_bad == 0;
 	r.current_frame_ok = r.centre == clear && r.mismatched == 0;
 	if (((r.centre >> 8) & 0xFF) == 0x40 && (r.centre & 0xFF) == 0x80)
 		r.observed_k = static_cast<int>((r.centre >> 16) & 0xFF);
@@ -98,12 +111,12 @@ std::string cal_line(unsigned k, const CalResult& r)
 		std::snprintf(frame, sizeof frame, "NO (centre k=%d)", r.observed_k);
 	else
 		std::snprintf(frame, sizeof frame, "NO (centre 0x%08X)", static_cast<unsigned>(r.centre));
-	char buf[320];
+	char buf[352];
 	std::snprintf(buf, sizeof buf,
 	              "[c3d] readback_cal k=%u orientation %s current frame %s mismatched %u (sentinel %u) "
-	              "channels %s corners 0x%08X 0x%08X 0x%08X 0x%08X",
+	              "channels %s alpha %s corners 0x%08X 0x%08X 0x%08X 0x%08X",
 	              k, orientation_name(r.orientation), frame, r.mismatched, r.sentinel, r.channels_ok ? "ok" : "NO",
-	              static_cast<unsigned>(r.corner[0]), static_cast<unsigned>(r.corner[1]),
+	              r.alpha_ok ? "ok" : "NO", static_cast<unsigned>(r.corner[0]), static_cast<unsigned>(r.corner[1]),
 	              static_cast<unsigned>(r.corner[2]), static_cast<unsigned>(r.corner[3]));
 	return std::string(buf);
 }

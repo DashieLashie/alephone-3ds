@@ -1060,6 +1060,24 @@ bool boot_begin(int& argc, char**& argv)
 	install_tee();
 	atexit(close_outputs);
 	atexit(quit_sdl_at_exit);
+#ifdef A1_RENDER_C3D
+	// debug-c3d "film PATH": replay it as a command-line file (design 7 "Film"). After the atexit
+	// calls above, so the c3d summary handler (registered by the config load) runs first.
+	if (const char* film = a1_c3d_boot_film())
+	{
+		static char* film_argv[64];
+		if (argc >= 0 && argc < 62)
+		{
+			for (int i = 0; i < argc; ++i)
+				film_argv[i] = argv[i];
+			film_argv[argc] = const_cast<char*>(film);
+			film_argv[argc + 1] = nullptr;
+			argv = film_argv;
+			++argc;
+			printf("[3ds] argv[%d] = %s\n", argc - 1, argv[argc - 1]);
+		}
+	}
+#endif
 	std::set_terminate(on_terminate);
 	signal(SIGABRT, on_abort);
 	try

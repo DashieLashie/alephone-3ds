@@ -78,6 +78,36 @@ inline bool gx_op(F&& op)
 	return true;
 }
 
+// The flushing split of a view frame (C3D_FrameSplit(GX_CMDLIST_FLUSH)): one queue entry whatever
+// the command buffer holds (GxQueue::take_split, M1 specification "GX queue"). Runs `op` only if
+// the budget allows.
+bool gx_take_split();
+template <class F>
+inline bool gx_split(F&& op)
+{
+	if (!gx_take_split())
+		return false;
+	op();
+	return true;
+}
+
+// --- M1: the program record, and the command-buffer measurements (M1 specification, "State save
+// and restore around a view frame" and "Reserves and the command buffer, measured") ---
+
+// The shaderProgram_s* last passed to C3D_BindProgram by anyone but back/draw.cpp (which binds
+// through __real_C3D_BindProgram): the present's. Opaque here (shaderProgram_s is an anonymous
+// typedef); nullptr before the first bind. `program_binds()` counts the recorded binds.
+void* program_recorded();
+unsigned program_binds();
+// The C3D_Init command-buffer size in words (cfg.cmdbuf_kib * 256).
+uint32_t cmdbuf_size_words();
+// Words of one C3D_DrawElements (state flush included) and of the readback sequence (flushing split +
+// transfer), from back/draw.cpp and back/view.cpp; the per-frame maxima are kept here.
+void cmdbuf_note_draw(uint32_t words);
+void cmdbuf_note_readback(uint32_t words);
+// "[c3d] cmdbuf ..." line, once a second (stats_tick, only after a view frame ran) and in the final stats.
+void cmdbuf_log(const char* tag);
+
 // Gives the top screen back and shuts citro3d down; idempotent, returns at once when down.
 // Main thread only.
 void release_and_fini();

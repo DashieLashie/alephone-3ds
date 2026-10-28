@@ -1,0 +1,32 @@
+; Aleph One 3DS, citro3d back end (docs/3ds/CITRO3D_DESIGN.md, 2.1): the world vertex shader.
+; v0 = (sx, sy, w) in view pixels, v1/v2 = texcoord0/1, v3 = colour (ubyte4, 0..255).
+; Clip is scaled by w, so NDC stays at the integer vertex positions and the interpolation is
+; perspective-correct. Assembled by picasso through ports/3ds/CMakeLists.txt (its own library).
+
+; Uniforms
+.fvec proj[4]            ; Mtx_Ortho/Mtx_OrthoTilt of the target, pixels -> clip
+.fvec stereo             ; M9 only (x = parallax scale), else 0
+
+; Constants
+.constf k(0.5, 1.0, 0.00392156862, 0.0)   ; 1/255
+
+; Outputs
+.out opos position
+.out otc0 texcoord0
+.out otc1 texcoord1
+.out oclr color
+
+.proc main
+	mov r0.xy, v0.xy
+	mov r0.z, k.x            ; z = 0.5: inside the ortho volume by construction
+	mov r0.w, k.y
+	dp4 r1.x, proj[0], r0
+	dp4 r1.y, proj[1], r0
+	dp4 r1.z, proj[2], r0
+	dp4 r1.w, proj[3], r0
+	mul opos, r1, v0.zzzz    ; clip *= w: same NDC, perspective-correct interpolation
+	mov otc0, v1
+	mov otc1, v2
+	mul oclr, k.zzzz, v3     ; ubyte attributes are 0..255 (0.3)
+	end
+.end
