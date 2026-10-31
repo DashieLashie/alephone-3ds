@@ -18,8 +18,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
 36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 and an update to 19
-in the sprint after it (`NEXT-SPRINT.md`), 49 and 45 in stage 10 (`CITRO3D_DESIGN.md`; 46-48 are
-reserved there for the engine hooks of M2, M6 and M8).
+in the sprint after it (`NEXT-SPRINT.md`), 49, 45 and 46 in stage 10 (`CITRO3D_DESIGN.md`; 47-48 are
+reserved there for the engine hooks of M6 and M8).
 
 ## Summary
 
@@ -70,6 +70,7 @@ reserved there for the engine hooks of M2, M6 and M8).
 | 43 | `Source_Files/Sound/SoundFile.cpp` | a sound header, and a sound's samples, read with one read each and parsed from memory | none |
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
 | 45 | `Source_Files/RenderMain/render.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M0: hook 1, the world view goes through `a1_c3d::render_frame()` | none |
+| 46 | `Source_Files/RenderMain/shapes.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M2: hooks 2a/2b, `a1_c3d::collections_changed()` at the end of `load_collections()` and `unload_all_collections()` | none |
 | 49 | `ports/3ds/source/video_3ds.cpp`, `a1_3ds_platform.cpp`, `profile_3ds.cpp`, `include/a1_3ds_profile.h`, `CMakeLists.txt`, `render_c3d/` (new port files, no upstream edit; `A1_RENDER_C3D=ON` builds only) | stage 10 P1: citro3d owns the top screen, GPU present | none (the CPU present stays as `debug-c3d` `present cpu` and in the default build) |
 
 The complete list of stubs and lost functionality, including items not tied
@@ -1027,3 +1028,25 @@ Source_Files/RenderMain/render.cpp`, both volumes): **IDENTICAL** (127 509 and 1
 preprocessed lines, stderr 0); `-fsyntax-only` exit 0, 0 diagnostics. The OFF 3DS builds
 (`build-3ds`, `build-3ds-prof`): `objdump -d` of `alephone.elf` identical to the previous commit's,
 `nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0, 0 warnings.
+
+## Stage 10 M2: the collection hooks (46)
+
+Added 2026-10-31 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M2 specification", "Hooks
+2a/2b"). Fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)` like 45.
+
+46. **`RenderMain/shapes.cpp`: hooks 2a and 2b.** `#include "a1_c3d.h"` after `SW_Texture_Extras.h`;
+    `a1_c3d::collections_changed();` as the last statement of `load_collections()` (2a, after the last
+    `time_mark`, so `SW_Texture_Extras::Load` is covered) and of `unload_all_collections()` (2b). Every
+    caller of either function is covered (`shell_misc.cpp`, `interface.cpp`, `screen.cpp`,
+    `PlayerImage_sdl.cpp`, `images.cpp`). The function bumps the C3D texture cache's generation, so a
+    bitmap or shading table reallocated at an old address can never hit an old entry (the old
+    generation's textures are freed after the next `frame_begin()`). It touches only the pure cache
+    (`render_c3d/back/texcache.cpp`), so it is safe with citro3d down and logs
+    `[c3d] tex: collections changed (gen N, M entries retire)` only when `debug-c3d` selects
+    `renderer c3d`. Port side (no engine edit): `include/a1_c3d.h` declares it, `back/texcache.{h,cpp}`
+    define it and own the cache instance (a stub allocator until M2 part 6).
+
+**Non-3DS check** (2026-10-31, `ppcheck.sh Source_Files/RenderMain/shapes.cpp
+Source_Files/RenderMain/shapes.cpp`, both volumes): **DIFFER: 2 lines, 0 with numbers normalised**
+(only `__LINE__` shifts; 145 403 and 139 138 preprocessed lines, stderr 0); `-fsyntax-only` exit 0,
+0 diagnostics.

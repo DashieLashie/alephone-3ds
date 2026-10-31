@@ -19,6 +19,7 @@
 #include "../core/gx_queue.h"
 #include "../include/a1_c3d_port.h"
 #include "draw.h"
+#include "texcache.h"
 #include "view.h"
 #include "../core/geometry.h"
 #include "a1_3ds_platform.h"
@@ -313,6 +314,7 @@ void release_and_fini()
 	C3D_Fini();
 	present_free();
 	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
+	texcache_release_all();   // every texture slot (part 6: their C3D_Tex)
 	draw_free();   // the world program and the rings (not on the abandon path, which returns above)
 	s_off = true;
 	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",

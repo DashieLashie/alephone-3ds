@@ -3,7 +3,7 @@
 	what the engine calls. Included by RenderMain/render.cpp under
 	#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D) only. No <3ds.h>.
 
-	Only what exists in M0 is declared. collections_changed() (hooks 2a, 2b) arrives with M2;
+	Only what exists so far is declared (M0: render_frame(); M2: collections_changed(), hooks 2a, 2b);
 	overlay_surface(), overlay_dirty() and direct_frame() (hook 3) with M6.
 
 	This program is free software; you can redistribute it and/or modify
@@ -26,6 +26,11 @@ using DrawFn = void (*)(void* ctx, RasterizerClass* ras);
 // false: caller draws it with `sw`; nothing was written to `dest`.
 bool render_frame(view_data& view, bitmap_definition* dest, RasterizerClass* sw,
                   DrawFn draw, void* ctx);
+
+// Hooks 2a (end of load_collections) and 2b (end of unload_all_collections), shapes.cpp: the engine's
+// collection bitmaps and shading tables may have been freed or reallocated. Bumps the texture cache's
+// generation (M2); cheap, main thread only, works with citro3d down.
+void collections_changed();
 
 } // namespace a1_c3d
 

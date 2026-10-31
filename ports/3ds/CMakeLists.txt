@@ -359,6 +359,7 @@ if(A1_RENDER_C3D)
     "${_a1_c3d_dir}/back/present.cpp"
     "${_a1_c3d_dir}/back/view.cpp"
     "${_a1_c3d_dir}/back/draw.cpp"
+    "${_a1_c3d_dir}/back/texcache.cpp"
     "${_a1_c3d_dir}/front/frame.cpp"
     "${_a1_c3d_dir}/front/filter.cpp"
     "${_a1_c3d_dir}/front/c3d_rasterizer.cpp")
