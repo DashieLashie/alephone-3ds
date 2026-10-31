@@ -6,7 +6,9 @@
 // pieces (7, "M1 specification"): geometry.* (the w gates (a)-(c) against a transliteration of the SW
 // mapper's world_x, the coverage model against a transliteration of SW's per-column coverage, the
 // acceptance test, fan indices, batching key, colour hash, command-buffer arithmetic, reserve test),
-// the alpha quad of the calibration, GxQueue's split and runtime budget, and the M1 config keys.
+// the alpha quad of the calibration, GxQueue's split and runtime budget, and the M1 config keys; and the M2
+// pieces (7, "M2 specification", parts 1-2): tex_convert.* (every kind with shapes.cpp-style 32-bit
+// tables), tiling.* (against tex3ds, byte for byte), texcache.* (a fake allocator) and the M2 config keys.
 #include "bmp.h"
 #include "calibrate.h"
 #include "classify.h"
@@ -17,6 +19,9 @@
 #include "gx_queue.h"
 #include "ring.h"
 #include "stats.h"
+#include "tex_convert.h"
+#include "texcache.h"
+#include "tiling.h"
 
 #include <algorithm>
 #include <climits>
@@ -25,10 +30,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <random>
 #include <set>
 #include <string>
 #include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace a1_c3d;
 
@@ -1580,6 +1589,903 @@ static void test_ring()
 	CHECK(!f.fits(1, 0) && !f.fits(0, 1) && f.fits(0, 0));
 }
 
+// ---------------------------------------------------------------------------------------------
+// M2 parts 1-2: texture conversion, tiling, the texture cache (design 7, "M2 specification")
+
+static void test_config_m2()
+{
+	Config d;
+	CHECK(d.vram_cap == 3584 && d.linear_cap == 4096 && d.promote_max == 8);
+	Config c;
+	CHECK(config_apply(c, "vram_cap", "0") && c.vram_cap == 0);
+	CHECK(config_apply(c, "vram_cap", "512") && config_apply(c, "vram_cap", "4096") && c.vram_cap == 4096);
+	CHECK(!config_apply(c, "vram_cap", "4097") && !config_apply(c, "vram_cap", "-1") && !config_apply(c, "vram_cap", "") && c.vram_cap == 4096);
+	CHECK(config_apply(c, "linear_cap", "64") && c.linear_cap == 64);
+	CHECK(config_apply(c, "linear_cap", "16384") && c.linear_cap == 16384);
+	CHECK(!config_apply(c, "linear_cap", "63") && !config_apply(c, "linear_cap", "16385") && !config_apply(c, "linear_cap", "x") && c.linear_cap == 16384);
+	CHECK(config_apply(c, "promote_max", "0") && c.promote_max == 0);
+	CHECK(config_apply(c, "promote_max", "8") && c.promote_max == 8);
+	CHECK(!config_apply(c, "promote_max", "9") && !config_apply(c, "promote_max", "-1") && c.promote_max == 8);
+	Config p;
+	std::vector<std::string> problems;
+	config_parse(p, "vram_cap 512  # KiB\nlinear_cap 1024\npromote_max 0\nvram_cap 99999\n", problems);
+	CHECK(problems.size() == 1 && p.vram_cap == 512 && p.linear_cap == 1024 && p.promote_max == 0);
+}
+
+// --- tables built like shapes.cpp's build_shading_tables32 (number_of_shading_tables = 256, SDL_MapRGB
+// on pixel_format_32 = ARGB8888: 0xFF000000 | R << 16 | G << 8 | B)
+
+struct TestColor { unsigned r, g, b; bool selfLum; };
+
+static std::vector<uint32_t> build_tables32(const TestColor* colors, const uint8_t* remap)
+{
+	std::vector<uint32_t> t(256 * 256, 0);
+	for (unsigned i = 0; i < 256; ++i)
+		for (unsigned level = 0; level < 256; ++level)
+		{
+			const TestColor& c = colors[remap ? remap[i] : i];
+			const unsigned mult = c.selfLum ? (128 + (level >> 1)) : level;   // shapes.cpp:1946
+			t[256 * level + i] = 0xFF000000u | (((c.r * mult / 255) >> 8) << 16) | (((c.g * mult / 255) >> 8) << 8) |
+			                     ((c.b * mult / 255) >> 8);
+		}
+	return t;
+}
+
+// 256 colours: a spread, plus the special cases at 250..253 (0 is a normal colour with G = 255).
+static std::vector<TestColor> make_colors()
+{
+	std::vector<TestColor> c(256);
+	for (unsigned i = 0; i < 256; ++i)
+		c[i] = TestColor{i * 257u, (255 - i) * 257u, ((i * 7) & 255) * 257u, i % 5 == 0};
+	c[250] = TestColor{0, 0, 0, false};          // black normal
+	c[251] = TestColor{0, 0, 0, true};           // black self-luminous
+	c[252] = TestColor{0x0100, 0, 0, true};      // dark self-luminous: level 0 rounds to black
+	c[253] = TestColor{0x4000, 0x2000, 0, true}; // self-luminous with a visible level 0
+	c[254] = TestColor{0xFFFF, 0xFFFF, 0xFFFF, false};
+	c[255] = TestColor{0x1234, 0x5678, 0x9ABC, false};
+	return c;
+}
+
+// Independent expectation, from the colour itself (top level 255 or 0), not from the table.
+static uint32_t expect_word(const TestColor& c, TexKind kind, bool zero_index)
+{
+	auto ch = [&](unsigned v, unsigned mult) { return (v * mult / 255) >> 8; };
+	const unsigned top = 255;                                  // the top table: multiplier 255 either way
+	const unsigned lvl0 = c.selfLum ? 128 : 0;
+	const bool lum = ch(c.r, lvl0) || ch(c.g, lvl0) || ch(c.b, lvl0);
+	switch (kind)
+	{
+		case TexKind::Normal:
+		case TexKind::NormalKeyed:
+		{
+			const unsigned a = (kind == TexKind::NormalKeyed && zero_index) ? 0 : (lum ? 128 : 255);
+			return (ch(c.r, top) << 24) | (ch(c.g, top) << 16) | (ch(c.b, top) << 8) | a;
+		}
+		default:
+			return 0;
+	}
+}
+
+struct TestBitmap
+{
+	unsigned W;
+	std::vector<uint8_t> data;
+	std::vector<const uint8_t*> rows;
+	explicit TestBitmap(unsigned w) : W(w), data(w * w), rows(w)
+	{
+		for (unsigned j = 0; j < w; ++j)
+		{
+			rows[j] = &data[j * w];
+			for (unsigned s = 0; s < w; ++s)
+				data[j * w + s] = static_cast<uint8_t>(s * 131 + j * 7 + (s >> 3) * (j >> 2) + (j == 3 && s < 8 ? 250 + (s & 3) : 0));
+		}
+		data[0] = 0;                          // index 0 at (0, 0) and a few more
+		data[w * 5 + 9] = 0;
+		data[w * (w - 1) + (w - 1)] = 0;
+	}
+	TexBitmap view() const { return TexBitmap{static_cast<int>(W), static_cast<int>(W), rows.data(), false}; }
+};
+
+static uint32_t read_word(const std::vector<uint8_t>& out, unsigned W, unsigned j, unsigned s)
+{
+	const uint8_t* p = &out[tile_index(W, tile_memory_row(W, j), s) * 4];   // little-endian u32
+	const uint32_t w = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+	                   (static_cast<uint32_t>(p[3]) << 24);
+	return w;
+}
+
+static void test_tex_supported()
+{
+	CHECK(tex_supported(128, 128, false) && tex_supported(256, 256, false) && tex_supported(512, 512, false));
+	CHECK(!tex_supported(128, 128, true));                      // RLE: sprites, M4
+	CHECK(!tex_supported(64, 64, false) && !tex_supported(1024, 1024, false) && !tex_supported(0, 0, false));
+	CHECK(!tex_supported(192, 192, false) && !tex_supported(130, 130, false) && !tex_supported(-128, -128, false));
+	CHECK(!tex_supported(128, 256, false) && !tex_supported(256, 128, false) && !tex_supported(270, 512, false));
+	const TexBitmap b{512, 512, nullptr, false};
+	CHECK(tex_supported(b));
+	CHECK(tex_bytes(128, TexKind::Normal) == 65536 && tex_bytes(512, TexKind::NormalKeyed) == 1048576);
+	CHECK(tex_bytes(128, TexKind::Mask) == 16384);
+	std::vector<uint8_t> out(16);
+	const std::vector<uint32_t> t(kShadingTableEntries, 0);
+	CHECK(!tex_convert(b, t.data(), TexKind::Normal, out.data()));   // rows null
+	TestBitmap odd(128);
+	CHECK(!tex_convert(odd.view(), nullptr, TexKind::Normal, out.data()));   // tables needed
+	CHECK(!tex_convert(TexBitmap{64, 64, odd.rows.data(), false}, t.data(), TexKind::Normal, out.data()));
+}
+
+static void test_tex_convert()
+{
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+
+	// the table shape the comments claim: 0xFF000000 | rgb, black normal is 0xFF000000 at every level
+	CHECK(tables[256 * 255 + 250] == 0xFF000000u && tables[250] == 0xFF000000u);
+	CHECK(tables[251] == 0xFF000000u && tables[256 * 255 + 251] == 0xFF000000u);   // black SL
+	CHECK(tables[252] == 0xFF000000u && tables[256 * 255 + 252] == 0xFF010000u);   // dark SL: black at 0, not at 255
+	CHECK((tables[253] & 0xFFFFFF) != 0);                                         // visible SL at level 0
+	CHECK(tables[256 * 255 + 254] == 0xFFFFFFFFu);
+
+	for (unsigned W : {128u, 256u, 512u})
+	{
+		const TestBitmap bmp(W);
+		for (TexKind kind : {TexKind::Normal, TexKind::NormalKeyed})
+		{
+			std::vector<uint8_t> out(tex_bytes(W, kind), 0xEE);
+			CHECK(tex_convert(bmp.view(), tables.data(), kind, out.data()));
+			unsigned bad = 0, keyed0 = 0, lum = 0;
+			for (unsigned j = 0; j < W; ++j)
+				for (unsigned s = 0; s < W; ++s)
+				{
+					const unsigned i = bmp.rows[j][s];
+					const uint32_t want = expect_word(colors[i], kind, i == 0);
+					const uint32_t got = read_word(out, W, j, s);
+					bad += want != got;
+					keyed0 += (got & 0xFF) == 0;
+					lum += (got & 0xFF) == 128;
+				}
+			CHECK(bad == 0);
+			CHECK(kind == TexKind::Normal ? keyed0 == 0 : keyed0 >= 3);
+			CHECK(lum > 0);
+		}
+		// normal vs normal_keyed on the same bitmap: identical except A at index 0
+		std::vector<uint8_t> a(tex_bytes(W, TexKind::Normal)), b(a.size());
+		tex_convert(bmp.view(), tables.data(), TexKind::Normal, a.data());
+		tex_convert(bmp.view(), tables.data(), TexKind::NormalKeyed, b.data());
+		unsigned diffs = 0, bad = 0;
+		for (unsigned j = 0; j < W; ++j)
+			for (unsigned s = 0; s < W; ++s)
+			{
+				const uint32_t wa = read_word(a, W, j, s), wb = read_word(b, W, j, s);
+				if (wa != wb)
+				{
+					++diffs;
+					bad += !(bmp.rows[j][s] == 0 && (wb & 0xFF) == 0 && (wa & ~0xFFu) == (wb & ~0xFFu));
+				}
+			}
+		CHECK(diffs >= 3 && bad == 0);
+	}
+
+	// special colours, texel by texel (word = R<<24 | G<<16 | B<<8 | A)
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 250) == 0x000000FFu);         // black normal: A 255
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 251) == 0x000000FFu);         // black SL reads normal
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 252) == 0x010000FFu);         // dark SL: level 0 black -> A 255
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 253) == ((0x40u << 24) | (0x20u << 16) | 128u));   // SL: A 128
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 254) == 0xFFFFFFFFu);
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 255) == ((0x12u << 24) | (0x56u << 16) | (0x9Au << 8) | 255u));
+	CHECK(tex_palette_word(tables.data(), TexKind::NormalKeyed, 0) == (0xFFu << 16));      // G = 255, A 0 (index 0 keyed)
+	CHECK((tex_palette_word(tables.data(), TexKind::Normal, 0) & 0xFF) == 128);            // colour 0 is SL, G = 255
+
+	// an alternate CLUT is another table pointer: colours come from the remapped entries
+	uint8_t remap[256];
+	for (unsigned i = 0; i < 256; ++i)
+		remap[i] = static_cast<uint8_t>(255 - i);
+	const std::vector<uint32_t> alt = build_tables32(colors.data(), remap);
+	CHECK(alt != tables);
+	CHECK(tex_palette_word(alt.data(), TexKind::Normal, 5) == expect_word(colors[250], TexKind::Normal, false));
+	CHECK(tex_palette_word(alt.data(), TexKind::Normal, 4) == expect_word(colors[251], TexKind::Normal, false));
+	CHECK(tex_palette_word(alt.data(), TexKind::Normal, 3) == expect_word(colors[252], TexKind::Normal, false));
+	{
+		const TestBitmap bmp(128);
+		std::vector<uint8_t> o1(tex_bytes(128, TexKind::Normal)), o2(o1.size());
+		tex_convert(bmp.view(), tables.data(), TexKind::Normal, o1.data());
+		tex_convert(bmp.view(), alt.data(), TexKind::Normal, o2.data());
+		CHECK(o1 != o2);
+		unsigned bad = 0;
+		for (unsigned j = 0; j < 128; ++j)
+			for (unsigned s = 0; s < 128; ++s)
+				bad += read_word(o2, 128, j, s) != expect_word(colors[255 - bmp.rows[j][s]], TexKind::Normal, bmp.rows[j][s] == 0);   // Normal: no keying
+		CHECK(bad == 0);
+	}
+
+	// shadeless (infravision): the single tint table, RGB = table[i], A 255 (0 for index 0 if keyed). The
+	// tint table of shapes.cpp:2279-2301 is a collection-wide table whose entry i is a grey-ish tint.
+	std::vector<uint32_t> tint(kShadingTableEntries, 0);
+	for (unsigned i = 0; i < 256; ++i)
+		tint[i] = 0xFF000000u | ((i ^ 0x5A) << 16) | ((255 - i) << 8) | ((i * 3) & 255);
+	for (unsigned i : {0u, 1u, 77u, 200u, 255u})
+	{
+		const uint32_t rgb = tint[i] & 0xFFFFFF;
+		const uint32_t w = (rgb & 0xFF0000u) << 8 | (rgb & 0xFF00u) << 8 | (rgb & 0xFFu) << 8;
+		CHECK(tex_palette_word(tint.data(), TexKind::Shadeless, i) == (w | 255u));
+		CHECK(tex_palette_word(tint.data(), TexKind::ShadelessKeyed, i) == (w | (i == 0 ? 0u : 255u)));
+	}
+	{
+		const TestBitmap bmp(128);
+		std::vector<uint8_t> o(tex_bytes(128, TexKind::ShadelessKeyed));
+		CHECK(tex_convert(bmp.view(), tint.data(), TexKind::ShadelessKeyed, o.data()));
+		unsigned bad = 0;
+		for (unsigned j = 0; j < 128; ++j)
+			for (unsigned s = 0; s < 128; ++s)
+				bad += read_word(o, 128, j, s) != tex_palette_word(tint.data(), TexKind::ShadelessKeyed, bmp.rows[j][s]);
+		CHECK(bad == 0);
+	}
+
+	// mask (tinted rectangles): A8, 1 byte per texel, Morton tiled; the tables (the global tint) never matter
+	{
+		const TestBitmap bmp(256);
+		std::vector<uint8_t> o(tex_bytes(256, TexKind::Mask), 0x77), o2(o.size(), 0x66);
+		CHECK(tex_convert(bmp.view(), nullptr, TexKind::Mask, o.data()));
+		CHECK(tex_convert(bmp.view(), tables.data(), TexKind::Mask, o2.data()));
+		CHECK(o == o2 && o.size() == 256u * 256u);
+		unsigned bad = 0, zeros = 0;
+		for (unsigned j = 0; j < 256; ++j)
+			for (unsigned s = 0; s < 256; ++s)
+			{
+				const uint8_t want = bmp.rows[j][s] == 0 ? 0 : 255;
+				zeros += want == 0;
+				bad += o[tile_index(256, 255 - j, s)] != want;
+			}
+		CHECK(bad == 0 && zeros >= 3);
+	}
+}
+
+// --- tiling
+
+static void test_morton_and_tile_index()
+{
+	CHECK(morton8(1, 0) == 1 && morton8(0, 1) == 2 && morton8(2, 0) == 4 && morton8(0, 2) == 8);
+	CHECK(morton8(4, 0) == 16 && morton8(0, 4) == 32 && morton8(7, 7) == 63 && morton8(3, 0) == 5);
+	std::set<unsigned> seen;
+	for (unsigned y = 0; y < 8; ++y)
+		for (unsigned x = 0; x < 8; ++x)
+			seen.insert(morton8(x, y));
+	CHECK(seen.size() == 64 && *seen.begin() == 0 && *seen.rbegin() == 63);
+	// tiles in row order across the width
+	CHECK(tile_index(16, 0, 0) == 0 && tile_index(16, 0, 8) == 64 && tile_index(16, 8, 0) == 128 && tile_index(16, 8, 8) == 192);
+	CHECK(tile_index(16, 0, 1) == 1 && tile_index(16, 1, 0) == 2 && tile_index(16, 1, 1) == 3 && tile_index(16, 8, 1) == 129);
+	CHECK(tile_index(128, 127, 127) == 128 * 128 - 1);
+	// a bijection for every W
+	for (unsigned W : {8u, 16u, 128u})
+	{
+		std::vector<char> hit(W * W, 0);
+		for (unsigned m = 0; m < W; ++m)
+			for (unsigned s = 0; s < W; ++s)
+				hit[tile_index(W, m, s)] = 1;
+		CHECK(std::count(hit.begin(), hit.end(), 1) == static_cast<long>(W * W));
+	}
+	CHECK(tile_memory_row(128, 0) == 127 && tile_memory_row(128, 127) == 0 && tile_memory_row(8, 3) == 4);
+	// tile_image for 1 and 4 byte texels
+	std::vector<uint8_t> lin(16 * 16), til(16 * 16);
+	for (unsigned i = 0; i < lin.size(); ++i)
+		lin[i] = static_cast<uint8_t>(i);
+	tile_image(lin.data(), 16, 1, til.data());
+	CHECK(til[tile_index(16, 9, 3)] == lin[9 * 16 + 3] && til[2] == lin[16] && til[64] == lin[8]);
+}
+
+// --- a minimal PNG writer (8-bit RGBA, stored deflate blocks) for the tex3ds test
+
+static uint32_t crc32_of(const uint8_t* p, size_t n, uint32_t crc = 0)
+{
+	static uint32_t table[256];
+	if (!table[1])
+		for (uint32_t i = 0; i < 256; ++i)
+		{
+			uint32_t c = i;
+			for (int k = 0; k < 8; ++k)
+				c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+			table[i] = c;
+		}
+	crc = ~crc;
+	for (size_t i = 0; i < n; ++i)
+		crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+	return ~crc;
+}
+
+static uint32_t adler32_of(const uint8_t* p, size_t n)
+{
+	uint32_t a = 1, b = 0;
+	for (size_t i = 0; i < n; ++i)
+	{
+		a = (a + p[i]) % 65521;
+		b = (b + a) % 65521;
+	}
+	return (b << 16) | a;
+}
+
+static void put_be32(std::vector<uint8_t>& v, uint32_t x)
+{
+	for (int sh = 24; sh >= 0; sh -= 8)
+		v.push_back(static_cast<uint8_t>(x >> sh));
+}
+
+static void png_chunk(std::vector<uint8_t>& png, const char* type, const std::vector<uint8_t>& data)
+{
+	put_be32(png, static_cast<uint32_t>(data.size()));
+	std::vector<uint8_t> body(type, type + 4);
+	body.insert(body.end(), data.begin(), data.end());
+	png.insert(png.end(), body.begin(), body.end());
+	put_be32(png, crc32_of(body.data(), body.size()));
+}
+
+// rgba: W rows of W pixels, bytes R, G, B, A per pixel, row 0 first.
+static std::vector<uint8_t> make_png(unsigned W, const std::vector<uint8_t>& rgba)
+{
+	std::vector<uint8_t> raw;
+	for (unsigned r = 0; r < W; ++r)
+	{
+		raw.push_back(0);   // filter: none
+		raw.insert(raw.end(), rgba.begin() + r * W * 4, rgba.begin() + (r + 1) * W * 4);
+	}
+	std::vector<uint8_t> z = {0x78, 0x01};
+	for (size_t pos = 0; pos < raw.size() || pos == 0;)
+	{
+		const size_t n = std::min<size_t>(65535, raw.size() - pos);
+		const bool last = pos + n == raw.size();
+		z.push_back(last ? 1 : 0);
+		z.push_back(static_cast<uint8_t>(n)); z.push_back(static_cast<uint8_t>(n >> 8));
+		z.push_back(static_cast<uint8_t>(~n)); z.push_back(static_cast<uint8_t>(~n >> 8));
+		z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
+		pos += n;
+		if (last)
+			break;
+	}
+	put_be32(z, adler32_of(raw.data(), raw.size()));
+	std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+	std::vector<uint8_t> ihdr;
+	put_be32(ihdr, W); put_be32(ihdr, W);
+	ihdr.push_back(8); ihdr.push_back(6); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
+	png_chunk(png, "IHDR", ihdr);
+	png_chunk(png, "IDAT", z);
+	png_chunk(png, "IEND", {});
+	return png;
+}
+
+static bool write_file(const std::string& path, const std::vector<uint8_t>& d)
+{
+	FILE* f = std::fopen(path.c_str(), "wb");
+	if (!f)
+		return false;
+	const bool ok = std::fwrite(d.data(), 1, d.size(), f) == d.size();
+	return std::fclose(f) == 0 && ok;
+}
+
+static bool read_file(const std::string& path, std::vector<uint8_t>& d)
+{
+	FILE* f = std::fopen(path.c_str(), "rb");
+	if (!f)
+		return false;
+	d.clear();
+	uint8_t buf[65536];
+	size_t n;
+	while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+		d.insert(d.end(), buf, buf + n);
+	std::fclose(f);
+	return true;
+}
+
+// Runs tex3ds -f rgba8 -z none -r on `rgba` (W x W, row 0 first); returns the texel bytes after the
+// 4-byte compression header (checked here). False: tex3ds failed or the header is wrong.
+static bool run_tex3ds(const std::string& dir, unsigned W, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& texels)
+{
+	const std::string in = dir + "/in.png", out = dir + "/out.bin";
+	if (!write_file(in, make_png(W, rgba)))
+		return false;
+	const std::string cmd = "'/opt/devkitpro/tools/bin/tex3ds' -f rgba8 -z none -r -o '" + out + "' '" + in + "' > '" + dir + "/log.txt' 2>&1";
+	if (std::system(cmd.c_str()) != 0)
+		return false;
+	std::vector<uint8_t> raw;
+	if (!read_file(out, raw) || raw.size() != 4 + static_cast<size_t>(W) * W * 4)
+		return false;
+	const uint32_t size = raw[1] | (raw[2] << 8) | (raw[3] << 16);
+	if (raw[0] != 0x00 || size != W * W * 4)   // compression type 0 (none), 24-bit little-endian size
+		return false;
+	texels.assign(raw.begin() + 4, raw.end());
+	return true;
+}
+
+static void test_tiling_tex3ds()
+{
+	const char* tex3ds = "/opt/devkitpro/tools/bin/tex3ds";
+	if (access(tex3ds, X_OK) != 0)
+	{
+		std::printf("SKIPPED tex3ds tests: %s not found\n", tex3ds);
+		return;
+	}
+	const char* tmp = std::getenv("TMPDIR");
+	std::string tmpl = std::string(tmp && *tmp ? tmp : "/tmp") + "/c3d-tex3ds.XXXXXX";
+	std::vector<char> dirbuf(tmpl.begin(), tmpl.end());
+	dirbuf.push_back(0);
+	if (!mkdtemp(dirbuf.data()))
+	{
+		CHECK(false);
+		return;
+	}
+	const std::string dir = dirbuf.data();
+
+	// (1) the pure tiler: a unique RGBA value per texel (A != 0: tex3ds zeroes the RGB of A == 0 texels).
+	// The PNG's row r is our source row W-1-r; our tiled output must equal tex3ds's bytes exactly.
+	for (unsigned W : {8u, 16u, 128u})
+	{
+		std::vector<uint8_t> rgba(W * W * 4);
+		auto src = [&](unsigned j, unsigned s) -> uint32_t   // R<<24|G<<16|B<<8|A of source texel (s, j)
+		{
+			const unsigned n = j * W + s;
+			return ((n & 255u) << 24) | (((n >> 8) & 255u) << 16) | (((n * 37 + 11) & 255u) << 8) | (1 + n * 5 % 255);
+		};
+		for (unsigned r = 0; r < W; ++r)
+			for (unsigned x = 0; x < W; ++x)
+			{
+				const uint32_t w = src(W - 1 - r, x);
+				uint8_t* p = &rgba[(r * W + x) * 4];
+				p[0] = w >> 24; p[1] = w >> 16; p[2] = w >> 8; p[3] = w;
+			}
+		std::vector<uint8_t> t3x, ours(W * W * 4);
+		const bool ran = run_tex3ds(dir, W, rgba, t3x);
+		CHECK(ran);
+		for (unsigned j = 0; j < W; ++j)
+			for (unsigned s = 0; s < W; ++s)
+			{
+				const uint32_t w = src(j, s);
+				uint8_t* p = &ours[tile_index(W, tile_memory_row(W, j), s) * 4];
+				p[0] = w; p[1] = w >> 8; p[2] = w >> 16; p[3] = w >> 24;   // bytes A, B, G, R
+			}
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds tiling W=%u: %s\n", W, same ? "byte-identical" : "MISMATCH");
+		if (ran && W == 16)   // the reviewer's anchors: texel 0 = PNG (0,0), texel 2 = (0,1), texel 128 = (0,8)
+		{
+			auto pix = [&](unsigned x, unsigned y) { return std::vector<uint8_t>(&rgba[(y * W + x) * 4], &rgba[(y * W + x) * 4] + 4); };
+			auto texel = [&](unsigned n) { return std::vector<uint8_t>{t3x[n * 4 + 3], t3x[n * 4 + 2], t3x[n * 4 + 1], t3x[n * 4]}; };
+			CHECK(texel(0) == pix(0, 0) && texel(2) == pix(0, 1) && texel(1) == pix(1, 0) && texel(128) == pix(0, 8));
+			CHECK(tile_index(16, 0, 0) == 0 && tile_index(16, 1, 0) == 2 && tile_index(16, 8, 0) == 128);
+		}
+	}
+
+	// (2) the whole path: tex_convert's output for a bitmap (W = 128, 256) equals tex3ds's for the PNG of
+	// the colours it should produce (normal kind, no keying, so A != 0). Source row j = PNG row W-1-j.
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+	for (unsigned W : {128u, 256u})
+	{
+		const TestBitmap bmp(W);
+		std::vector<uint8_t> rgba(W * W * 4), ours(tex_bytes(W, TexKind::Normal)), t3x;
+		for (unsigned r = 0; r < W; ++r)
+			for (unsigned x = 0; x < W; ++x)
+			{
+				const uint32_t w = tex_palette_word(tables.data(), TexKind::Normal, bmp.rows[W - 1 - r][x]);
+				uint8_t* p = &rgba[(r * W + x) * 4];
+				p[0] = w >> 24; p[1] = w >> 16; p[2] = w >> 8; p[3] = w;
+			}
+		CHECK(tex_convert(bmp.view(), tables.data(), TexKind::Normal, ours.data()));
+		const bool ran = run_tex3ds(dir, W, rgba, t3x);
+		CHECK(ran);
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds conversion W=%u: %s\n", W, same ? "byte-identical" : "MISMATCH");
+	}
+	std::remove((dir + "/in.png").c_str());
+	std::remove((dir + "/out.bin").c_str());
+	std::remove((dir + "/log.txt").c_str());
+	rmdir(dir.c_str());
+}
+
+// --- the cache, with a fake allocator
+
+class FakeAlloc : public TexAllocator
+{
+public:
+	struct Rec { TexPool pool; uint32_t bytes; };
+	std::map<void*, Rec> live;
+	uintptr_t next = 0x1000;
+	int fail_next = 0;            // fail the next N allocations
+	unsigned bad_release = 0, allocs = 0, releases = 0;
+	void* alloc(TexPool pool, uint32_t bytes) override
+	{
+		if (fail_next > 0)
+		{
+			--fail_next;
+			return nullptr;
+		}
+		void* h = reinterpret_cast<void*>(next);
+		next += 0x100;
+		live[h] = Rec{pool, bytes};
+		++allocs;
+		return h;
+	}
+	void release(TexPool pool, void* handle) override
+	{
+		auto it = live.find(handle);
+		if (it == live.end() || it->second.pool != pool)
+		{
+			++bad_release;
+			return;
+		}
+		live.erase(it);
+		++releases;
+	}
+	uint32_t total(TexPool pool) const
+	{
+		uint32_t n = 0;
+		for (const auto& kv : live)
+			if (kv.second.pool == pool)
+				n += kv.second.bytes;
+		return n;
+	}
+};
+
+// A cache frame: on_retired (after "frame_begin"), begin_frame, then the promotion loop; returns the copies.
+static std::vector<TexPromotion> run_frame(TexCache& c, GxQueue& gx, uint32_t frame, bool cmdbuf_not_empty = false)
+{
+	c.on_retired();
+	c.begin_frame(frame);
+	gx.begin_frame();
+	std::vector<TexPromotion> out;
+	TexPromotion p;
+	while (c.next_promotion(gx, cmdbuf_not_empty, p))
+		out.push_back(p);
+	return out;
+}
+
+static int bm[4096];   // addresses to use as bitmap/table keys
+static TexKey K(int i, const void* tables = &bm[4095], TexKind k = TexKind::Normal) { return TexKey{&bm[i], tables, k}; }
+
+static TexCacheConfig cfg_of(unsigned linear_kib, unsigned vram_kib, unsigned promote_max)
+{
+	TexCacheConfig c;
+	c.linear_cap_kib = linear_kib;
+	c.vram_cap_kib = vram_kib;
+	c.promote_max = promote_max;
+	return c;
+}
+
+static void test_cache_keys_generations()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 3584, 8));
+	GxQueue gx;
+	run_frame(c, gx, 1);
+	const TexKey a = K(1), b = K(1, &bm[7]), d = K(1, &bm[4095], TexKind::NormalKeyed);
+	CHECK(c.lookup(a) == nullptr);
+	TexSlot* sa = c.create(a, 128);
+	TexSlot* sb = c.create(b, 128);   // another CLUT: its own entry
+	TexSlot* sd = c.create(d, 128);   // normal vs normal_keyed coexist
+	CHECK(sa && sb && sd && sa != sb && sa != sd && sb != sd);
+	CHECK(c.lookup(a) == sa && c.lookup(b) == sb && c.lookup(d) == sd && c.lookup(K(2)) == nullptr);
+	CHECK(sa->bytes == 65536 && sa->W == 128 && sa->pool == TexPool::Linear && sa->handle);
+	CHECK(c.used_bytes(TexPool::Linear) == 3 * 65536 && fa.total(TexPool::Linear) == 3 * 65536);
+	CHECK(c.live_count(TexPool::Linear) == 3 && c.stats().conversions == 3);
+	TexSlot* sm = c.create(K(3, nullptr, TexKind::Mask), 128);
+	CHECK(sm && sm->bytes == 16384 && c.used_bytes(TexPool::Linear) == 3 * 65536 + 16384);
+
+	// collections_changed: lookups miss at once, nothing is freed until a retire
+	CHECK(c.bump_generation() == 4);
+	CHECK(c.generation() == 1 && c.stats().collections_changed == 1);
+	CHECK(c.lookup(a) == nullptr && c.lookup(b) == nullptr);
+	CHECK(fa.live.size() == 4 && fa.releases == 0 && c.retiring_count() == 4 && c.live_count(TexPool::Linear) == 0);
+	// a bitmap reallocated at the same address misses and gets a fresh entry (different slot, the old
+	// one still being held)
+	TexSlot* na = c.create(a, 128);
+	CHECK(na && na != sa && na != sb && na != sd && na->handle != sa->handle);
+	CHECK(c.lookup(a) == na);
+	CHECK(fa.live.size() == 5 && fa.releases == 0);
+	// frames_begin returned -> on_retired frees the old generation
+	CHECK(c.on_retired() == 4);
+	CHECK(fa.live.size() == 1 && fa.releases == 4 && c.retiring_count() == 0 && c.stats().deferred_frees == 4);
+	CHECK(c.used_bytes(TexPool::Linear) == 65536 && fa.bad_release == 0);
+	CHECK(c.lookup(a) == na);
+	// bumping twice before a retire is fine
+	c.bump_generation();
+	c.bump_generation();
+	CHECK(c.generation() == 3 && c.on_retired() == 1 && fa.live.empty());
+	// stable addresses: slot i is where it was
+	CHECK(&c.slot(0) == &c.slot(0) && (&c.slot(1) - &c.slot(0)) == 1);
+
+	// release_all frees everything in every state
+	c.begin_frame(2);
+	c.create(K(5), 128);
+	c.create(K(6), 128);
+	c.bump_generation();
+	c.create(K(7), 128);
+	c.release_all();
+	CHECK(fa.live.empty() && c.used_bytes(TexPool::Linear) == 0 && fa.bad_release == 0 && c.retiring_count() == 0);
+	CHECK(!c.stats_line().empty());
+}
+
+static void test_cache_lru()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(192, 0, 8));   // three 128x128 textures; no VRAM
+	GxQueue gx;
+	run_frame(c, gx, 1);
+	CHECK(c.create(K(1), 128) && c.create(K(2), 128) && c.create(K(3), 128));
+	CHECK(c.pending_count() == 0);   // the VRAM cap cannot hold one: never pending
+	// everything was used this frame: nothing evictable -> failure, the live ones stay
+	CHECK(c.create(K(4), 128) == nullptr);
+	CHECK(c.stats().discards_tex == 1 && c.stats().evictions == 0 && c.live_count(TexPool::Linear) == 3);
+	run_frame(c, gx, 2);
+	c.lookup(K(1));   // 1 is used in frame 2, so 2 is the LRU (then 3)
+	TexSlot* s4 = c.create(K(4), 128);
+	CHECK(s4 && c.stats().evictions == 1);
+	CHECK(c.lookup(K(2)) == nullptr);   // lookup() of the evicted one is also a miss (and does not touch)
+	CHECK(c.lookup(K(1)) && c.lookup(K(3)) && c.lookup(K(4)));
+	// a miss that follows: frame 2 slots 1, 3 (just looked up), 4 are all current -> failure
+	CHECK(c.create(K(5), 128) == nullptr && c.stats().discards_tex == 2);
+	run_frame(c, gx, 3);
+	TexSlot* s5 = c.create(K(5), 128);   // LRU: 1/3/4 all last used in frame 2; the oldest creation (1) goes
+	CHECK(s5 && c.lookup(K(1)) == nullptr && c.lookup(K(3)) && c.lookup(K(4)));
+	CHECK(fa.bad_release == 0 && c.used_bytes(TexPool::Linear) == 192 * 1024);
+
+	// a texture bigger than the pool can never be made; no slot is lost
+	TexSlot* big = c.create(K(6), 256);
+	CHECK(big == nullptr && c.live_count(TexPool::Linear) == 3);
+
+	// allocator failure with room in the cap is counted (fragmentation or the real heap)
+	FakeAlloc fb;
+	TexCache d(fb, cfg_of(4096, 0, 0));
+	run_frame(d, gx, 1);
+	fb.fail_next = 1;
+	CHECK(d.create(K(1), 128) == nullptr);
+	CHECK(d.stats().alloc_failed_free == 1 && d.stats().discards_tex == 1);
+	CHECK(d.create(K(1), 128) != nullptr && d.stats().alloc_failed_free == 1);
+}
+
+static void test_cache_slot_array_full()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 0, 0));
+	GxQueue gx;
+	run_frame(c, gx, 1);
+	std::vector<TexSlot*> slots;
+	for (int i = 0; i < static_cast<int>(kTexSlots); ++i)
+		slots.push_back(c.create(K(i), 8));   // 256-byte textures
+	CHECK(std::count(slots.begin(), slots.end(), nullptr) == 0);
+	CHECK(c.create(K(1000), 8) == nullptr);          // full and all current: discard
+	run_frame(c, gx, 2);
+	TexSlot* n = c.create(K(1000), 8);                 // full, previous frame: evict the LRU (oldest)
+	CHECK(n && n == slots[0] && c.lookup(K(0)) == nullptr && c.lookup(K(1)) == slots[1]);
+	CHECK(c.stats().evictions == 1 && fa.bad_release == 0);
+}
+
+static void test_cache_promotion()
+{
+	// order, promote_max, the GX rule
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 2));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		TexSlot* s[5];
+		for (int i = 0; i < 5; ++i)
+			s[i] = c.create(K(i), 128);
+		CHECK(c.pending_count() == 5);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2);
+		CHECK(p.size() == 2 && p[0].slot == s[0] && p[1].slot == s[1]);   // oldest first, promote_max 2
+		CHECK(gx.used() == 2 && c.stats().promotions_done == 2 && c.stats().promotions_deferred == 0);
+		CHECK(p[0].src == s[0]->handle && p[0].dst == s[0]->vram_handle && p[0].bytes == 65536);
+		CHECK(c.pending_count() == 3 && s[0]->handle != s[0]->vram_handle);
+		// the linear texture is still sampled in the frame of the copy; it is on the deferred list
+		CHECK(s[0]->pool == TexPool::Linear && c.deferred_block_count() == 2);
+		CHECK(c.used_bytes(TexPool::Vram) == 2 * 65536 && c.used_bytes(TexPool::Linear) == 5 * 65536);
+		void* vh = s[0]->vram_handle;
+		p = run_frame(c, gx, 3);   // on_retired: frees the two linear sources, switches 0 and 1 to VRAM
+		CHECK(s[0]->handle == vh && s[0]->pool == TexPool::Vram && s[0]->vram_handle == nullptr);
+		CHECK(c.used_bytes(TexPool::Linear) == 3 * 65536 && fa.bad_release == 0);
+		CHECK(p.size() == 2 && p[0].slot == s[2] && p[1].slot == s[3]);
+		p = run_frame(c, gx, 4);
+		CHECK(p.size() == 1 && p[0].slot == s[4]);
+		p = run_frame(c, gx, 5);
+		CHECK(p.empty() && c.pending_count() == 0 && c.stats().promotions_done == 5);
+		CHECK(c.live_count(TexPool::Vram) == 5 && c.live_count(TexPool::Linear) == 0 && fa.total(TexPool::Linear) == 0);
+		CHECK(c.stats().deferred_frees == 5);
+	}
+	// gxq_budget 4: used + 1 + 3 <= 4 admits one per frame; the rest are deferred, not discarded
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 8));
+		GxQueue gx;
+		gx.set_budget(4);
+		run_frame(c, gx, 1);
+		for (int i = 0; i < 4; ++i)
+			c.create(K(i), 128);
+		for (uint32_t f = 2; f <= 5; ++f)
+		{
+			std::vector<TexPromotion> p = run_frame(c, gx, f);
+			CHECK(p.size() == 1 && gx.used() == 1);
+			// the frame's own entries still fit: clear + split + readback = 3 more
+			CHECK(gx.take(false) && gx.take_split() && gx.take(false) && gx.refused() == 0);
+		}
+		CHECK(c.stats().promotions_done == 4 && c.stats().promotions_deferred == 3 && c.pending_count() == 0);
+		run_frame(c, gx, 6);
+		CHECK(c.stats().promotions_deferred == 3);   // nothing waiting: not a deferral
+		// budget 3 never admits one (used 0 + 1 + 3 > 3)
+		FakeAlloc fb;
+		TexCache d(fb, cfg_of(4096, 3584, 8));
+		GxQueue g3;
+		g3.set_budget(3);
+		run_frame(d, g3, 1);
+		d.create(K(1), 128);
+		CHECK(run_frame(d, g3, 2).empty() && d.stats().promotions_deferred == 1 && d.pending_count() == 1);
+	}
+	// a non-empty command buffer costs 2 entries; the rule still uses 1, a failed take is a deferral
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 8));
+		GxQueue gx;
+		gx.set_budget(5);
+		run_frame(c, gx, 1);
+		c.create(K(1), 128);
+		c.create(K(2), 128);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2, true);   // rule: 0+1+3 <= 5; take costs 2; then 2+1+3 > 5
+		CHECK(p.size() == 1 && gx.used() == 2 && c.stats().promotions_deferred == 1 && fa.bad_release == 0);
+		GxQueue tight;
+		tight.set_budget(4);
+		FakeAlloc fb;
+		TexCache e(fb, cfg_of(4096, 3584, 8));
+		run_frame(e, tight, 1);
+		e.create(K(1), 128);
+		p = run_frame(e, tight, 2, true);   // rule passes (4 <= 4), take(true) costs 2 <= 4: ok, used 2
+		CHECK(p.size() == 1 && tight.used() == 2);
+	}
+	// promote_max 0: nothing ever pending, nothing promoted
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 0));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		c.create(K(1), 128);
+		CHECK(c.pending_count() == 0 && run_frame(c, gx, 2).empty() && c.stats().promotions_done == 0);
+		CHECK(c.stats().promotions_deferred == 0);
+	}
+}
+
+static void test_cache_eviction_rules()
+{
+	// never evict a slot whose copy was issued this frame; a merely waiting slot goes (and leaves the queue)
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(128, 1024, 1));   // two linear textures
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		TexSlot* a = c.create(K(1), 128);
+		TexSlot* b = c.create(K(2), 128);
+		CHECK(a && b && c.pending_count() == 2);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2);   // promote_max 1: A's copy is issued
+		CHECK(p.size() == 1 && p[0].slot == a);
+		// the linear cap is full (A's source is still held until the retire): B waits, is older than the
+		// current frame, and is evicted for C
+		TexSlot* cc = c.create(K(3), 128);
+		CHECK(cc && c.lookup(K(2)) == nullptr && c.pending_count() == 1);   // B dropped from the queue; C pending
+		CHECK(c.stats().evictions == 1 && a->vram_handle);
+		// D: A is protected (copy this frame), C was created this frame -> failure (discard tex), A intact
+		CHECK(c.create(K(4), 128) == nullptr && c.stats().discards_tex == 1);
+		CHECK(c.lookup(K(1)) == a && a->vram_handle && fa.bad_release == 0);
+		// next frame the source is freed, A is in VRAM; C (older than frame 3) can be promoted
+		p = run_frame(c, gx, 3);
+		CHECK(a->pool == TexPool::Vram && p.size() == 1 && p[0].slot == cc);
+	}
+	// VRAM full: the LRU VRAM slot is evicted for a promotion unless it was used as recently
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 64, 8));   // one 128x128 in VRAM
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		TexSlot* a = c.create(K(1), 128);
+		run_frame(c, gx, 2);
+		run_frame(c, gx, 3);   // A is in VRAM now (promoted in frame 2, retired at 3)
+		CHECK(a->pool == TexPool::Vram && c.used_bytes(TexPool::Vram) == 65536);
+		c.lookup(K(1));   // A used in frame 3
+		TexSlot* b = c.create(K(2), 128);   // B created in frame 3
+		CHECK(b && b->pool == TexPool::Linear);
+		std::vector<TexPromotion> p = run_frame(c, gx, 4);   // A (3) is not older than B (3): B stays linear
+		CHECK(p.empty() && c.pending_count() == 1 && c.lookup(K(1)) == a && c.stats().evictions == 0);
+		run_frame(c, gx, 5);
+		c.lookup(K(2));   // B used in frame 5 (A last used in 4)
+		p = run_frame(c, gx, 6);   // B (5) is newer than A (4): A is evicted from VRAM, B promoted
+		CHECK(p.size() == 1 && p[0].slot == b && c.stats().evictions == 1 && c.lookup(K(1)) == nullptr);
+		CHECK(c.used_bytes(TexPool::Vram) == 65536 && fa.bad_release == 0);
+	}
+	// bump while a copy is in flight: no double free, everything released after one retire
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 8));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		c.create(K(1), 128);
+		c.create(K(2), 128);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2);
+		CHECK(p.size() == 2);
+		c.bump_generation();
+		CHECK(c.pending_count() == 0 && c.retiring_count() == 2);
+		c.on_retired();
+		CHECK(fa.live.empty() && fa.bad_release == 0 && c.used_bytes(TexPool::Linear) == 0 && c.used_bytes(TexPool::Vram) == 0);
+	}
+	// an unreachable promotion (oversized for the VRAM cap) never queues
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 128, 8));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		c.create(K(1), 256);   // 256 KiB > 128 KiB VRAM cap
+		CHECK(c.pending_count() == 0);
+	}
+}
+
+// The linear cap filled without any promotion getting through: LRU eviction, never a failure.
+static void fill_linear(unsigned promote_max, int gx_budget)
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(256, 3584, promote_max));   // four 128x128 in linear
+	GxQueue gx;
+	gx.set_budget(gx_budget);
+	unsigned made = 0;
+	for (uint32_t f = 1; f <= 40; ++f)
+	{
+		run_frame(c, gx, f);
+		for (int k = 0; k < 2; ++k)
+			made += c.create(K(static_cast<int>(f * 2 + k)), 128) != nullptr;
+		CHECK(c.used_bytes(TexPool::Linear) <= 256 * 1024);
+	}
+	CHECK(made == 80);
+	CHECK(c.stats().discards_tex == 0 && c.stats().evictions > 0 && fa.bad_release == 0);
+	CHECK(c.stats().alloc_failed_free == 0);
+	if (promote_max == 0)
+		CHECK(c.stats().promotions_done == 0 && c.pending_count() == 0);
+	else
+		CHECK(c.stats().promotions_done > 0 && c.stats().promotions_deferred > 0);
+}
+
+static void test_cache_linear_full()
+{
+	fill_linear(0, 24);   // promote_max 0
+	fill_linear(8, 4);    // gxq_budget 4: one promotion a frame, the waiting ones are evicted
+}
+
+static void test_cache_stats()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(8192, 3584, 8));
+	GxQueue gx;
+	c.bump_generation();   // a generation change opens the first-10-frames window
+	run_frame(c, gx, 1);
+	for (int i = 0; i < 10; ++i)
+		c.create(K(i), 128);   // 640 KiB in frame 1: over the soft budget (512 KiB)
+	run_frame(c, gx, 2);
+	c.create(K(20), 256);
+	const TexStats& s = c.stats();
+	CHECK(s.conversions == 11 && s.bytes_converted == 10 * 65536 + 262144);
+	CHECK(s.frame_bytes_max == 10 * 65536 && s.over_budget_frames == 1);
+	CHECK(s.gen_window_bytes[0] == 10 * 65536 && s.gen_window_bytes[1] == 262144 && s.gen_window_bytes[2] == 0);
+	const std::string line = c.stats_line();
+	CHECK(line.find("[c3d] tex:") == 0 && line.find("gen 1") != std::string::npos && line.find("discards 0") != std::string::npos);
+	CHECK(line.find('\n') == std::string::npos);
+}
+
+static void test_m2_core()
+{
+	test_config_m2();
+	test_tex_supported();
+	test_tex_convert();
+	test_morton_and_tile_index();
+	test_tiling_tex3ds();
+	test_cache_keys_generations();
+	test_cache_lru();
+	test_cache_slot_array_full();
+	test_cache_promotion();
+	test_cache_eviction_rules();
+	test_cache_linear_full();
+	test_cache_stats();
+}
+
 int main()
 {
 	test_config();
@@ -1602,6 +2508,7 @@ int main()
 	test_acceptance_and_coverage();
 	test_tie_pixels();
 	test_ring();
+	test_m2_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

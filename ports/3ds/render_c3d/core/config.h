@@ -74,6 +74,13 @@
 	                    '#' is not supported. Relative to the user directory unless it starts with
 	                    sdmc:/ or /. A film to replay from the command line (boot_begin)
 
+	Keys of M2 (design 7, "M2 specification", "Keys"; the texture cache, pure part):
+
+	  vram_cap KiB      0..4096, default 3584: accounting cap of the VRAM texture pool
+	  linear_cap KiB    64..16384, default 4096: accounting cap of the linear texture pool
+	  promote_max N     0..8, default 8: linear-to-VRAM promotions per view frame; 0 = never
+	                    (linear sampling only)
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -121,6 +128,10 @@ struct Config
 	unsigned ring_vertices = 1024;
 	unsigned ring_indices = 2048;
 	unsigned reserve_extra = 0;
+	// M2
+	unsigned vram_cap = 3584;               // KiB
+	unsigned linear_cap = 4096;             // KiB
+	unsigned promote_max = 8;
 	std::string film;
 };
 

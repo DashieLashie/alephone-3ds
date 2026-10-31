@@ -155,6 +155,12 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 64, 65536, cfg.ring_indices);
 	if (key == "reserve_extra")
 		return parse_unsigned(value, 0, 1000000, cfg.reserve_extra);
+	if (key == "vram_cap")
+		return parse_unsigned(value, 0, 4096, cfg.vram_cap);
+	if (key == "linear_cap")
+		return parse_unsigned(value, 64, 16384, cfg.linear_cap);
+	if (key == "promote_max")
+		return parse_unsigned(value, 0, 8, cfg.promote_max);
 	if (key == "film")
 	{
 		if (value.empty())
