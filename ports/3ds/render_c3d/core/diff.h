@@ -40,9 +40,16 @@ struct DiffResult
 	unsigned differ = 0;   // pixels anywhere whose 32 bits differ
 	unsigned ties = 0;          // tie-mask pixels (M1 piece 5), inside the image
 	unsigned tie_mismatch = 0;  // tie-mask pixels whose coverage differs between A and B
+	// Neighbourhood metric (M2 colour gate): over the same common pixels, the delta is the minimum of the
+	// channel delta to A's pixel and to each of its 8 in-image neighbours that are covered in A.
+	unsigned within_nb = 0;
+	uint64_t sum_nb = 0;
+	unsigned max_nb = 0;
 	unsigned band = 0;     // A's edge-band pixels: those with an 8-neighbour whose coverage in A differs
 
 	double mean() const { return common ? static_cast<double>(sum_delta) / common : 0.0; }
+	double mean_nb() const { return common ? static_cast<double>(sum_nb) / common : 0.0; }
+	double within_nb_pct() const { return common ? 100.0 * within_nb / common : 100.0; }
 	double within_pct() const { return common ? 100.0 * within_tol / common : 100.0; }
 };
 
@@ -57,7 +64,7 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 // differ=D band=N", no newline.
 std::string diff_line(unsigned frame, const char* cls, const DiffResult& r, int tol);
 
-// The same with M1's C3D fields appended: " b=c3d excluded=X sentinel=S ties=T tie_mismatch=M" (X: primitives the C3D side
+// The same with M1's C3D fields appended: " b=c3d excluded=X sentinel=S ties=T tie_mismatch=M within_nb=P% mean_nb=M max_nb=X" (X: primitives the C3D side
 // dropped, section 7 M1 "What C3D draws"; S: readback pixels still holding the staging sentinel).
 std::string diff_line_c3d(unsigned frame, const char* cls, const DiffResult& r, int tol, unsigned excluded,
                           unsigned sentinel);

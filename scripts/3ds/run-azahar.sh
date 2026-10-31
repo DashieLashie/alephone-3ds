@@ -66,6 +66,10 @@
 #                  portable install (a "user" folder next to the app), else
 #                  ~/Library/Application Support/Azahar/sdmc
 #   SCENARIO_SRC   scenario folder to copy (default: <repo>/data/Scenarios/Marathon 2)
+#   AZAHAR_GRAPHICS_API  unset = leave Azahar's setting alone. 0 = software rasteriser, 1 = OpenGL, 2 = Vulkan:
+#                  for this run qt-config.ini gets graphics_api=N and graphics_api\default=false; the original
+#                  file is restored on every exit path (the host-GPU backend can differ from the software one
+#                  in what a citro3d frame reads back)
 #   SCENARIO_NAME  folder name on the SD card (default: Marathon2, the game's default)
 set -euo pipefail
 
@@ -276,6 +280,37 @@ if [ "$copy_data" = 1 ]; then
 		cp -R "$repo/scripts/3ds/tests/plugins/Load Test" "$plugin"
 		echo "run-azahar: installed the Load Test plugin"
 	fi
+fi
+
+# AZAHAR_GRAPHICS_API: switch Azahar's backend for this run only; qt-config.ini is put back on every exit path.
+config_saved=
+if [ -f "$config.run-azahar-orig" ]; then   # a run killed with -9 left the original behind: put it back first
+	cp "$config.run-azahar-orig" "$config" && rm -f "$config.run-azahar-orig"
+	echo "run-azahar: restored $config from an earlier killed run"
+fi
+restore_config() {
+	if [ -n "$config_saved" ] && [ -f "$config_saved" ]; then
+		cp "$config_saved" "$config" && rm -f "$config_saved"
+		config_saved=
+		echo "run-azahar: restored $config"
+	fi
+}
+if [ -n "${AZAHAR_GRAPHICS_API:-}" ]; then
+	case "$AZAHAR_GRAPHICS_API" in
+		0) gname="software rasteriser" ;;
+		1) gname="OpenGL" ;;
+		2) gname="Vulkan" ;;
+		*) die "AZAHAR_GRAPHICS_API must be 0 (software), 1 (OpenGL) or 2 (Vulkan), not '$AZAHAR_GRAPHICS_API'" ;;
+	esac
+	[ -f "$config" ] || die "AZAHAR_GRAPHICS_API set but $config does not exist (start Azahar once)"
+	grep -q '^graphics_api=' "$config" && grep -q '^graphics_api\\default=' "$config" ||
+		die "$config has no graphics_api / graphics_api\\default lines"
+	config_saved="$config.run-azahar-orig"
+	cp "$config" "$config_saved"
+	trap restore_config EXIT
+	sed -e "s/^graphics_api=.*/graphics_api=$AZAHAR_GRAPHICS_API/" -e 's/^graphics_api\\default=.*/graphics_api\\default=false/' \
+		"$config_saved" > "$config"
+	echo "run-azahar: Azahar graphics backend $AZAHAR_GRAPHICS_API ($gname) for this run"
 fi
 
 echo "run-azahar: SD card $sdmc"

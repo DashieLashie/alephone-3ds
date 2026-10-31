@@ -48,6 +48,9 @@ inline uint32_t cal_clear_rgba(unsigned k) { return ((k & 0xFFu) << 24) | (0x40u
 // corner colour (G, B in {0x00, 0xFF}), and different for every k, so a pixel the transfer did not
 // write is told from the previous frame's too.
 inline uint32_t cal_sentinel_rgba(unsigned k) { return ((~k & 0xFFu) << 24) | (0xC3u << 16) | (0xA5u << 8) | 0xFFu; }
+// M2: the sentinel of view frames (textured pixels may have any RGB): the same RGB with alpha byte 0x01, a
+// value no M2/M3 draw writes. As 0xRRGGBBAA (alpha = low byte).
+inline uint32_t view_sentinel_rgba(unsigned k) { return (cal_sentinel_rgba(k) & 0xFFFFFF00u) | 0x01u; }
 inline uint32_t cal_sentinel_argb(unsigned k) { return rgba_to_argb(cal_sentinel_rgba(k)); }
 
 enum class Orientation { Ok, RowsFlipped, ColsFlipped, Rotated180, Transposed, Unknown };

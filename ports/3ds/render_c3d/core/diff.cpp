@@ -105,6 +105,25 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 				r.max_delta = std::max(r.max_delta, d);
 				if (static_cast<long>(d) <= tol)
 					++r.within_tol;
+				unsigned dn = d;
+				for (int dy = -1; dy <= 1; ++dy)
+				{
+					const int ny = y + dy;
+					if (ny < 0 || ny >= h)
+						continue;
+					for (int dx = -1; dx <= 1; ++dx)
+					{
+						const int nx = x + dx;
+						if ((dx == 0 && dy == 0) || nx < 0 || nx >= w)
+							continue;
+						if (cov[static_cast<size_t>(ny) * w + nx])
+							dn = std::min(dn, channel_delta(a.px[static_cast<size_t>(ny) * a.pitch + nx], pb[x]));
+					}
+				}
+				r.sum_nb += dn;
+				r.max_nb = std::max(r.max_nb, dn);
+				if (static_cast<long>(dn) <= tol)
+					++r.within_nb;
 			}
 		}
 	}
@@ -125,9 +144,10 @@ std::string diff_line(unsigned frame, const char* cls, const DiffResult& r, int 
 std::string diff_line_c3d(unsigned frame, const char* cls, const DiffResult& r, int tol, unsigned excluded,
                           unsigned sentinel)
 {
-	char tail[128];
-	std::snprintf(tail, sizeof tail, " b=c3d excluded=%u sentinel=%u ties=%u tie_mismatch=%u", excluded, sentinel,
-	              r.ties, r.tie_mismatch);
+	char tail[192];
+	std::snprintf(tail, sizeof tail,
+	              " b=c3d excluded=%u sentinel=%u ties=%u tie_mismatch=%u within_nb=%.2f%% mean_nb=%.2f max_nb=%u",
+	              excluded, sentinel, r.ties, r.tie_mismatch, r.within_nb_pct(), r.mean_nb(), r.max_nb);
 	return diff_line(frame, cls, r, tol) + tail;
 }
 

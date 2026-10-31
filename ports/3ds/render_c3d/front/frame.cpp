@@ -284,8 +284,9 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 		printf("[c3d] DIFF frame=%u class=%s discarded (%s)\n", s_frame, cls, back::discard_name(ve.discard));
 		return;
 	}
-	const DiffResult r = diff_images(s_a.image(), s_b.image(), Coverage::TopByte, 0, 0, s_c3d_rast.tie_mask());
-	printf("%s\n", diff_line_c3d(s_frame, cls, r, 0, fa.excluded(), sentinel).c_str());
+	const DiffResult r = diff_images(s_a.image(), s_b.image(), Coverage::TopByte, 0, static_cast<int>(cfg.diff_tol),
+	                                s_c3d_rast.tie_mask());
+	printf("%s\n", diff_line_c3d(s_frame, cls, r, static_cast<int>(cfg.diff_tol), fa.excluded(), sentinel).c_str());
 	++s_c3d_compared;
 	s_c3d_ties += r.ties;
 	s_c3d_tie_mismatch += r.tie_mismatch;

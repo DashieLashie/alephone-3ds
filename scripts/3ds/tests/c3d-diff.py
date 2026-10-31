@@ -19,6 +19,19 @@
 #       line; fewer than N compared checks of a listed class (--min-checks, default 1). A skipped check is
 #       neither compared nor a failure; the table shows why.
 #
+#       With --colour CLASS[,CLASS] (M2, revised gate, design 7 "M2 specification", "Colour metric and tolerance"):
+#                [--colour CLASS[,CLASS] --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks N]
+#       per listed class, over the C3D checks of the run: non-edge coverage mismatches summed / A's covered
+#       pixels summed <= --nonedge-pct %; neighbourhood within % (sum of within_nb over the sum of common;
+#       a line's within_nb count is reconstructed as common x within_nb%, printed with 2 decimals, so each
+#       count is rounded to the nearest pixel) >= --within; neighbourhood mean (sum of common x mean_nb over
+#       sum of common) <= --mean. The strict figures (Delta to A's own pixel) are printed, informative.
+#       Plus every --coverage failure rule (missing summary, dropped frame, a discarded check of a listed
+#       class, sentinel > 0, fewer than N compared checks of a listed class), and: the "[c3d] debug-c3d:"
+#       line must show `fullbright 1` and not `textures 0` (colour is meaningless otherwise), and the DIFF
+#       lines' "(tol T)" must equal --tol. Per-check worst figures (lowest within_nb, highest mean_nb and max_nb) are
+#       printed. Needs the lines of a build with the neighbourhood fields (` within_nb=` ...).
+#
 #   python3 -I scripts/3ds/tests/c3d-diff.py bmp A.bmp B.bmp [--class C]
 #       Reads two 32-bit BMPs (c3d-diff-<frame>-<class>-{sw,c3d}.bmp) and recomputes the metric of
 #       core/diff.cpp (tolerance 0): coverage TopByte (alpha byte != 0), or "pixel != clear" for the class
@@ -50,6 +63,12 @@ def parse_diff_line(line):
         cm = kv["cov_mismatch"].split("/")
         return {
             "frame": int(kv["frame"]), "class": kv["class"], "state": "compared",
+            "cov_a": int(kv["covered"].split("/")[0]), "common": int(kv["common"]),
+            "within_tol": float(kv["within_tol"].rstrip("%")),
+            "tol": int(re.search(r"\(tol (\d+)\)", text).group(1)),
+            "within_nb": float(kv["within_nb"].rstrip("%")) if "within_nb" in kv else None,
+            "mean_nb": float(kv["mean_nb"]) if "mean_nb" in kv else None,
+            "max_nb": int(kv["max_nb"]) if "max_nb" in kv else None,
             "cov_edge": int(cm[0]), "cov_non": int(cm[1]),
             "mean": float(kv["mean"]), "max": int(kv["max"]), "differ": int(kv["differ"]),
             "band": int(kv["band"]) if "band" in kv else None,
@@ -63,12 +82,14 @@ def parse_diff_line(line):
         return None
 
 
-def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1):
-    rows, other, summary, dropped = [], [], None, []
+def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour=None, colour_opts=None):
+    rows, other, summary, dropped, dbg = [], [], None, [], None
     with open(path, "r", errors="replace") as f:
         for line in f:
             if "[c3d] DIFF summary" in line:
                 summary = line.strip()
+            elif "[c3d] debug-c3d:" in line and "fullbright" in line:
+                dbg = line.strip()
             elif "[c3d] DIFF frame=" in line and " dropped" in line:
                 dropped.append(line.strip())
             else:
@@ -150,7 +171,78 @@ def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1):
         if problems:
             print("c3d-diff: FAIL (--coverage)")
             failed = True
+    if colour:
+        if colour_check(colour, colour_opts, rows, other, summary, n_dropped, dbg, min_checks):
+            failed = True
     return 1 if failed else 0
+
+
+def colour_check(colour, o, rows, other, summary, n_dropped, dbg, min_checks):
+    """The M2 colour gate (revised, neighbourhood rule). Prints the figures; returns True on failure."""
+    problems = []
+    c3d_rows = [r for r in rows if r["c3d"] and r["class"] in colour]
+    print("%-8s %6s %10s %10s %9s %9s %9s %9s %7s" % (
+        "class", "checks", "non-edge", "covered_A", "within_nb", "mean_nb", "strict_in", "strict_mn", "max_nb"))
+    for c in colour:
+        rs = [r for r in c3d_rows if r["class"] == c]
+        if len(rs) < min_checks:
+            problems.append("class %s: %d compared check(s), fewer than --min-checks %d" % (c, len(rs), min_checks))
+        nd = [x for x in other if x["state"] == "discarded" and x["class"] == c]
+        if nd:
+            problems.append("class %s: %d discarded check(s)" % (c, len(nd)))
+        if any(r["within_nb"] is None for r in rs):
+            problems.append("class %s: DIFF lines without within_nb / mean_nb (a build before M2 part 5)" % c)
+            continue
+        common = sum(r["common"] for r in rs)
+        cov_a = sum(r["cov_a"] for r in rs)
+        non = sum(r["cov_non"] for r in rs)
+        w_nb = sum(round(r["common"] * r["within_nb"] / 100.0) for r in rs)
+        w_st = sum(round(r["common"] * r["within_tol"] / 100.0) for r in rs)
+        s_nb = sum(r["common"] * r["mean_nb"] for r in rs)
+        s_st = sum(r["common"] * r["mean"] for r in rs)
+        non_pct = 100.0 * non / cov_a if cov_a else (0.0 if not non else float("inf"))
+        in_pct = 100.0 * w_nb / common if common else 100.0
+        mean_nb = s_nb / common if common else 0.0
+        print("%-8s %6d %10s %10d %8.3f%% %9.3f %8.3f%% %9.3f %7d" % (
+            c, len(rs), "%d (%.3f%%)" % (non, non_pct), cov_a, in_pct, mean_nb,
+            100.0 * w_st / common if common else 100.0, s_st / common if common else 0.0,
+            max((r["max_nb"] for r in rs), default=0)))
+        if rs:
+            lo = min(rs, key=lambda r: r["within_nb"])
+            hi = max(rs, key=lambda r: r["mean_nb"])
+            print("  worst per check: within_nb %.2f%% (frame %d), mean_nb %.2f (frame %d), max_nb %d (frame %d), non-edge %d (frame %d)" % (
+                lo["within_nb"], lo["frame"], hi["mean_nb"], hi["frame"],
+                max(r["max_nb"] for r in rs), max(rs, key=lambda r: r["max_nb"])["frame"],
+                max(r["cov_non"] for r in rs), max(rs, key=lambda r: r["cov_non"])["frame"]))
+        if non_pct > o["nonedge"]:
+            problems.append("class %s: non-edge coverage mismatches %.3f%% of A's covered, over %.3f%%" % (c, non_pct, o["nonedge"]))
+        if in_pct < o["within"]:
+            problems.append("class %s: within (neighbourhood) %.3f%%, under %.3f%%" % (c, in_pct, o["within"]))
+        if mean_nb > o["mean"]:
+            problems.append("class %s: neighbourhood mean %.3f, over %.3f" % (c, mean_nb, o["mean"]))
+    for r in c3d_rows:
+        if r["tol"] != o["tol"]:
+            problems.append("class %s frame %d: DIFF line has (tol %d), --tol is %d" % (r["class"], r["frame"], r["tol"], o["tol"]))
+            break
+    if dbg is None:
+        problems.append("no [c3d] debug-c3d: line (cannot confirm fullbright 1 / textures)")
+    else:
+        if not re.search(r"\bfullbright 1\b", dbg):
+            problems.append("debug-c3d line lacks `fullbright 1`")
+        if re.search(r"\btextures 0\b", dbg):
+            problems.append("debug-c3d line has `textures 0` (flat colour: the colour figures mean nothing)")
+    if not summary:
+        problems.append("no DIFF summary line")
+    if n_dropped:
+        problems.append("%d dropped frame(s)" % n_dropped)
+    sent = sum(r["sentinel"] for r in rows)
+    if sent:
+        problems.append("sentinel > 0 (%d pixel(s) the readback never wrote)" % sent)
+    for p_ in problems:
+        print("c3d-diff: %s" % p_)
+    if problems:
+        print("c3d-diff: FAIL (--colour)")
+    return bool(problems)
 
 
 class BmpError(Exception):
@@ -228,7 +320,8 @@ def cmd_bmp(pa, pb, cls):
 def main(argv):
     if len(argv) >= 3 and argv[1] == "log":
         rest = argv[3:]
-        opts = {"--coverage": None, "--band-pct": "2", "--min-checks": "1"}
+        opts = {"--coverage": None, "--band-pct": "2", "--min-checks": "1", "--colour": None,
+                "--nonedge-pct": "0.1", "--within": "98", "--tol": "2", "--mean": "1.0"}
         flags = set()
         i = 0
         while i < len(rest):
@@ -243,11 +336,15 @@ def main(argv):
                 return 2
         try:
             band_pct, min_checks = float(opts["--band-pct"]), int(opts["--min-checks"])
+            colour_opts = {"nonedge": float(opts["--nonedge-pct"]), "within": float(opts["--within"]),
+                           "tol": int(opts["--tol"]), "mean": float(opts["--mean"])}
         except ValueError:
-            print("c3d-diff: --band-pct needs a number and --min-checks an integer", file=sys.stderr)
+            print("c3d-diff: --band-pct, --nonedge-pct, --within, --mean need numbers; --min-checks, --tol integers",
+                  file=sys.stderr)
             return 2
+        colour = [c for c in opts["--colour"].split(",") if c] if opts["--colour"] else None
         coverage = [c for c in opts["--coverage"].split(",") if c] if opts["--coverage"] else None
-        return cmd_log(argv[2], "--expect-zero" in flags, coverage, band_pct, min_checks)
+        return cmd_log(argv[2], "--expect-zero" in flags, coverage, band_pct, min_checks, colour, colour_opts)
     if len(argv) >= 4 and argv[1] == "bmp":
         cls = "frame"
         rest = argv[4:]
@@ -258,7 +355,8 @@ def main(argv):
         except BmpError as e:
             print("c3d-diff: %s" % e, file=sys.stderr)
             return 2
-    print("usage: c3d-diff.py log LOG [--expect-zero] [--coverage CLASS[,CLASS] --band-pct P --min-checks N] "
+    print("usage: c3d-diff.py log LOG [--expect-zero] [--coverage CLASS[,CLASS] --band-pct P --min-checks N]\n"
+          "                         [--colour CLASS[,CLASS] --nonedge-pct P --within P --tol T --mean M] "
           "| bmp A.bmp B.bmp [--class C]")
     return 2
 

@@ -359,12 +359,13 @@ ViewBegin view_begin(int w, int h)
 	}
 
 	// The staging is filled with a per-frame sentinel and flushed before the frame: a pixel the transfer
-	// never wrote is recognisable. The colour hash never produces the sentinel's RGB (shape_colour).
+	// never wrote is recognisable (the sentinel's RGB with alpha 0x01, which no M2/M3 draw writes: textured
+	// pixels can have any RGB). The colour hash never produces the sentinel's RGB (shape_colour).
 	++s_k;
 	s_f.w = w;
 	s_f.h = h;
-	s_f.sentinel_argb = rgba_to_argb_keep(cal_sentinel_rgba(s_k));
-	view_fill_staging(cal_sentinel_rgba(s_k));
+	s_f.sentinel_argb = rgba_to_argb_keep(view_sentinel_rgba(s_k));
+	view_fill_staging(view_sentinel_rgba(s_k));
 	++s_n.frames;
 
 	const FrameStart fs = frame_begin(FrameZone::Wait);

@@ -348,13 +348,53 @@ static void test_diff()
 	      "[c3d] DIFF frame=0 class=frame covered=0/0 cov_mismatch=0/0 common=0 within_tol=100.00% (tol 0) "
 	      "mean=0.00 max=0 differ=0 band=0");
 	// M1: the C3D fields are appended after band, so an M0 parser (key=value pairs) still reads the rest.
+	l.within_nb = 76; l.sum_nb = 40; l.max_nb = 3;
 	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0) ==
 	      "[c3d] DIFF frame=12 class=walls covered=100/98 cov_mismatch=4/1 common=80 within_tol=75.00% (tol 4) "
-	      "mean=1.50 max=9 differ=17 band=64 b=c3d excluded=3 sentinel=0 ties=0 tie_mismatch=0");
+	      "mean=1.50 max=9 differ=17 band=64 b=c3d excluded=3 sentinel=0 ties=0 tie_mismatch=0 "
+	      "within_nb=95.00% mean_nb=0.50 max_nb=3");
 	l.ties = 5; l.tie_mismatch = 2;
 	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0).find(" sentinel=0 ties=5 tie_mismatch=2") != std::string::npos);
 	CHECK(diff_line_c3d(1, "walls", DiffResult(), 0, 0, 7).find(" band=0 b=c3d excluded=0 sentinel=7 ties=0 tie_mismatch=0") !=
 	      std::string::npos);
+
+	// M2 colour gate: the neighbourhood metric. A is a dithered 2-pixel-period pattern (columns alternate 10 / 200,
+	// grey), covered everywhere (alpha 0xFF); an edge band is skipped, so the interior is judged.
+	{
+		const int nw = 12, nh = 8;
+		std::vector<uint32_t> pa(nw * nh), same(nw * nh), shifted(nw * nh), bad(nw * nh);
+		for (int y = 0; y < nh; ++y)
+			for (int x = 0; x < nw; ++x)
+			{
+				auto grey = [](int v) { return 0xFF000000u | (v << 16) | (v << 8) | v; };
+				const int v = (x & 1) ? 200 : 10;
+				pa[y * nw + x] = grey(v);
+				same[y * nw + x] = grey(v);
+				shifted[y * nw + x] = grey(((x + 1) & 1) ? 200 : 10);   // 1-pixel shift: strict Delta 190 everywhere
+				bad[y * nw + x] = grey(100);                             // matches neither 10 nor 200
+			}
+		Image32 ia{pa.data(), nw, nh, nw};
+		auto run = [&](const std::vector<uint32_t>& b) {
+			Image32 ib{b.data(), nw, nh, nw};
+			return diff_images(ia, ib, Coverage::TopByte, 0, 2);
+		};
+		DiffResult rs = run(same), rh = run(shifted), rb = run(bad);
+		const unsigned inner = (nw - 2) * (nh - 2);
+		CHECK(rs.common == inner || rs.common == static_cast<unsigned>(nw * nh));   // fully covered: no edge at all
+		CHECK(rs.within_tol == rs.common && rs.within_nb == rs.common && rs.sum_nb == 0 && rs.max_nb == 0);
+		CHECK(rh.common > 0 && rh.within_tol == 0 && rh.max_delta == 190 && rh.mean() == 190.0);
+		CHECK(rh.within_nb == rh.common && rh.sum_nb == 0 && rh.max_nb == 0 && rh.within_nb_pct() == 100.0);
+		CHECK(rb.within_tol == 0 && rb.within_nb == 0 && rb.max_nb == 90 && rb.mean_nb() == 90.0);
+		// Neighbours not covered in A do not count: A's pixel (6,4) alone covered would be an edge pixel, so
+		// check a covered pixel whose neighbour holds the match but is uncovered (alpha 0): not a match.
+		std::vector<uint32_t> pa2(nw * nh, 0xFF000000u | 0x0A0A0Au), b2(nw * nh, 0xFF000000u | 0x808080u);
+		Image32 ia2{pa2.data(), nw, nh, nw}, ib2{b2.data(), nw, nh, nw};
+		DiffResult r2 = diff_images(ia2, ib2, Coverage::TopByte, 0, 2);
+		CHECK(r2.common > 0 && r2.within_nb == 0 && r2.max_nb == 0x80 - 0x0A);
+		// The C3D line carries the new fields after tie_mismatch.
+		CHECK(diff_line_c3d(1, "floors", rh, 2, 0, 0).find(" tie_mismatch=0 within_nb=100.00% mean_nb=0.00 max_nb=0") !=
+		      std::string::npos);
+	}
 
 	// The tie mask (M1 piece 5): a one-pixel hole in A's coverage that B fills is a non-edge mismatch... except
 	// that the hole's neighbours differ in coverage so it is edge anyway; use a pixel deep inside a covered
@@ -730,6 +770,14 @@ static void test_calibrate_m1()
 	CHECK(rgba_to_argb_keep(0xAABBCC00u) == 0x00AABBCCu && rgba_to_argb(0xAABBCC00u) == 0xFFAABBCCu);
 	for (unsigned k = 0; k < 256; ++k)   // the sentinel has alpha 0xFF: both forms agree
 		CHECK(rgba_to_argb_keep(cal_sentinel_rgba(k)) == cal_sentinel_argb(k));
+	// M2: the view-frame sentinel is the same RGB with alpha byte 0x01 (RGBA word: low byte), distinct per k.
+	for (unsigned k = 0; k < 256; ++k)
+	{
+		CHECK((view_sentinel_rgba(k) & 0xFFu) == 0x01u && (view_sentinel_rgba(k) >> 8) == (cal_sentinel_rgba(k) >> 8));
+		CHECK((rgba_to_argb_keep(view_sentinel_rgba(k)) >> 24) == 0x01u);
+		CHECK((rgba_to_argb_keep(view_sentinel_rgba(k)) & 0xFFFFFFu) == (cal_sentinel_argb(k) & 0xFFFFFFu));
+		CHECK(view_sentinel_rgba(k) != view_sentinel_rgba(k + 1));
+	}
 
 	// A wrong alpha quad is a mismatch and alpha NO; a perfect image (alpha 0xFF elsewhere) is alpha ok.
 	const int w = 400, h = 240;
@@ -3012,11 +3060,14 @@ static void test_texcoords_vs_sw()
 	std::printf("texcoords vs SW (informative): against the exact map at each pixel's corner, SW's integers agree %.3f%% (walls) / %.3f%% (floors);"
 	            " the GPU at delta -0.5 agrees %.3f%% / %.3f%%\n", sw_vs_exact_w.pct(), sw_vs_exact_f.pct(), gpu_vs_exact_w.pct(), gpu_vs_exact_f.pct());
 	const double best_wall = std::max(wall[0].pct(), wall[1].pct()), best_floor = std::max(floor_[0].pct(), floor_[1].pct());
-	std::printf("texcoords vs SW: best delta for walls %s (%.3f%%), for floors %s (%.3f%%); gate 98%%\n",
-	            wall[1].pct() >= wall[0].pct() ? "-0.5" : "0", best_wall, floor_[1].pct() >= floor_[0].pct() ? "-0.5" : "0", best_floor);
+	const int bw = wall[1].pct() >= wall[0].pct() ? 1 : 0, bf = floor_[1].pct() >= floor_[0].pct() ? 1 : 0;
+	const double wall1 = wall[bw].pct1(), floor1 = floor_[bf].pct1();
+	std::printf("texcoords vs SW: best delta for walls %s (%.3f%% exact, %.3f%% within 1 texel), for floors %s (%.3f%% exact, %.3f%% within 1 texel);"
+	            " gate: within 1 texel >= 99.5%% (revised gate, Review log \"M2 implementation, colour gate\")\n",
+	            bw ? "-0.5" : "0", best_wall, wall1, bf ? "-0.5" : "0", best_floor, floor1);
 	CHECK(walls_used > 1000 && floors_used > 1000 && wall[1].total > 100000 && floor_[1].total > 100000);
-	CHECK(best_wall >= 98.0);    // the reachability gate (Review log "M2 pre-implementation", round 2)
-	CHECK(best_floor >= 98.0);
+	CHECK(wall1 >= 99.5);
+	CHECK(floor1 >= 99.5);
 }
 
 
