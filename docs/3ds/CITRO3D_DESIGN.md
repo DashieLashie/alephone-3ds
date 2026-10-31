@@ -2418,6 +2418,252 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   flushes and diffs after the level change pass; level start with ≥ 16 new
   textures in one frame passes with queue high-water ≤ 24; `gxq_budget 4`
   run passes (promotions deferred).
+- **M2 specification (revision of 2026-10-31, before code; Review log "M2 pre-implementation").**
+  Where the lines above, 2.2-2.3, 3.2-3.3 and the code disagree, this block rules. Citations are the
+  code as of `d4dd81eb3`. M2 runs **only on diff frames** (side B of a C3D check), as M1; play frames stay
+  SW until M4. **Two sessions** (kickoff `KICKOFF_M2.md`): the "M1 console check, short version" has not
+  run, so session 1 builds parts 1-5 below and stops; **part 6 (the upload code: the GPU side of
+  `back/texcache.cpp`, linear textures, their flushes, the VRAM promotions) is written only after that
+  check passes**, then part 7 and the acceptance. The M2 commit and tag come at the end of session 2;
+  session 1 commits its parts as `stage10: M2 part N <summary>` (no tag).
+  - *Parts and order.* 1 `core/tex_convert.*` + `core/tiling.*` (+ tex3ds host test); 2 `core/texcache.*`
+    (the pure cache: keys, generations, pools, LRU, promotion queue, deferred frees); 3 hooks 2a/2b
+    (`PATCHES.md` 46) and `a1_c3d::collections_changed()`; 4 the front end (floors, texcoords, `_SCALE`,
+    `uv_half`, the M2 support predicate) and its host tests; 5 the harness (keys, `diff_tol`, the
+    sentinel alpha, `c3d-diff.py --colour`, configs) and an **interim Azahar run with `textures 0`**
+    (flat colour, coverage only: floors' coverage and M1's walls, both Azahar backends); 6 the upload code;
+    7 textured view frames (bind/restore, TEV, alpha test) and the acceptance.
+  - *What C3D draws in M2.* Class **walls** (`texture_vertical_polygon`, `_textured_transfer`) and class
+    **floors** (`texture_horizontal_polygon`, `_textured_transfer`: floors, ceilings, liquids), with a
+    **supported bitmap**: `bytes_per_row != NONE` (no RLE: sprites are M4), `width == height`, a power of
+    two in [128, **512**] (`TEXBITS_DISPATCH`, `low_level_textures.h`:58-63, picks 7 for any non-square
+    bitmap and would read a 128-texel square out of it; 3.2's POT padding is never needed for these; a
+    1024² RGBA8 texture is 4 096 KiB, above `vram_cap` and all of `linear_cap`, so 1024 is unsupported in
+    M2, round 1 finding 5), and **without `_SHADELESS_BIT`** (infravision is M3). With
+    `software_alpha_blending` ≠ off SW blends walls and floors (`scottish_textures.cpp`:386-399, 610-627):
+    1.5 already refuses the renderer then; on diff frames a C3D check is **skipped** with a new reason
+    `pref` (round 1 finding 6). `c3d_supports()` becomes this predicate, pure in
+    `core/geometry.h` (inputs: entry, transfer, width, height, RLE, shadeless; plus, with `textures 0`,
+    the M1 rule "no `_TRANSPARENT_BIT` wall"). `FilterRasterizer`'s `c3d_only` keeps its meaning
+    (`filter.cpp`:42-46: drops, on both sides, the passed class's primitives that `c3d_supports` rejects,
+    counted as `excluded`), so with textures on a grate wall is drawn, and a shadeless or odd-sized
+    primitive is excluded instead of discarding the check. Everything else reaching `C3dRasterizer` is
+    unsupported (discard), as M1.
+  - *Transparent texels: per use, not per bitmap* (a 3.2 correction). SW skips texel 0 **only on walls**
+    whose bitmap has `_TRANSPARENT_BIT` (`scottish_textures.cpp` vertical path → `write_pixel<…,
+    check_transparent>`, `low_level_textures.h`:158-160, 329); the floor mapper always writes
+    (`write_pixel<T, sw_alpha_blend, false>`, :222), so the same bitmap on a floor is opaque. The
+    conversion kind therefore carries the keying: **`normal`** (A 255, or 128 self-luminous) and
+    **`normal_keyed`** (the same, A 0 for index 0), used for a `_TRANSPARENT_BIT` bitmap on a wall only;
+    a floor always uses `normal`. Both can coexist in the cache (key below). `shadeless`/`shadeless_keyed`
+    and `mask` (3.2) are implemented and host-tested in `core/tex_convert` now but not drawn before M3/M4.
+    The alpha test (2.4: `GEQUAL 128`, set by M1's `view_begin`, `draw.cpp`:381) drops A 0 and keeps 128
+    and 255, so M1's exclusion of transparent walls ends **when textures are on**.
+  - *Conversion* (`core/tex_convert.*`, 3.2). Input: a bitmap view (POD: width, height, `row_addresses`
+    as `const uint8_t* const*`, the RLE flag), the 32-bit shading tables (`const uint32_t*`, at least
+    256 × 256 entries: `number_of_shading_tables` is 256 at 32 bits, `shapes.cpp`:1569) and the kind.
+    Output: `W × W` RGBA8 texels **already tiled** into a caller buffer (the linear texture in part 6, a
+    vector on the host). Texel `(s, j)` (GPU column `s`, GPU row `j`) = byte `row_addresses[j][s]`
+    (memory order: for a column-order wall bitmap `j` is the column, `s` the row in it; for the floor
+    mapper's linear read `base[row·W + col]`, `low_level_textures.h`:222, `j` = row, `s` = col — the same
+    bytes when the rows are contiguous, which the loader guarantees for these bitmaps; the converter reads
+    through `row_addresses` as the wall mapper does). Colour of index `i`, `m = 0x00FFFFFF`:
+    RGB = `table[256·255 + i] & m` (the top table, which `fullbright` selects: `calculate_shading_table`
+    with `ambient = FIXED_ONE` gives `table_index = CEILING(…, 255) = 255`, `scottish_textures.cpp`:142-165;
+    self-luminous colours reach the same top entry). A per 3.2. **Texel word:** the GPU's RGBA8 texel as
+    a little-endian `u32` = `R<<24 | G<<16 | B<<8 | A` (bytes A, B, G, R): confirmed against tex3ds's
+    output by the critic (round 1 finding 4); the host test keeps checking it.
+  - *Tiling* (`core/tiling.*`). 8 × 8 tiles, Morton (Z) order inside a tile, tiles in row order; the
+    function maps a memory row `m` and column `s` → texel index. **Orientation (round 1 finding 1):**
+    tex3ds does **not** flip — its output stores PNG row 0 in the first memory row, tile rows top-down —
+    and its `.t3x` subtexture record gives that row `t = 1.0` (top 0x400, bottom 0), consistent with
+    `textured_cube/source/main.c`:21-23 (bottom vertices `t = 0`, image upright). So **`t = 0` samples the
+    last memory row**: the tiler writes **source row `j` into memory row `W − 1 − j`**, and texcoord
+    `t = j/W` still addresses `row_addresses[j]` (the formulas below are unchanged). **Host test:** a
+    `W × W` image (W = 8, 16, 128) with a unique RGBA value per texel and **A ≠ 0 everywhere** (tex3ds
+    zeroes the RGB of A = 0 texels), written as a PNG by a minimal stored-deflate writer in the test (no
+    library); `/opt/devkitpro/tools/bin/tex3ds -f rgba8 -z none -r -o out.bin in.png` (`-r`: raw data,
+    no `.t3x` header; `-z none` still writes a 4-byte compression header, type 0x00 + 24-bit size, which
+    the test parses and checks); the PNG's row `r` is source row `W − 1 − r`, and our tiled output must
+    equal tex3ds's **byte for byte**. This fixes the tiling and the byte order only, **never the sampling
+    orientation**, which part 7 checks first in Azahar (below). The test is skipped (printed, not failed)
+    when tex3ds is absent; on this machine it must run.
+  - *Cache key and value* (`core/texcache.*`, pure; 3.3). Key `(bitmap pointer, shading-tables pointer,
+    kind, generation)`. Value: a fixed-capacity slot array (**stable addresses**: citro3d keeps the
+    `C3D_Tex*` given to `C3D_TexBind` and reads the struct at the next draw's state flush —
+    `texture.o` `C3D_TexBind`+0x24-0x38 stores the pointer at context +0x118 + 4·unit and sets dirty
+    bit 23 + unit; so slots never move): W, bytes, pool (`Linear`, `Vram`), `last_used_frame`,
+    `promote_pending`, an opaque back-end handle (the `C3D_Tex`, part 6). 256 slots (a level uses tens of
+    textures; full → evict, then discard `tex`). The core part is host-tested with a fake allocator.
+  - *Generations and the deferred flush* (hooks 2a/2b). `collections_changed()` only increments the
+    cache's generation and counts the call (logged `[c3d] tex: collections changed (gen N, M entries
+    retire)`); lookups match only the current generation, so a bitmap reallocated at the same address can
+    never hit an old entry; the old generation's entries are freed **after the next `frame_begin()`
+    returned** (retired, 0.3), with the deferred-free list. At `release_and_fini()` (after `C3D_Fini`)
+    every slot is freed. Main thread only (`load_collections` and `unload_all_collections` run on it).
+  - *Hooks 2a/2b* (`shapes.cpp`; `PATCHES.md` 46; `#if defined(A1_PLATFORM_3DS) &&
+    defined(A1_RENDER_C3D)`; `ppcheck.sh` on `shapes.cpp`, IDENTICAL expected). 2a: **at the end of
+    `load_collections()`** (after the last `time_mark`, `shapes.cpp`:1508-1510), not right after
+    `update_color_environment()` (1.3's place): `SW_Texture_Extras::Load` (:1500-1506) runs after it, and
+    nothing draws in between, so the end covers every change the function makes. 2b: the end of
+    `unload_all_collections()` (:1179-1193). Both call `a1_c3d::collections_changed()` (`a1_c3d.h`, the
+    header hook 1 already includes in `render.cpp`, `PATCHES.md` 45). Callers: `unload_all_collections`
+    from `shell_misc.cpp`:86, `interface.cpp`:3009, `screen.cpp`:327; `load_collections` from the level
+    loader, `Misc/PlayerImage_sdl.cpp`:375 and `RenderOther/images.cpp`:1308 (round 1 finding 9); the hooks
+    sit inside the functions, so every caller is covered.
+  - *Pools, caps, allocation* (9.1/9.2; a 3.3 simplification). Each texture is its own citro3d
+    allocation: `C3D_TexInit` (linear) / `C3D_TexInitVRAM` (`texture.h`:83-86, 98-101), freed with
+    `C3D_TexDelete`. The pools are **accounting caps**: linear 4 096 KiB (`linear_cap`), VRAM 3 584 KiB
+    (`vram_cap`). 3.3's size-class slabs are **deferred to M5** (eviction): every M2 texture is 64 KiB
+    (128² RGBA8) or a multiple, so fragmentation is measured first — a failed allocation with
+    `cap − used ≥ request` is logged `alloc failed with free >= request` and counted. Before an allocation
+    that would pass the cap, LRU eviction of slots with `last_used_frame` < the current view frame (M6's
+    in-flight rule: never the current or an unretired frame), **never a slot whose `C3D_SyncTextureCopy` was issued
+    in this frame** (its linear source and VRAM destination are in use; round 1 finding 7, narrowed in
+    round 2): a slot merely *waiting* for promotion may be evicted and is dropped from the promotion
+    queue, and with `promote_max 0` no slot is ever marked `promote_pending`; nothing evictable →
+    discard `tex`.
+  - *Upload model* (3.3, part 6). Miss → convert **inside the frame** (after `frame_begin()` returned,
+    during the replay, before the first draw that uses it) directly into a new linear texture
+    (`C3D_Tex2DGetImagePtr`, `texture.h`:118-121), then **one ranged `GSPGPU_FlushDataCache` of exactly
+    its bytes** right after the conversion (before any split; the readback's flushing split, M1, comes
+    later in the frame), sampled from linear in this frame. **Promotion** to VRAM in a **later** view
+    frame, in one batch after `frame_begin()` and **before the clear** (both need an empty command buffer
+    to cost 1 GX entry each, 2.4): ≤ `promote_max` (default 8, 0 = never: linear sampling only, for 10
+    item 5) per frame, oldest first, each a `gx_op` in-frame `C3D_SyncTextureCopy` raw copy of the tiled
+    bytes (its exact arguments read off `texture.o` `C3D_TexLoadImage`'s VRAM branch when written, rule 7);
+    the VRAM copy is bound from the **next** view frame; the linear copy goes on the deferred-free list.
+    A promotion refused by the GX budget is **deferred, not a discard**: promotions take an entry only if
+    `used + 1 + kViewReserveEntries ≤ budget`, `kViewReserveEntries = 3` (clear, flushing split, readback
+    transfer: the frame's own entries, M1 "GX queue"), so `gxq_budget 4` promotes one per frame and never
+    refuses the readback. Soft budget 512 KiB converted per view frame, counted, not enforced.
+  - *Texcoords* (2.2, `core/geometry`, host-tested). Every vertex keeps its integer position `(X, Y)`
+    (coverage, M1). Its attributes are evaluated at **`(ex, ey) = (X + δ, Y + δ)`**, `δ = −½` (`uv_half 1`)
+    or 0 (`uv_half 0`): SW samples the texel at the pixel's integer corner (walls: `screen_x = x0 − hw`
+    per column and `screen_y0 = hh − y0 + dtp` per row, `scottish_textures.cpp`:902, 926; floors:
+    `screen_x = x0 − hw`, `screen_y = hh − y0 + dtp`, :1043-1044), the GPU at its centre. **Both the
+    texcoords and the perspective weight `w` are evaluated at `(ex, ey)`** (a 2.2 correction): clip × w
+    leaves NDC unchanged, so `w` only weights the interpolation, and only a pair `(u, w)` taken from the
+    same projective map at the same point keeps `u/w` affine — shifting `u` alone would bend it.
+    *Walls* (`polygon_definition` `origin o`, `vector v`, `RenderRasterize.cpp`:540-548): `s = ex − hw`,
+    `t = (wx·o.y − s·o.x)/(s·v.i − wx·v.j)` (denominator 0 → 1, as M1's `wall_w`), `x = |o.x + t·v.i|`,
+    `w = x`, GPU texcoord **`(s_gpu, t_gpu) = ((x·(hh + dtp − ey) − wy·o.z)/(wy·v.k), t)`** (row in the
+    column, column; `scottish_textures.cpp`:921-929, 958-965). *Floors* (`o` = view origin + surface
+    origin, z = adjusted height, `RenderRasterize.cpp`:450-452; yaw `θ` with `cos_t, sin_t` =
+    `cosine_table/sine_table[view->yaw]`, 1 024 = 1.0): `sx' = ex − hw`, `sy' = hh − ey + dtp` (0 → 1, :1044),
+    **sign guard (round 1 finding 3):** a vertex on or past the horizon row would give `sy'` the wrong
+    sign for its polygon (eye near the surface's height), flipping its `u/w`; so if `sy'·o.z ≤ 0`, `sy' =
+    ½·sign(o.z)` (`o.z = 0`: the polygon projects onto the horizon row, so `accept_polygon(Horizontal)`
+    already skips it as `Degenerate`; the front end checks acceptance before the texcoords, and the
+    texcoord code treats `o.z = 0` as a skip counted `degenerate`, never as unsupported; round 2);
+    `S = 1 024 · 2^scale`, `scale = flags & _SCALE_BITS` (:1075), **`s_gpu = (o.z·(wy·cos_t − sx'·sin_t)/sy'
+    + 1 024·o.x)/(1 024·S)`**, **`t_gpu = (o.z·(sx'·cos_t + wy·sin_t)/sy' + 1 024·o.y)/(1 024·S)`** (the
+    reals of :1051-1080 with the `<< bits` wrap at 2³²), `w = |o.z·wy/sy'|`. Per polygon `floor(min)` of
+    each texcoord over its vertices is subtracted (`GPU_REPEAT`, integer shifts are exact). **Clamps**
+    (a 2.3 correction): the perspective weight is clamped to **[16, 2²⁴]**, not `[16, 32767]` —
+    `SHRT_MAX` is SW's clamp of the *shading* depth (:991, 1091; M3's texcoord1 keeps it), and a floor
+    vertex near the horizon (`sy'` small) has `w` far above 32 767, where the old clamp would bend the
+    texture. M1's walls are unaffected (`|w| ≤ 32 767` in practice; coverage does not depend on `w`).
+    **`uv_half` default 1** until the acceptance measures both (the winner becomes the default and is
+    recorded); the host test predicts it.
+  - *Floor coverage rule* (the M1 question for rows). The horizontal mapper walks rows from the highest
+    vertex (`scottish_textures.cpp`:226-300; left table counter-clockwise, right table clockwise) with
+    `build_x_table` (:1173-1223), which records, for row `r`, the x of the edge sampled at the **row
+    centre** with pixel-centre rounding (x-dominant: `k_r` = smallest integer `> s(r+½) − ½`; y-dominant:
+    the same midpoint form), for both signs of dx without a reversed walk (worked out: `dx < 0` gives the
+    same pixel-centre rule); rows write `[x0(y), x1(y))` (:222, `count = x1 − x0`, nothing if negative).
+    So floors follow the pixel-centre rule as walls do, and the tie set (a centre exactly on an edge) is
+    the same geometric set: **`tie_pixels` serves floors unchanged**. Acceptance mirrored from SW: a vertex
+    outside `[0, w] × [0, h]` (:229-235); `min y == max y` (:240, `highest == lowest`); a negative dy on
+    either walk (`build_x_table` returns NULL, :1222); non-positive area (no row written). `accept_polygon`
+    gains an orientation argument (`Vertical` = M1's, `Horizontal` = this); the host coverage model gains
+    the transliterated horizontal walk and must match `accept_polygon(Horizontal)` + pixel-centre
+    rasterisation except ties, as M1's.
+  - *Texture binding and its restore* (the M1 lesson). `present.cpp`:453 binds `C3D_TexBind(0, &s_tex)`
+    once at init and never again; citro3d has no getter. So `-Wl,--wrap=C3D_TexBind` (beside the
+    `C3D_BindProgram` wrap, `CMakeLists.txt`:373) records the last `(unit 0, pointer)` bound by anyone
+    else in `back/context.cpp`; `back/draw.cpp` binds only through `__real_C3D_TexBind` (its textures and
+    the restore), so the record keeps the present's; after the restore it checks the record against what
+    it re-bound and counts `tex_restore_mismatch` (in the `[c3d] cmdbuf` line; must be 0). The restore
+    sits beside M1's program/AttrInfo/BufInfo restore (`draw.cpp` `restore_state`, :251-259). Proof:
+    `m1-present-diff.cfg`-style runs with textures on, `present_diff` 0 (an `m2-present-diff.cfg`).
+  - *View frame with textures* (part 7). TEV stage 0: `GPU_TEXTURE0`, `GPU_REPLACE`, RGB and alpha
+    (`texenv.h`; the present sets its own stage 0 before each draw, `present.cpp`:311-326). Per merged draw
+    (the key already contains texture and tables, `DrawKey`): look up/convert, `__real_C3D_TexBind(0,
+    tex)` when it changes; `C3D_TexSetFilter(GPU_NEAREST, GPU_NEAREST)`, `C3D_TexSetWrap(GPU_REPEAT,
+    GPU_REPEAT)` at creation. `textures 0` keeps M1's flat colour path (no bind, coverage only).
+    **Orientation check first** (round 1 finding 1): before any colour-metric run, one `m2-orient.cfg` run
+    (`classes walls,floors`, `fullbright 1`, `dump 1`, 3 checks on L0) whose dumps are compared by eye and by
+    the metric with the tiler's row order flipped as a test build define (`A1_C3D_TILE_NOFLIP`): the right
+    order must win clearly (mean Δ far apart); recorded.
+  - *Sentinel* (M1's, `draw.cpp`:349-351). Textured pixels can have any RGB, so a texel could equal
+    `cal_sentinel_rgba(k)` and count as `sentinel`. View frames therefore fill the staging with the
+    sentinel's RGB and **alpha 0x01**, a value no M2/M3 draw writes (texture A ∈ {0, 128, 255}, blend
+    `ONE, ZERO`, clear 0). M0's calibration keeps its own sentinel unchanged.
+  - *GX queue and command buffer.* Per view frame: promotions ≤ 8 + clear 1 + split 1 + readback 1 =
+    ≤ 11, + `C3D_FrameEnd` margin 1 (2.4's 24 budget holds; logged high-water). Texture binds add state
+    words to the draw after a bind: the reserves (`kDrawReserveWords` 508, `kEndReserveWords` 20,
+    `geometry.h`) are re-measured over the M2 acceptance runs and set to 2 × the worst (deterministic, so
+    Azahar is authoritative); the conversion and the flush issue no command words.
+  - *Colour metric and tolerance* (8.3, walls/floors full bright). `diff_images` gets `tol = diff_tol`
+    (key, 0..255, default 2; today `frame.cpp`:274 passes 0). Over the run, per class (walls, floors):
+    coverage mismatches **outside the band ≤ 0.1 % of A's covered pixels** (summed), **≥ 98 % of common
+    non-edge pixels Δ ≤ 2** and **mean ≤ 1.0** (sums over the run's checks), plus every M1 failure rule
+    (missing summary, dropped frame, discard of a listed class, `sentinel` > 0, fewer than N compared
+    checks). Per-check worst figures are printed (informative). **Reachability (round 1 finding 2):** SW
+    is not exact (wall `ty_delta` divides by `den >> 8`, `scottish_textures.cpp`:971-979; the `tx`
+    shift-downs :938-951; the floor branch truncates then multiplies, :1069-1072), so a correct GPU picks
+    a neighbouring texel on some pixels, and dithered textures turn most such picks into Δ > 2. **Part 4's
+    host prediction decides the gate:** if its best texel agreement (walls and floors separately) is
+    under 98 %, session 1 stops and records a revised gate in the Review log (the host figure minus 1
+    point, or Δ judged with a ±1-texel neighbourhood) and reports it to the user before session 2; the gate
+    is never tuned against Azahar. The same holds for the 0.1 % non-edge coverage rule on grates. `c3d-diff.py log LOG --colour
+    CLASS[,CLASS] --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks N`. Only with
+    `fullbright 1` are the colour figures meaningful (M2 draws full bright); `--colour` fails a log whose
+    `[c3d] debug-c3d:` line lacks `fullbright 1` or has `textures 0`.
+  - *Keys* (`core/config.*` + host test): `textures 0|1` (default 1 once part 7 exists; **0 until then**:
+    flat colour, coverage only, transparent walls excluded as M1), `uv_half 0|1` (default 1), `diff_tol N`
+    (0..255, default 2), `vram_cap KiB` (0..4 096, default 3 584), `linear_cap KiB` (64..16 384, default
+    4 096), `promote_max N` (0..8, default 8).
+  - *Zones* (`a1_3ds_profile.h`): **`c3d_tex`** (conversion, its flush and the promotion issue; nested in
+    `c3d_draw`) — the name 7 reserves for M0-M5's uploads, distinct from B-a's `c3d_upload`.
+  - *Stats* (`[c3d] tex …` once a second and at exit): entries per pool, KiB per pool, conversions and
+    KiB converted (total, max per frame, first 10 view frames after a generation change), promotions
+    done/deferred, evictions, deferred frees, generation, `alloc failed with free >= request`, discards
+    `tex`.
+  - *Host tests* (8.4): conversion with **real-format tables** built like `shapes.cpp`'s 32-bit tables
+    (normal, black normal, self-luminous incl. black/dark, alternate CLUT = another table pointer,
+    tint/shadeless, global tint for `mask`), every kind incl. `normal_keyed` vs `normal` on the same
+    bitmap; tiling vs tex3ds (above); the cache with a fake allocator (generation miss after
+    `collections_changed`, frees only after a retire, LRU never evicting the current frame, caps,
+    promotion order and the deferral at `gxq_budget 4`; the linear cap filled under `promote_max 0` and
+    under `gxq_budget 4`, asserting LRU eviction and no discard); **texcoords vs the transliterated SW mappers**
+    (`scottish_textures.cpp`:891-1001 walls, 1003-1097 floors incl. `_SCALE_2X/4X`): generated views and
+    polygons, every covered pixel's SW texel `(col, row)` from the integer code vs the texel the GPU
+    would sample at the pixel centre (perspective-correct barycentric interpolation of the vertex
+    attributes in double over the fan triangle, `floor(u·W) mod W`); agreement printed for `δ = 0` and
+    `δ = −½`, walls and floors separately (it predicts `uv_half`); the test fails only below the gate
+    recorded in the Review log (98 % until revised under the reachability rule; round 2); the horizontal coverage model and
+    tie set; the new keys.
+  - *Interim run (session 1, part 5; Azahar, non-authoritative, not M2's acceptance).* With `textures 0`:
+    `m2-diff-flat.cfg` (`renderer c3d`, `diff 1`, `diff_frames 20`, `classes walls,floors`) on L0/L6/L20
+    and `m2-film-flat.cfg` (200 frames), under the host-GPU backend **and** the software backend:
+    floors and walls coverage by M1's rule (0 non-edge outside ties, `--band-pct 2`), 0 discards; M1's
+    configs unharmed.
+  - *Accept* (session 2, Azahar, both backends): the kickoff's list — `m2-diff.cfg` (`classes
+    walls,floors`, `fullbright 1`, `textures 1`) on L0/L6/L20 (`--min-checks 20`) and the film (200)
+    pass `--colour`; `uv_half 0` vs 1 measured on the same views, winner recorded; `15-load-test.txt` with
+    `diff 30` logs ≥ 1 generation change and its deferred frees, and the checks after the level change
+    pass; a level start with ≥ 16 conversions in one view frame passes with KiB converted per frame
+    logged, the cmdbuf words within the re-measured reserves and the linear cap respected (GX entries
+    cannot exceed 8 + 3 + 1 = 12 by construction, so the high-water is logged, not a gate; round 1
+    finding 8);
+    `gxq_budget 4` passes with promotions deferred and 0 discards; `promote_max 0` passes (linear only);
+    `vram_cap 512` runs and evicts without a discard on L0; `m2-present-diff.cfg` `present_diff` 0 and
+    `tex_restore_mismatch` 0; M1's walls coverage, M0's calibration configs and P1 scripts 07, 08, 13, 14,
+    22 unharmed; the OFF builds' `objdump -d` unchanged and `nm` clean.
+  - *Not in M2:* lighting (M3), shadeless/infravision drawing (M3), sprites and RLE (M4), landscapes and
+    static (M5), size-class slabs (M5), play-mode C3D frames (M4), conversion on another thread.
 
 ### M3 — lighting
 - Add: `core/shade_lut.cpp`, texcoord1, TEV 4.2, infravision, negative
@@ -3087,3 +3333,44 @@ end included; (5) `world_init` marked an unusable program ready — freed instea
 `prog_restore_mismatch` proves little — `m1-present-diff.cfg` (present self-check with walls view
 frames interleaved, scripts 13 and 08: 0 RGB differences) is the recorded evidence. Console items:
 section 10 items 6 and 8, the ring physical-range check on the console, the discard paths on hardware.
+
+### M2 pre-implementation (coordinator, 2026-10-31)
+
+The "M2 specification" block (section 7) checked against the code at `d4dd81eb3`, the SW mappers and
+citro3d 1.7.1. Corrections to earlier sections, each stated in the block: (1) 3.2's "transparent =
+`_TRANSPARENT_BIT`" is per use: the floor mapper never skips texel 0, so the conversion kind carries the
+keying (`normal` / `normal_keyed`); (2) 2.2: the perspective weight `w` is evaluated at the same shifted
+point as the texcoords, or the `uv_half` shift bends the interpolation; (3) 2.3: the `[16, 32767]` clamp is
+SW's shading-depth clamp, the perspective weight clamps to `[16, 2^24]` (floor vertices near the horizon);
+(4) 3.3's VRAM size-class slabs are deferred to M5, M2 allocates per texture through citro3d with
+accounting caps and logs fragmentation; (5) 1.3's hook 2a moves to the end of `load_collections()`;
+(6) view frames use a sentinel with alpha 0x01 (textured RGB can equal the M1 sentinel). M2 is split over
+two sessions because the short M1 console check has not run (kickoff): parts 1-5 first, the upload code
+after the check.
+
+### M2 pre-implementation, round 1 (critic: REVISE, 2 major, 7 minor; applied)
+
+Major: (1) texture orientation — tex3ds does not flip, its `.t3x` gives PNG row 0 `t = 1.0`, so `t = 0`
+samples the last memory row: the tiler writes source row `j` into memory row `W − 1 − j`; the tex3ds test
+fixes tiling and byte order only; part 7 starts with an orientation run; (2) the colour gate may be
+unreachable because SW's own integer mapping is not exact: part 4's host texel-agreement prediction
+decides, and a figure under 98 % stops session 1 with a revised gate recorded and reported. Minor: (3) the
+floor `sy'` sign guard; (4) tex3ds test details (A ≠ 0, `-r`, the 4-byte compression header; byte order
+confirmed); (5) bitmaps capped at 512²; (6) `software_alpha_blending` → check skipped `pref`; (7) no
+eviction of slots with a pending or same-frame promotion; (8) the GX high-water item cannot fail: replaced
+by KiB/cmdbuf/linear-cap checks; (9) the hook 2a caller list completed. Verified by the critic: the wall
+and floor texcoord formulas, the δ-shift exactness, the floor coverage rule (brute-forced `build_x_table`),
+transparency per use, the bind restore (`C3D_TexBind` always dirties; no internal callers), the diff
+ignoring alpha, `kViewReserveEntries` 3. New console items: perspective precision with large w ratios,
+large repeat counts, texture-cache invalidation on recycled linear addresses, the attribute sample point.
+
+### M2 pre-implementation, round 2 (critic: REVISE, 1 major, 2 minor; applied as prescribed)
+
+Eight of round 1's nine fixes verified (orientation, `-r` + header, A ≠ 0, the orientation run, the
+`sy'` sign guard, the 512 cap, `pref`, reachability, the replaced GX item, the caller list). (1, major)
+the eviction exclusion was too broad (`promote_pending` is nearly every linear slot, so `promote_max 0`,
+`gxq_budget 4` or `vram_cap 512` would discard `tex`): only a slot whose copy was issued this frame is
+protected, a waiting slot is evicted and dropped from the queue, `promote_max 0` never marks pending, and a
+host test fills the linear cap in both modes; (2) `o.z = 0` is an acceptance skip (`degenerate`), not
+unsupported; (3) the texcoord host test fails only below the gate recorded here (98 % until revised).
+Max rounds reached; implementation starts.
