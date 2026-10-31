@@ -8,6 +8,8 @@
 */
 #include "geometry.h"
 
+#include "tex_convert.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -28,16 +30,24 @@ float wall_w(int hw, int wx, int ox, int oy, int vi, int vj, int sx)
 	return std::fabs(x);   // "mostly unclear what to do with negative x": SW negates (:955)
 }
 
-Accept accept_polygon(const Point2* v, int n, int w, int h)
+Accept accept_polygon(const Point2* v, int n, int w, int h, Orient orient)
 {
 	if (n < 3)
 		return Accept::Degenerate;
+	// The "major" axis is the one the walk advances along: x for a vertical polygon (columns), y for a
+	// horizontal one (rows, scottish_textures.cpp:213-300). Vertical: the left table walks to higher
+	// vertex indices and the right table to lower ones; horizontal: the other way round (:262, :276).
+	const bool horiz = orient == Orient::Horizontal;
+	auto major = [&](int i) { return horiz ? v[i].y : v[i].x; };
+	const int left_step = horiz ? n - 1 : 1;    // index + step, modulo n
+	const int right_step = horiz ? 1 : n - 1;
+
 	int highest = 0, lowest = 0;
 	for (int i = 1; i < n; ++i)
 	{
-		if (v[i].x < v[highest].x)
+		if (major(i) < major(highest))
 			highest = i;
-		if (v[i].x > v[lowest].x)
+		if (major(i) > major(lowest))
 			lowest = i;
 	}
 	for (int i = 0; i < n; ++i)
@@ -46,9 +56,10 @@ Accept accept_polygon(const Point2* v, int n, int w, int h)
 	if (highest == lowest)
 		return Accept::Degenerate;
 
-	// The two walks of texture_vertical_polygon, reduced to their only refusal: build_y_table returns
-	// NULL for a negative dx. Same loop structure (zero-width edges are skipped on each side).
-	int total = v[lowest].x - v[highest].x;
+	// The two walks, reduced to their only refusal: the table builder returns NULL for a negative step
+	// along the major axis (build_y_table :1231-1290, build_x_table :1173-1223). Same loop structure
+	// (zero-length edges are skipped on each side).
+	int total = major(lowest) - major(highest);
 	int left_count = 0, right_count = 0;
 	int left = highest, right = highest;
 	while (total > 0)
@@ -57,8 +68,8 @@ Accept accept_polygon(const Point2* v, int n, int w, int h)
 		{
 			do
 			{
-				const int next = (left == n - 1) ? 0 : left + 1;
-				left_count = v[next].x - v[left].x;
+				const int next = (left + left_step) % n;
+				left_count = major(next) - major(left);
 				if (left_count < 0)
 					return Accept::Walk;
 				left = next;
@@ -68,8 +79,8 @@ Accept accept_polygon(const Point2* v, int n, int w, int h)
 		{
 			do
 			{
-				const int next = right ? right - 1 : n - 1;
-				right_count = v[next].x - v[right].x;
+				const int next = (right + right_step) % n;
+				right_count = major(next) - major(right);
 				if (right_count < 0)
 					return Accept::Walk;
 				right = next;
@@ -81,9 +92,9 @@ Accept accept_polygon(const Point2* v, int n, int w, int h)
 		right_count -= delta;
 	}
 
-	// Signed area (shoelace) in y-down space: positive when the vertex order runs clockwise on screen,
-	// i.e. the "clockwise" walk from the leftmost vertex is the upper edge (y0 table) and the other the
-	// lower (y1 table).
+	// Signed area (shoelace) in y-down space: positive when the vertex order runs clockwise on screen. That
+	// is the order both mappers need (vertical: the walk from the leftmost vertex by +1 is the upper edge;
+	// horizontal: the walk from the topmost vertex by +1 is the right edge); otherwise no row/column writes.
 	int64_t area2 = 0;
 	for (int i = 0; i < n; ++i)
 	{
@@ -108,6 +119,106 @@ int fan_indices(uint16_t* out, int n, unsigned base)
 		out[k++] = static_cast<uint16_t>(base + i + 1);
 	}
 	return k;
+}
+
+bool c3d_supports(Entry e, Transfer t, int width, int height, bool rle, bool shadeless, bool transparent_texture,
+                  bool textures)
+{
+	if (t != Transfer::Textured || (e != Entry::Vertical && e != Entry::Horizontal))
+		return false;
+	if (!tex_supported(width, height, rle) || shadeless)
+		return false;
+	if (e == Entry::Vertical && transparent_texture && !textures)
+		return false;
+	return true;
+}
+
+TexAttrD wall_vertex(const TexView& v, const WallSurf& o, double ex, double ey)
+{
+	const double s = ex - v.hw;
+	double den = s * o.vi - static_cast<double>(v.wx) * o.vj;
+	if (den == 0)
+		den = 1;   // SW's guard (:943, 950)
+	const double t = (static_cast<double>(v.wx) * o.oy - s * o.ox) / den;
+	const double x = std::fabs(o.ox + t * o.vi);   // "mostly unclear what to do with negative x": SW negates (:955)
+	const double sy0 = v.hh + v.dtp - ey;           // screen_y0 = half_screen_height - y0 + dtanpitch (:926)
+	const double den_s = static_cast<double>(v.wy) * o.vk;
+	TexAttrD r;
+	r.w = x;
+	r.s = (x * sy0 - static_cast<double>(v.wy) * o.oz) / (den_s == 0 ? 1.0 : den_s);
+	r.t = t;
+	return r;
+}
+
+bool floor_vertex(const TexView& v, const FloorSurf& o, double ex, double ey, TexAttrD& out)
+{
+	if (o.oz == 0)
+		return false;
+	const double sx = ex - v.hw;
+	double sy = v.hh - ey + v.dtp;
+	if (sy == 0)
+		sy = 1;   // :1044
+	if (sy * o.oz <= 0)
+		sy = o.oz > 0 ? 0.5 : -0.5;   // the sign guard: a vertex on or past the horizon (round 1 finding 3)
+	const double kS = 1024.0 * 1024.0 * static_cast<double>(1 << o.scale);   // 1024 * S, S = 1024 * 2^scale
+	const double dz = static_cast<double>(o.oz);
+	out.s = (dz * (static_cast<double>(v.wy) * v.cos_t - sx * v.sin_t) / sy + 1024.0 * o.ox) / kS;
+	out.t = (dz * (sx * v.cos_t + static_cast<double>(v.wy) * v.sin_t) / sy + 1024.0 * o.oy) / kS;
+	out.w = std::fabs(dz * v.wy / sy);
+	return true;
+}
+
+namespace {
+
+constexpr double kMaxRepeats = 1048576.0;
+
+// Subtracts floor(min) of each texcoord and converts; false on a non-finite value or a huge spread.
+bool finish_attrs(const TexAttrD* raw, int n, TexAttr* out)
+{
+	double min_s = raw[0].s, min_t = raw[0].t;
+	for (int i = 0; i < n; ++i)
+	{
+		if (!std::isfinite(raw[i].w) || !std::isfinite(raw[i].s) || !std::isfinite(raw[i].t))
+			return false;
+		min_s = std::min(min_s, raw[i].s);
+		min_t = std::min(min_t, raw[i].t);
+	}
+	const double fs = std::floor(min_s), ft = std::floor(min_t);
+	for (int i = 0; i < n; ++i)
+	{
+		const double s = raw[i].s - fs, t = raw[i].t - ft;
+		if (s > kMaxRepeats || t > kMaxRepeats)
+			return false;
+		out[i].w = clamp_wp(static_cast<float>(raw[i].w));
+		out[i].s = static_cast<float>(s);
+		out[i].t = static_cast<float>(t);
+	}
+	return true;
+}
+
+} // namespace
+
+TexResult wall_attrs(const TexView& v, const WallSurf& o, const Point2* pts, int n, double delta, TexAttr* out)
+{
+	TexAttrD raw[16];
+	if (n < 1 || n > 16)
+		return TexResult::NonFinite;
+	for (int i = 0; i < n; ++i)
+		raw[i] = wall_vertex(v, o, pts[i].x + delta, pts[i].y + delta);
+	return finish_attrs(raw, n, out) ? TexResult::Ok : TexResult::NonFinite;
+}
+
+TexResult floor_attrs(const TexView& v, const FloorSurf& o, const Point2* pts, int n, double delta, TexAttr* out)
+{
+	TexAttrD raw[16];
+	if (o.oz == 0)
+		return TexResult::Degenerate;
+	if (n < 1 || n > 16)
+		return TexResult::NonFinite;
+	for (int i = 0; i < n; ++i)
+		if (!floor_vertex(v, o, pts[i].x + delta, pts[i].y + delta, raw[i]))
+			return TexResult::Degenerate;
+	return finish_attrs(raw, n, out) ? TexResult::Ok : TexResult::NonFinite;
 }
 
 Rgb shape_colour(uint16_t shape)

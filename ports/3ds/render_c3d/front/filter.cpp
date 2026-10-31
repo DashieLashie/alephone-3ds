@@ -9,6 +9,8 @@
 */
 #include "filter.h"
 
+#include "../core/geometry.h"
+
 namespace a1_c3d {
 
 Transfer to_transfer(int16 engine_transfer_mode)
@@ -25,10 +27,24 @@ Transfer to_transfer(int16 engine_transfer_mode)
 
 // --- FilterRasterizer ---
 
+bool FilterRasterizer::c3d_excluded(Entry e, const polygon_definition& p) const
+{
+	if (!c3d_only_ || p.transfer_mode != _textured_transfer || !p.texture)
+		return false;
+	const bitmap_definition* t = p.texture;
+	return !c3d_supports(e, Transfer::Textured, t->width, t->height, t->bytes_per_row == NONE,
+	                     (p.flags & _SHADELESS_BIT) != 0, (t->flags & _TRANSPARENT_BIT) != 0, textures_);
+}
+
 void FilterRasterizer::texture_horizontal_polygon(polygon_definition& p)
 {
 	if (!passes(classify(Entry::Horizontal, to_transfer(p.transfer_mode), foreground_)))
 		return;
+	if (c3d_excluded(Entry::Horizontal, p))
+	{
+		++excluded_;
+		return;
+	}
 	polygon_definition copy = p;
 	if (fullbright_ && copy.transfer_mode == _textured_transfer && !(copy.flags & _SHADELESS_BIT))
 		copy.ambient_shade = FIXED_ONE;
@@ -39,7 +55,7 @@ void FilterRasterizer::texture_vertical_polygon(polygon_definition& p)
 {
 	if (!passes(classify(Entry::Vertical, to_transfer(p.transfer_mode), foreground_)))
 		return;
-	if (c3d_only_ && p.transfer_mode == _textured_transfer && p.texture && (p.texture->flags & _TRANSPARENT_BIT))
+	if (c3d_excluded(Entry::Vertical, p))
 	{
 		++excluded_;
 		return;

@@ -155,6 +155,12 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 64, 65536, cfg.ring_indices);
 	if (key == "reserve_extra")
 		return parse_unsigned(value, 0, 1000000, cfg.reserve_extra);
+	if (key == "textures")
+		return parse_flag(value, cfg.textures);
+	if (key == "uv_half")
+		return parse_flag(value, cfg.uv_half);
+	if (key == "diff_tol")
+		return parse_unsigned(value, 0, 255, cfg.diff_tol);
 	if (key == "vram_cap")
 		return parse_unsigned(value, 0, 4096, cfg.vram_cap);
 	if (key == "linear_cap")

@@ -23,6 +23,7 @@
 #include "Rasterizer.h"
 #include "Rasterizer_SW.h"
 #include "textures.h"
+#include "preferences.h"
 #include "scottish_textures.h"
 #include "low_level_textures.h"   // texture_random_seed()
 
@@ -221,10 +222,21 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 	const char* cls = class_name(c);
 	const int w = s_a.w, h = s_a.h;
 
+	// With software_alpha_blending on, SW blends walls and floors (scottish_textures.cpp:386-399, 610-627):
+	// C3D draws them opaque, so the check is not made (M2 specification, "What C3D draws in M2").
+	if (graphics_preferences->software_alpha_blending != _sw_alpha_off)
+	{
+		++s_diff_checks;
+		++s_c3d_skipped;
+		printf("[c3d] DIFF frame=%u class=%s skipped (%s)\n", s_frame, cls,
+		       back::skip_name(back::view_skip(back::SkipReason::Pref).skip));
+		return;
+	}
+
 	texture_random_seed() = s0;
 	s_a.clear(0);
 	swr->screen = s_a.get();
-	FilterRasterizer fa(sw, c, cfg.fullbright, true);
+	FilterRasterizer fa(sw, c, cfg.fullbright, true, cfg.textures);
 	s_recorder.replay(&fa);
 
 	// Zone c3d_draw (design 7, M1 "Zones"): the C3D side from view_begin to view_end, the front end's
@@ -243,7 +255,8 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 			texture_random_seed() = s0;
 			s_b.clear(0);
 			s_c3d_rast.set_target(w, h);
-			FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true);
+			s_c3d_rast.set_options(cfg.textures, cfg.uv_half);
+			FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true, cfg.textures);
 			s_recorder.replay(&fb);
 			ve = back::view_end(s_b.pixels.data(), s_b.w, &sentinel);
 		}

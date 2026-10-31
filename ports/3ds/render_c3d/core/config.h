@@ -74,8 +74,15 @@
 	                    '#' is not supported. Relative to the user directory unless it starts with
 	                    sdmc:/ or /. A film to replay from the command line (boot_begin)
 
-	Keys of M2 (design 7, "M2 specification", "Keys"; the texture cache, pure part):
+	Keys of M2 (design 7, "M2 specification", "Keys"):
 
+	  textures 0|1      default 0 until the textured view frames exist (M2 part 7): 0 = walls and
+	                    floors flat-coloured (coverage only; a wall with a _TRANSPARENT_BIT bitmap is
+	                    excluded as in M1), 1 = textured
+	  uv_half 0|1       default 1: the vertex attributes (texcoords and w) are evaluated at the
+	                    vertex position shifted by -1/2 pixel in x and y (SW samples a pixel's integer
+	                    corner, the GPU its centre); 0 = at the vertex itself
+	  diff_tol N        0..255, default 2: per-channel tolerance of the colour metric of a C3D check
 	  vram_cap KiB      0..4096, default 3584: accounting cap of the VRAM texture pool
 	  linear_cap KiB    64..16384, default 4096: accounting cap of the linear texture pool
 	  promote_max N     0..8, default 8: linear-to-VRAM promotions per view frame; 0 = never
@@ -129,6 +136,9 @@ struct Config
 	unsigned ring_indices = 2048;
 	unsigned reserve_extra = 0;
 	// M2
+	bool textures = false;
+	bool uv_half = true;
+	unsigned diff_tol = 2;
 	unsigned vram_cap = 3584;               // KiB
 	unsigned linear_cap = 4096;             // KiB
 	unsigned promote_max = 8;

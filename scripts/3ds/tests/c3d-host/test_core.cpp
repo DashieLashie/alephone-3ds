@@ -8,7 +8,9 @@
 // acceptance test, fan indices, batching key, colour hash, command-buffer arithmetic, reserve test),
 // the alpha quad of the calibration, GxQueue's split and runtime budget, and the M1 config keys; and the M2
 // pieces (7, "M2 specification", parts 1-2): tex_convert.* (every kind with shapes.cpp-style 32-bit
-// tables), tiling.* (against tex3ds, byte for byte), texcache.* (a fake allocator) and the M2 config keys.
+// tables), tiling.* (against tex3ds, byte for byte), texcache.* (a fake allocator) and the M2 config keys;
+// parts 3-4: the horizontal coverage model, the M2 support predicate, the texcoords against transliterations
+// of SW's wall and floor mappers (the 98 % reachability gate), and the keys textures / uv_half / diff_tol.
 #include "bmp.h"
 #include "calibrate.h"
 #include "classify.h"
@@ -1126,14 +1128,36 @@ static void test_fan_and_key()
 	k2 = k; k2.transfer_data = 4;            CHECK(!(k == k2));
 	k2 = k; k2.shadeless = 0x0002;           CHECK(!(k == k2));
 
-	// c3d_supports: M1 draws vertical textured opaque polygons only.
-	CHECK(c3d_supports(Entry::Vertical, Transfer::Textured, false));
-	CHECK(!c3d_supports(Entry::Vertical, Transfer::Textured, true));
-	CHECK(!c3d_supports(Entry::Horizontal, Transfer::Textured, false));
-	CHECK(!c3d_supports(Entry::Rectangle, Transfer::Textured, false));
-	CHECK(!c3d_supports(Entry::Vertical, Transfer::BigLandscaped, false));
-	CHECK(!c3d_supports(Entry::Vertical, Transfer::Static, false) && !c3d_supports(Entry::Vertical, Transfer::Tinted, false));
-	CHECK(!c3d_supports(Entry::Vertical, Transfer::Other, false));
+	// c3d_supports (M2 predicate): (entry, transfer, width, height, rle, shadeless, transparent, textures).
+	auto sup = [](Entry e, Transfer t, int w, int h, bool rle, bool shadeless, bool transp, bool tex) {
+		return c3d_supports(e, t, w, h, rle, shadeless, transp, tex);
+	};
+	for (bool tex : {false, true})
+	{
+		CHECK(sup(Entry::Vertical, Transfer::Textured, 128, 128, false, false, false, tex));
+		CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, false, false, tex));
+		CHECK(sup(Entry::Vertical, Transfer::Textured, 256, 256, false, false, false, tex));
+		CHECK(sup(Entry::Horizontal, Transfer::Textured, 512, 512, false, false, false, tex));
+		CHECK(!sup(Entry::Horizontal, Transfer::Textured, 1024, 1024, false, false, false, tex));   // above vram_cap
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 64, 64, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 256, false, false, false, tex));       // not square
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 192, 192, false, false, false, tex));       // not a power of two
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, true, false, false, tex));        // RLE (sprites)
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, false, true, false, tex));        // shadeless (M3)
+		CHECK(!sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, true, false, tex));
+		CHECK(!sup(Entry::Rectangle, Transfer::Textured, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::BigLandscaped, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Horizontal, Transfer::BigLandscaped, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Static, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Tinted, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Other, 128, 128, false, false, false, tex));
+	}
+	// A _TRANSPARENT_BIT wall: drawn with textures (the alpha test drops texel 0), M1's exclusion without; a
+	// floor never skips texel 0, so it is supported either way.
+	CHECK(sup(Entry::Vertical, Transfer::Textured, 128, 128, false, false, true, true));
+	CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, false, false, true, false));
+	CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, false, true, false));
+	CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, false, true, true));
 }
 
 static void test_colour_and_cmdbuf()
@@ -1332,31 +1356,149 @@ static bool is_convex(const std::vector<Point2>& poly, bool clockwise)
 	return clockwise ? !neg : !(pos && neg);
 }
 
-static void test_acceptance_and_coverage()
+namespace sw
+{
+// scottish_textures.cpp:1173-1223 (build_x_table), on shorts as in the original: for each row of the edge
+// (x0,y0)-(x1,y1), y0 < y1, the x the horizontal mapper starts or stops the row at. NULL = refused (dy < 0).
+static short* build_x_table(short* table, short x0, short y0, short x1, short y1)
+{
+	short dx, dy, adx, ady;
+	short x;
+	short d, delta_d, d_max;
+	short* record;
+	auto sgn = [](short v) -> short { return v < 0 ? -1 : (v > 0 ? 1 : 0); };
+
+	dx = x1 - x0, adx = std::abs(dx), dx = sgn(dx);
+	dy = y1 - y0, ady = std::abs(dy), dy = sgn(dy);
+	if (dy > 0)
+	{
+		x = x0;
+		record = table;
+		if (adx >= ady)
+		{
+			d = adx - ady, delta_d = -2 * ady, d_max = 2 * adx;
+			while ((adx -= 1) >= 0)
+			{
+				if (d < 0)
+					d += d_max, *record++ = x, ady -= 1;
+				x += dx, d += delta_d;
+			}
+			if (ady == 1)
+				*record++ = x;
+		}
+		else
+		{
+			d = ady - adx, delta_d = -2 * adx, d_max = 2 * ady;
+			while ((ady -= 1) >= 0)
+			{
+				if (d < 0)
+					x += dx, d += d_max;
+				*record++ = x;
+				d += delta_d;
+			}
+		}
+	}
+	else if (dy < 0)
+		return nullptr;
+	return table;
+}
+
+// scottish_textures.cpp:213-300 (texture_horizontal_polygon) down to the tables, then the row loop of
+// low_level_textures.h:200-225: `cov` gets 1 for every written pixel of rows [x0, x1). If `rows` is given it
+// receives, per written row r (from the highest vertex), the (y, x0, x1) of the row. `wrote_outside` as above.
+struct HRow
+{
+	int y, x0, x1;
+};
+static Result polygon_coverage_h_rows(const std::vector<Point2>& pts, int w, int h, std::vector<uint8_t>& cov,
+                                      unsigned& wrote_outside, std::vector<HRow>* rows)
+{
+	const int n = static_cast<int>(pts.size());
+	int highest = 0, lowest = 0;
+	for (int v = 0; v < n; ++v)
+	{
+		if (!(pts[v].x >= 0 && pts[v].x <= w && pts[v].y >= 0 && pts[v].y <= h))
+			return RefusedBounds;
+		if (pts[v].y < pts[highest].y)
+			highest = v;
+		else if (pts[v].y > pts[lowest].y)
+			lowest = v;
+	}
+	if (highest == lowest)
+		return RefusedDegenerate;
+
+	std::vector<short> left_table(8192, -1), right_table(8192, -1);
+	short left_line_count = 0, right_line_count = 0, total_line_count;
+	short aggregate_left = 0, aggregate_right = 0;
+	short left_vertex = static_cast<short>(highest), right_vertex = static_cast<short>(highest), vertex;
+	total_line_count = static_cast<short>(pts[lowest].y - pts[highest].y);
+	const short aggregate_total = total_line_count;
+	while (total_line_count > 0)
+	{
+		if (left_line_count <= 0)
+		{
+			do
+			{
+				vertex = left_vertex ? static_cast<short>(left_vertex - 1) : static_cast<short>(n - 1);
+				left_line_count = static_cast<short>(pts[vertex].y - pts[left_vertex].y);
+				if (!build_x_table(left_table.data() + aggregate_left, static_cast<short>(pts[left_vertex].x),
+				                   static_cast<short>(pts[left_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_left = static_cast<short>(aggregate_left + left_line_count);
+				left_vertex = vertex;
+			} while (!left_line_count);
+		}
+		if (right_line_count <= 0)
+		{
+			do
+			{
+				vertex = (right_vertex == n - 1) ? 0 : static_cast<short>(right_vertex + 1);
+				right_line_count = static_cast<short>(pts[vertex].y - pts[right_vertex].y);
+				if (!build_x_table(right_table.data() + aggregate_right, static_cast<short>(pts[right_vertex].x),
+				                   static_cast<short>(pts[right_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_right = static_cast<short>(aggregate_right + right_line_count);
+				right_vertex = vertex;
+			} while (!right_line_count);
+		}
+		const short delta = std::min(left_line_count, right_line_count);
+		total_line_count = static_cast<short>(total_line_count - delta);
+		left_line_count = static_cast<short>(left_line_count - delta);
+		right_line_count = static_cast<short>(right_line_count - delta);
+	}
+	for (int r = 0; r < aggregate_total; ++r)
+	{
+		const int y = pts[highest].y + r;
+		const int x0 = left_table[r], x1 = right_table[r];
+		if (rows)
+			rows->push_back({y, x0, x1});
+		for (int x = x0; x < x1; ++x)
+		{
+			if (y < 0 || y >= h || x < 0 || x >= w)
+				++wrote_outside;
+			else
+				cov[static_cast<size_t>(y) * w + x] = 1;
+		}
+	}
+	return Drawn;
+}
+static Result polygon_coverage_h(const std::vector<Point2>& pts, int w, int h, std::vector<uint8_t>& cov,
+                                 unsigned& wrote_outside)
+{
+	return polygon_coverage_h_rows(pts, w, h, cov, wrote_outside, nullptr);
+}
+} // namespace sw
+
+using CoverFn = sw::Result (*)(const std::vector<Point2>&, int, int, std::vector<uint8_t>&, unsigned&);
+
+// Random polygons, concave and degenerate included: the acceptance status is the SW walk's, and the pixels
+// are the interior's by the pixel-centre rule, apart from the exact ties (counted apart).
+static void coverage_model(Orient orient, CoverFn cover, uint64_t seed, const char* label)
 {
 	const int W = 400, H = 240;
-	// Hand-made cases.
-	auto acc = [&](std::vector<Point2> v) { return accept_polygon(v.data(), static_cast<int>(v.size()), W, H); };
-	CHECK(acc({{0, 0}, {10, 0}, {10, 10}, {0, 10}}) == Accept::Draw);        // clockwise on screen (y down)
-	CHECK(acc({{0, 0}, {0, 10}, {10, 10}, {10, 0}}) == Accept::Area);        // counter-clockwise
-	CHECK(acc({{0, 0}, {400, 0}, {400, 240}, {0, 240}}) == Accept::Draw);    // the whole view: the bounds are inclusive
-	CHECK(acc({{-1, 0}, {10, 0}, {10, 10}}) == Accept::Bounds);
-	CHECK(acc({{0, 0}, {401, 0}, {10, 10}}) == Accept::Bounds);
-	CHECK(acc({{0, 0}, {10, -1}, {10, 10}}) == Accept::Bounds);
-	CHECK(acc({{0, 0}, {10, 241}, {10, 10}}) == Accept::Bounds);
-	CHECK(acc({{5, 0}, {5, 10}, {5, 20}}) == Accept::Degenerate);            // min x == max x
-	CHECK(acc({{-5, 0}, {5, 10}, {5, 20}}) == Accept::Bounds);               // the bounds test comes first
-	CHECK(acc({{0, 0}, {5, 5}}) == Accept::Degenerate);
-	CHECK(acc({{0, 0}, {10, 5}, {20, 10}}) == Accept::Area);                 // collinear: zero area
-	CHECK(acc({{0, 0}, {20, 0}, {0, 10}}) == Accept::Draw);                  // clockwise on screen
-	CHECK(acc({{0, 0}, {0, 10}, {20, 0}}) == Accept::Area);                  // counter-clockwise on screen
-	CHECK(acc({{0, 0}, {20, 0}, {0, 10}, {0, 5}}) == Accept::Draw);          // a collinear vertex on the left edge
-	// A walk build_y_table refuses: a concave "S" whose clockwise walk from the leftmost vertex runs back in x.
-	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {10, 10}, {0, 10}}) == Accept::Draw);        // concave but walkable
-	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {20, 10}, {0, 10}}) == Accept::Walk);        // 1 -> 2 runs back in x
-
-	// Random polygons, concave and degenerate included: the acceptance status is the SW walk's.
-	std::mt19937_64 rng(0xC3D002u);
+	std::mt19937_64 rng(seed);
 	unsigned long n_poly = 0, n_draw = 0, n_walk = 0, n_bounds = 0, n_degen = 0, n_area = 0;
 	unsigned long walk_mismatch = 0, area_sw_wrote = 0, refused_sw_wrote = 0, outside_writes = 0;
 	unsigned long identical_px = 0, tie_px = 0, tie_sw_covered = 0, tie_sw_clear = 0, bad_px = 0, drawn_cmp = 0, empty_drawn = 0;
@@ -1367,14 +1509,14 @@ static void test_acceptance_and_coverage()
 		if (it % 40 == 7)   // out of the bounds now and then
 			poly[0].x = (it & 1) ? -1 : W + 1;
 		const int n = static_cast<int>(poly.size());
-		const Accept a = accept_polygon(poly.data(), n, W, H);
+		const Accept a = accept_polygon(poly.data(), n, W, H, orient);
 		++n_poly;
 		n_draw += a == Accept::Draw; n_walk += a == Accept::Walk; n_bounds += a == Accept::Bounds;
 		n_degen += a == Accept::Degenerate; n_area += a == Accept::Area;
 
 		std::fill(cov.begin(), cov.end(), 0);
 		unsigned wrote_outside = 0;
-		const sw::Result sr = sw::polygon_coverage(poly, W, H, cov, wrote_outside);
+		const sw::Result sr = cover(poly, W, H, cov, wrote_outside);
 		outside_writes += wrote_outside;
 		size_t written = 0;
 		for (uint8_t v : cov)
@@ -1459,17 +1601,61 @@ static void test_acceptance_and_coverage()
 		if (!covered_here)
 			++empty_drawn;
 	}
-	std::printf("coverage model: %lu polygons: %lu drawn (acceptance), %lu walk, %lu bounds, %lu degenerate, %lu area;"
+	std::printf("%s: %lu polygons: %lu drawn (acceptance), %lu walk, %lu bounds, %lu degenerate, %lu area;"
 	            " %lu convex drawn compared, %lu of them with no strictly interior pixel\n",
-	            n_poly, n_draw, n_walk, n_bounds, n_degen, n_area, drawn_cmp, empty_drawn);
-	std::printf("coverage model: %lu pixels identical, %lu exact-tie pixels counted apart (SW covered %lu, SW clear %lu), "
-	            "%lu mismatches\n", identical_px, tie_px, tie_sw_covered, tie_sw_clear, bad_px);
+	            label, n_poly, n_draw, n_walk, n_bounds, n_degen, n_area, drawn_cmp, empty_drawn);
+	std::printf("%s: %lu pixels identical, %lu exact-tie pixels counted apart (SW covered %lu, SW clear %lu), "
+	            "%lu mismatches\n", label, identical_px, tie_px, tie_sw_covered, tie_sw_clear, bad_px);
 	CHECK(n_draw > 2000 && n_walk > 0 && n_bounds > 0 && n_degen > 0 && n_area > 1000);
-	std::printf("coverage model: acceptance vs SW refusals differ %lu; SW wrote after a refusal %lu, after area <= 0 %lu, outside the view %lu\n",
-	            walk_mismatch, refused_sw_wrote, area_sw_wrote, outside_writes);
+	std::printf("%s: acceptance vs SW refusals differ %lu; SW wrote after a refusal %lu, after area <= 0 %lu, outside the view %lu\n",
+	            label, walk_mismatch, refused_sw_wrote, area_sw_wrote, outside_writes);
 	CHECK(walk_mismatch == 0 && refused_sw_wrote == 0 && area_sw_wrote == 0 && outside_writes == 0);
 	CHECK(bad_px == 0 && drawn_cmp > 1500);
 	CHECK(tie_px > 0);
+}
+
+static void test_acceptance_and_coverage()
+{
+	const int W = 400, H = 240;
+	// Hand-made cases.
+	auto acc = [&](std::vector<Point2> v) { return accept_polygon(v.data(), static_cast<int>(v.size()), W, H); };
+	CHECK(acc({{0, 0}, {10, 0}, {10, 10}, {0, 10}}) == Accept::Draw);        // clockwise on screen (y down)
+	CHECK(acc({{0, 0}, {0, 10}, {10, 10}, {10, 0}}) == Accept::Area);        // counter-clockwise
+	CHECK(acc({{0, 0}, {400, 0}, {400, 240}, {0, 240}}) == Accept::Draw);    // the whole view: the bounds are inclusive
+	CHECK(acc({{-1, 0}, {10, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {401, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, -1}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, 241}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{5, 0}, {5, 10}, {5, 20}}) == Accept::Degenerate);            // min x == max x
+	CHECK(acc({{-5, 0}, {5, 10}, {5, 20}}) == Accept::Bounds);               // the bounds test comes first
+	CHECK(acc({{0, 0}, {5, 5}}) == Accept::Degenerate);
+	CHECK(acc({{0, 0}, {10, 5}, {20, 10}}) == Accept::Area);                 // collinear: zero area
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}}) == Accept::Draw);                  // clockwise on screen
+	CHECK(acc({{0, 0}, {0, 10}, {20, 0}}) == Accept::Area);                  // counter-clockwise on screen
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}, {0, 5}}) == Accept::Draw);          // a collinear vertex on the left edge
+	// A walk build_y_table refuses: a concave "S" whose clockwise walk from the leftmost vertex runs back in x.
+	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {10, 10}, {0, 10}}) == Accept::Draw);        // concave but walkable
+	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {20, 10}, {0, 10}}) == Accept::Walk);        // 1 -> 2 runs back in x
+
+	coverage_model(Orient::Vertical, sw::polygon_coverage, 0xC3D002u, "coverage model");
+}
+
+// The same for rows: texture_horizontal_polygon against accept_polygon(Horizontal) + pixel-centre rasterisation
+// (M2 specification, "Floor coverage rule").
+static void test_acceptance_and_coverage_horizontal()
+{
+	const int W = 400, H = 240;
+	auto acc = [&](std::vector<Point2> v) { return accept_polygon(v.data(), static_cast<int>(v.size()), W, H, Orient::Horizontal); };
+	CHECK(acc({{0, 0}, {10, 0}, {10, 10}, {0, 10}}) == Accept::Draw);        // clockwise on screen (y down)
+	CHECK(acc({{0, 0}, {0, 10}, {10, 10}, {10, 0}}) == Accept::Area);        // counter-clockwise
+	CHECK(acc({{0, 0}, {400, 0}, {400, 240}, {0, 240}}) == Accept::Draw);
+	CHECK(acc({{-1, 0}, {10, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, 241}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 5}, {10, 5}, {20, 5}}) == Accept::Degenerate);            // min y == max y
+	CHECK(acc({{0, 0}, {10, 5}, {20, 10}}) == Accept::Area);                 // collinear
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}}) == Accept::Draw);
+	CHECK(acc({{0, 0}, {0, 10}, {20, 0}}) == Accept::Area);
+	coverage_model(Orient::Horizontal, sw::polygon_coverage_h, 0xC3D003u, "horizontal coverage model");
 }
 
 // tie_pixels vs a brute-force scan of every pixel centre against every edge, on generated polygons; and
@@ -2470,6 +2656,474 @@ static void test_cache_stats()
 	CHECK(line.find('\n') == std::string::npos);
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// M2 part 4: the texcoords against the transliterated SW mappers (design 7, M2 specification "Host tests").
+// For every pixel SW covers, the texel (column, row) the integer mappers read, against the texel the GPU would
+// sample at the pixel centre: perspective-correct interpolation (double) of the vertex attributes
+// wall_attrs / floor_attrs give over the fan triangle that contains the centre, floor(u * W) mod W.
+
+namespace sw
+{
+using std::int32_t;
+using std::uint32_t;
+
+static int32_t mul32(int32_t a, int32_t b) { return static_cast<int32_t>(static_cast<uint32_t>(a) * static_cast<uint32_t>(b)); }
+static int32_t add32(int32_t a, int32_t b) { return static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b)); }
+
+// scottish_textures.cpp:891-1001 (_pretexture_vertical_polygon_lines) for the column sx whose first written
+// row is y0; texel (column, row) of pixel row m is (col, (texture_y + (m - y0) * dy) >> (32 - bits)).
+struct WallColumn
+{
+	unsigned col;
+	uint32_t texture_y, texture_dy;
+};
+
+static WallColumn wall_column(int bits, const TexView& v, const WallSurf& o, int sx, int y0)
+{
+	const int32_t screen_x = sx - v.hw;
+	const int32_t dz0 = mul32(v.wy, o.oz);
+	const int32_t unadjusted_ty_denominator = mul32(v.wy, o.vk);
+	int32_t an = add32(mul32(v.wx, o.oy), -mul32(screen_x, o.ox));
+	int32_t ad = add32(mul32(screen_x, o.vi), -mul32(v.wx, o.vj));
+	while (an > ((1 << (31 - bits)) - 1) || an < -(1 << (31 - bits)))
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	WallColumn r;
+	r.col = static_cast<unsigned>((an * (1 << bits)) / ad) & ((1u << bits) - 1);
+	while (an > INT16_MAX || an < INT16_MIN)
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	const int32_t tx = (an * 65536) / ad;
+	int32_t world_x = o.ox + (static_cast<int32_t>(static_cast<int64_t>(tx) * o.vi) >> 16);
+	if (world_x < 0)
+		world_x = -world_x;
+	const int16_t screen_y0 = static_cast<int16_t>(v.hh - y0 + v.dtp);
+	int32_t ty_numerator = add32(mul32(world_x, screen_y0), -dz0);
+	int32_t ty_denominator = unadjusted_ty_denominator;
+	while (ty_numerator > INT16_MAX || ty_numerator < INT16_MIN)
+		ty_numerator >>= 1, ty_denominator >>= 1;
+	if (!ty_denominator)
+		ty_denominator = 1;
+	const int32_t ty = (ty_numerator * 65536) / ty_denominator;
+	int32_t adjusted_world_x = world_x;
+	int32_t adjusted_ty_denominator = unadjusted_ty_denominator >> 8;
+	while (adjusted_world_x > INT16_MAX)
+		adjusted_world_x >>= 1, adjusted_ty_denominator >>= 1;
+	if (!adjusted_ty_denominator)
+		adjusted_ty_denominator = 1;
+	const int32_t ty_delta = -((adjusted_world_x * 65536) / adjusted_ty_denominator);
+	r.texture_y = static_cast<uint32_t>(ty) << 16;
+	r.texture_dy = static_cast<uint32_t>(ty_delta) << 8;
+	return r;
+}
+
+// scottish_textures.cpp:1003-1097 (_pretexture_horizontal_polygon_lines) for the row y0 whose first written
+// pixel is x0. Pixel k of the row: column = (sx + (k - x0) * dx) >> (32 - bits), row = the top `bits` bits of
+// (sy + (k - x0) * dy) (low_level_textures.h:222).
+struct FloorRow
+{
+	uint32_t sx, sy, dx, dy;
+};
+
+static FloorRow floor_row(const TexView& v, const FloorSurf& o, int x0, int y0)
+{
+	const bool higher_precision = o.oz > -1024 && o.oz < 1024;
+	int32_t hcosine = v.cos_t, hsine = v.sin_t;
+	if (higher_precision)
+		hcosine = mul32(hcosine, o.oz), hsine = mul32(hsine, o.oz);
+	const int32_t dhcosine = mul32(v.wy, hcosine), dhsine = mul32(v.wy, hsine);
+	const int16_t screen_x = static_cast<int16_t>(x0 - v.hw);
+	int16_t screen_y = static_cast<int16_t>(v.hh - y0 + v.dtp);
+	if (!screen_y)
+		screen_y = 1;
+	int32_t source_x, source_y, source_dx, source_dy;
+	const int32_t ox10 = static_cast<int32_t>(static_cast<uint32_t>(o.ox) << 10);
+	const int32_t oy10 = static_cast<int32_t>(static_cast<uint32_t>(o.oy) << 10);
+	if (higher_precision)
+	{
+		source_x = add32((add32(dhcosine, -mul32(screen_x, hsine))) / screen_y, ox10);
+		source_dx = -hsine / screen_y;
+		source_y = add32((add32(mul32(screen_x, hcosine), dhsine)) / screen_y, oy10);
+		source_dy = hcosine / screen_y;
+	}
+	else
+	{
+		source_x = add32(mul32((add32(dhcosine, -mul32(screen_x, hsine))) / screen_y, o.oz), ox10);
+		source_dx = -mul32(hsine, o.oz) / screen_y;
+		source_y = add32(mul32((add32(mul32(screen_x, hcosine), dhsine)) / screen_y, o.oz), oy10);
+		source_dy = mul32(hcosine, o.oz) / screen_y;
+	}
+	const int bits = 12 - o.scale;   // HORIZONTAL_FREE_BITS - (flags & _SCALE_BITS)
+	FloorRow r;
+	r.sx = static_cast<uint32_t>(source_x) << bits;
+	r.dx = static_cast<uint32_t>(source_dx) << bits;
+	r.sy = static_cast<uint32_t>(source_y) << bits;
+	r.dy = static_cast<uint32_t>(source_dy) << bits;
+	return r;
+}
+} // namespace sw
+
+// The texel the GPU samples at the pixel centre (cx, cy): false when the centre is outside every fan triangle.
+static bool gpu_sample(const Point2* pts, const TexAttr* at, int n, double cx, double cy, double& s, double& t)
+{
+	for (int i = 1; i + 1 < n; ++i)
+	{
+		const Point2 &a = pts[0], &b = pts[i], &c = pts[i + 1];
+		const double det = static_cast<double>(b.x - a.x) * (c.y - a.y) - static_cast<double>(c.x - a.x) * (b.y - a.y);
+		if (det == 0)
+			continue;
+		const double l1 = ((cx - a.x) * (c.y - a.y) - (c.x - a.x) * (cy - a.y)) / det;
+		const double l2 = ((b.x - a.x) * (cy - a.y) - (cx - a.x) * (b.y - a.y)) / det;
+		const double l0 = 1.0 - l1 - l2;
+		if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9)
+			continue;
+		const double iw0 = l0 / at[0].w, iw1 = l1 / at[i].w, iw2 = l2 / at[i + 1].w;
+		const double iw = iw0 + iw1 + iw2;
+		s = (iw0 * at[0].s + iw1 * at[i].s + iw2 * at[i + 1].s) / iw;
+		t = (iw0 * at[0].t + iw1 * at[i].t + iw2 * at[i + 1].t) / iw;
+		return true;
+	}
+	return false;
+}
+
+static unsigned texel_of(double u, unsigned W)
+{
+	const long long k = static_cast<long long>(std::floor(u * W));
+	return static_cast<unsigned>(((k % static_cast<long long>(W)) + W) % W);
+}
+
+struct TexAgree
+{
+	unsigned long total = 0, exact = 0, within1 = 0;   // within1: both coordinates within one texel (wrapping)
+	double pct() const { return total ? 100.0 * exact / total : 100.0; }
+	double pct1() const { return total ? 100.0 * within1 / total : 100.0; }
+	void add(unsigned sc, unsigned sr, unsigned gc, unsigned gr, unsigned W)
+	{
+		++total;
+		if (sc == gc && sr == gr)
+			++exact;
+		auto near1 = [W](unsigned a, unsigned b) { const unsigned d = (a + W - b) % W; return d <= 1 || d == W - 1; };
+		if (near1(sc, gc) && near1(sr, gr))
+			++within1;
+	}
+};
+
+static void test_texcoords_vs_sw()
+{
+	std::mt19937_64 rng(0xC3D004u);
+	auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	const int VW = 400, VH = 240;
+	const double deltas[2] = {0.0, -0.5};
+	TexAgree wall[2], floor_[2], floor_h_[2];
+	TexAgree wall_b[3][2], floor_b[3][2];
+	TexAgree sw_vs_exact_w, sw_vs_exact_f, gpu_vs_exact_w, gpu_vs_exact_f;   // the exact map at the pixel's corner (informative)   // by TEXBITS 7, 8, 9 (informative)
+	unsigned long walls_made = 0, walls_used = 0, floors_made = 0, floors_used = 0, floors_h_used = 0, nonfinite = 0, degenerate = 0;
+	std::vector<uint8_t> cov(static_cast<size_t>(VW) * VH);
+
+	auto make_view = [&]() {
+		TexView v;
+		v.hw = VW / 2, v.hh = VH / 2;
+		v.wx = uni(160, 320);
+		v.wy = std::max(100, static_cast<int>(v.wx * std::uniform_real_distribution<double>(0.8, 1.2)(rng)));
+		v.dtp = uni(-60, 60);
+		const int yaw = uni(0, 511);
+		v.cos_t = static_cast<int>(std::lround(1024.0 * std::cos(2.0 * M_PI * yaw / 512.0)));
+		v.sin_t = static_cast<int>(std::lround(1024.0 * std::sin(2.0 * M_PI * yaw / 512.0)));
+		return v;
+	};
+
+	for (int it = 0; it < 6000; ++it)
+	{
+		const TexView v = make_view();
+		const int bits = uni(7, 9);
+		const unsigned W = 1u << bits;
+
+		// ---- a wall, as RenderRasterize.cpp:525-548 makes it ----
+		{
+			++walls_made;
+			const int sx0 = uni(4, VW - 4), sx1 = uni(4, VW - 4);
+			if (std::abs(sx0 - sx1) < 6)
+				goto floors;
+			const int d0 = uni(150, 6000), d1 = uni(150, 6000);
+			const int p0i = d0, p0j = (sx0 - v.hw) * d0 / v.wx, p1i = d1, p1j = (sx1 - v.hw) * d1 / v.wx;
+			const int h0 = -uni(100, 1200), h1 = h0 + uni(256, 2048);   // bottom, top (relative to the eye)
+			const int scale = 1024 << uni(0, 2);
+			const int dx = p1i - p0i, dy = p1j - p0j;
+			int divisor = static_cast<int>(std::lround(std::sqrt(static_cast<double>(dx) * dx + static_cast<double>(dy) * dy)));
+			if (divisor == 0)
+				divisor = 1;
+			const int x0off = uni(0, scale - 1) & (scale - 1), y0off = uni(0, scale - 1) & (scale - 1);
+			WallSurf o;
+			o.vi = (scale * dx) / divisor;
+			o.vj = (scale * dy) / divisor;
+			o.vk = -scale;
+			o.ox = p0i - (x0off * dx) / divisor;
+			o.oy = p0j - (x0off * dy) / divisor;
+			o.oz = h1 + y0off;
+			auto project_y = [&](int depth, int z) {
+				const double Y = v.hh + v.dtp - static_cast<double>(v.wy) * z / depth;
+				return std::min(VH, std::max(0, static_cast<int>(std::lround(Y))));
+			};
+			const bool p0_left = sx0 < sx1;
+			const int xl = p0_left ? sx0 : sx1, xr = p0_left ? sx1 : sx0;
+			const int dl = p0_left ? d0 : d1, dr = p0_left ? d1 : d0;
+			std::vector<Point2> poly = {{xl, project_y(dl, h1)}, {xr, project_y(dr, h1)}, {xr, project_y(dr, h0)}, {xl, project_y(dl, h0)}};
+			if (accept_polygon(poly.data(), 4, VW, VH) != Accept::Draw || !is_convex(poly, true))
+				goto floors;
+			TexAttr at[2][4];
+			if (wall_attrs(v, o, poly.data(), 4, deltas[0], at[0]) != TexResult::Ok ||
+			    wall_attrs(v, o, poly.data(), 4, deltas[1], at[1]) != TexResult::Ok)
+			{
+				++nonfinite;
+				goto floors;
+			}
+			std::fill(cov.begin(), cov.end(), 0);
+			unsigned outside = 0;
+			if (sw::polygon_coverage(poly, VW, VH, cov, outside) != sw::Drawn)
+				goto floors;
+			++walls_used;
+			for (int k = 0; k < VW; ++k)
+			{
+				int y0 = -1;
+				sw::WallColumn col{};
+				for (int m = 0; m < VH; ++m)
+				{
+					if (!cov[static_cast<size_t>(m) * VW + k])
+						continue;
+					if (y0 < 0)
+					{
+						y0 = m;
+						col = sw::wall_column(bits, v, o, k, y0);
+					}
+					const unsigned sw_row = (col.texture_y + static_cast<uint32_t>(m - y0) * col.texture_dy) >> (32 - bits);
+					for (int di = 0; di < 2; ++di)
+					{
+						double gs, gt;
+						if (!gpu_sample(poly.data(), at[di], 4, k + 0.5, m + 0.5, gs, gt))
+							continue;
+						// walls: s = row in the column, t = column
+						wall[di].add(col.col, sw_row, texel_of(gt, W), texel_of(gs, W), W);
+						wall_b[bits - 7][di].add(col.col, sw_row, texel_of(gt, W), texel_of(gs, W), W);
+						if (di == 1)
+						{
+							const TexAttrD e = wall_vertex(v, o, k, m);
+							sw_vs_exact_w.add(col.col, sw_row, texel_of(e.t, W), texel_of(e.s, W), W);
+							gpu_vs_exact_w.add(texel_of(gt, W), texel_of(gs, W), texel_of(e.t, W), texel_of(e.s, W), W);
+						}
+					}
+				}
+			}
+		}
+	floors:
+		// ---- a floor or ceiling, as RenderRasterize.cpp:450-452 makes it ----
+		{
+			++floors_made;
+			FloorSurf o;
+			const int mag = uni(64, 2048);
+			o.oz = (it & 1) ? mag : -mag;
+			o.ox = uni(0, 32767);
+			o.oy = uni(0, 32767);
+			o.scale = uni(0, 2);
+			const int yh = v.hh + v.dtp;   // the horizon row (screen_y == 0)
+			// Ground distance is |oz| * wy / |sy'|; maps are some 32 WORLD_ONE across: keep rows no farther than
+			// that, except in the "horizon" variant (every 20th: rows on the horizon row itself).
+			const bool near_horizon = (it % 20) == 3;
+			const int off_min = near_horizon ? 0 : std::max(1, (std::abs(o.oz) * v.wy + 32767) / 32768);
+			std::vector<Point2> poly = random_polygon(rng, VW, VH);
+			// Map y in [0, VH] onto the rows between the horizon (offset off_min) and the view's edge.
+			const int lo = o.oz < 0 ? yh + off_min : 0, hi = o.oz < 0 ? VH : yh - off_min;
+			if (hi - lo < 4)
+				continue;
+			for (Point2& p : poly)
+				p.y = lo + (p.y * (hi - lo) + VH / 2) / VH;
+			if (accept_polygon(poly.data(), static_cast<int>(poly.size()), VW, VH, Orient::Horizontal) != Accept::Draw ||
+			    !is_convex(poly, true))
+				continue;
+			const int n = static_cast<int>(poly.size());
+			TexAttr at[2][16];
+			bool bad = false;
+			for (int di = 0; di < 2; ++di)
+			{
+				const TexResult tr = floor_attrs(v, o, poly.data(), n, deltas[di], at[di]);
+				if (tr == TexResult::Degenerate)
+					++degenerate, bad = true;
+				else if (tr != TexResult::Ok)
+					++nonfinite, bad = true;
+			}
+			if (bad)
+				continue;
+			std::fill(cov.begin(), cov.end(), 0);
+			unsigned outside = 0;
+			if (sw::polygon_coverage_h(poly, VW, VH, cov, outside) != sw::Drawn)
+				continue;
+			(near_horizon ? floors_h_used : floors_used) += 1;
+			for (int m = 0; m < VH; ++m)
+			{
+				int x0 = -1;
+				sw::FloorRow row{};
+				for (int k = 0; k < VW; ++k)
+				{
+					if (!cov[static_cast<size_t>(m) * VW + k])
+						continue;
+					if (x0 < 0)
+					{
+						x0 = k;
+						row = sw::floor_row(v, o, x0, m);
+					}
+					const uint32_t ux = row.sx + static_cast<uint32_t>(k - x0) * row.dx;
+					const uint32_t uy = row.sy + static_cast<uint32_t>(k - x0) * row.dy;
+					const unsigned sw_col = ux >> (32 - bits), sw_row = uy >> (32 - bits);
+					for (int di = 0; di < 2; ++di)
+					{
+						double gs, gt;
+						if (!gpu_sample(poly.data(), at[di], n, k + 0.5, m + 0.5, gs, gt))
+							continue;
+						// floors: s = column, t = row
+						(near_horizon ? floor_h_ : floor_)[di].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
+						if (!near_horizon)
+							floor_b[bits - 7][di].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
+						if (di == 1 && !near_horizon)
+						{
+							TexAttrD e;
+							floor_vertex(v, o, k, m, e);
+							sw_vs_exact_f.add(sw_col, sw_row, texel_of(e.s, W), texel_of(e.t, W), W);
+							gpu_vs_exact_f.add(texel_of(gs, W), texel_of(gt, W), texel_of(e.s, W), texel_of(e.t, W), W);
+						}
+					}
+				}
+			}
+		}
+	}
+	std::printf("texcoords vs SW: %lu walls generated, %lu compared; %lu floors generated, %lu compared (+ %lu on the horizon row), "
+	            "%lu non-finite, %lu degenerate\n", walls_made, walls_used, floors_made, floors_used, floors_h_used, nonfinite, degenerate);
+	for (int di = 0; di < 2; ++di)
+	{
+		std::printf("texcoords vs SW, delta %5.1f: walls %.3f%% exact (%.3f%% within 1 texel) of %lu px; floors %.3f%% exact (%.3f%% within 1) of %lu px;"
+		            " horizon-row floors %.3f%% of %lu px (informative)\n",
+		            deltas[di], wall[di].pct(), wall[di].pct1(), wall[di].total, floor_[di].pct(), floor_[di].pct1(),
+		            floor_[di].total, floor_h_[di].pct(), floor_h_[di].total);
+	}
+	for (int b = 0; b < 3; ++b)
+		std::printf("texcoords vs SW, W=%u, delta -0.5: walls %.3f%% (delta 0: %.3f%%), floors %.3f%% (delta 0: %.3f%%)\n", 128u << b,
+		            wall_b[b][1].pct(), wall_b[b][0].pct(), floor_b[b][1].pct(), floor_b[b][0].pct());
+	std::printf("texcoords vs SW (informative): against the exact map at each pixel's corner, SW's integers agree %.3f%% (walls) / %.3f%% (floors);"
+	            " the GPU at delta -0.5 agrees %.3f%% / %.3f%%\n", sw_vs_exact_w.pct(), sw_vs_exact_f.pct(), gpu_vs_exact_w.pct(), gpu_vs_exact_f.pct());
+	const double best_wall = std::max(wall[0].pct(), wall[1].pct()), best_floor = std::max(floor_[0].pct(), floor_[1].pct());
+	std::printf("texcoords vs SW: best delta for walls %s (%.3f%%), for floors %s (%.3f%%); gate 98%%\n",
+	            wall[1].pct() >= wall[0].pct() ? "-0.5" : "0", best_wall, floor_[1].pct() >= floor_[0].pct() ? "-0.5" : "0", best_floor);
+	CHECK(walls_used > 1000 && floors_used > 1000 && wall[1].total > 100000 && floor_[1].total > 100000);
+	CHECK(best_wall >= 98.0);    // the reachability gate (Review log "M2 pre-implementation", round 2)
+	CHECK(best_floor >= 98.0);
+}
+
+
+static void test_config_m2_front()
+{
+	Config d;
+	CHECK(!d.textures && d.uv_half && d.diff_tol == 2);
+	Config c;
+	CHECK(config_apply(c, "textures", "1") && c.textures && config_apply(c, "textures", "0") && !c.textures);
+	CHECK(!config_apply(c, "textures", "2") && !config_apply(c, "textures", "yes") && !config_apply(c, "textures", "") && !c.textures);
+	CHECK(config_apply(c, "uv_half", "0") && !c.uv_half && config_apply(c, "uv_half", "1") && c.uv_half);
+	CHECK(!config_apply(c, "uv_half", "-1") && !config_apply(c, "uv_half", "half") && c.uv_half);
+	CHECK(config_apply(c, "diff_tol", "0") && c.diff_tol == 0 && config_apply(c, "diff_tol", "255") && c.diff_tol == 255);
+	CHECK(!config_apply(c, "diff_tol", "256") && !config_apply(c, "diff_tol", "-1") && !config_apply(c, "diff_tol", "") && c.diff_tol == 255);
+	Config p;
+	std::vector<std::string> problems;
+	config_parse(p, "textures 1\nuv_half 0 # shift off\ndiff_tol 4\ndiff_tol 300\ntextures maybe\n", problems);
+	CHECK(problems.size() == 2 && p.textures && !p.uv_half && p.diff_tol == 4);
+}
+
+static void test_texcoord_basics()
+{
+	TexView v{200, 120, 256, 256, 0, 1024, 0};   // yaw 0: cos 1.0, sin 0
+	// clamp_wp: [16, 2^24], not wall_w's [16, 32767].
+	CHECK(clamp_wp(0.0f) == 16.0f && clamp_wp(40000.0f) == 40000.0f && clamp_wp(1e9f) == 16777216.0f && clamp_wp(16.0f) == 16.0f);
+	// A wall in the plane x = 1000 (v = (1024, 0, -1024), o = (1000, 0, 0)): w = 1000 at every column, in the
+	// shifted evaluation too; wall_vertex's w at delta 0 is wall_w.
+	const WallSurf wl{1000, 0, 0, 0, 1024, -1024};
+	for (int sx = 0; sx <= 400; sx += 40)
+	{
+		CHECK(wall_vertex(v, wl, sx, 100).w == 1000.0);
+		CHECK(wall_vertex(v, wl, sx - 0.5, 100 - 0.5).w == 1000.0);
+	}
+	{
+		std::mt19937_64 rng(0xC3D005u);
+		int bad = 0;
+		for (int i = 0; i < 20000; ++i)
+		{
+			auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+			TexView tv{200, 120, uni(160, 320), uni(160, 320), uni(-60, 60), 1024, 0};
+			const WallSurf o{uni(-20000, 20000), uni(-20000, 20000), uni(-2000, 2000), uni(-4000, 4000), uni(-4000, 4000), -1024};
+			const int sx = uni(0, 400);
+			const double w = wall_vertex(tv, o, sx, 50).w;
+			const double ref = wall_w(200, tv.wx, o.ox, o.oy, o.vi, o.vj, sx);
+			if (std::fabs(w - ref) > 1e-3 * ref + 0.05)
+				++bad;
+		}
+		CHECK(bad == 0);
+	}
+	// A floor at o.z == 0 is a degenerate skip, never unsupported / finite garbage.
+	const Point2 tri[3] = {{10, 200}, {300, 200}, {10, 230}};
+	TexAttr at[3];
+	CHECK(floor_attrs(v, FloorSurf{5, 6, 0, 0}, tri, 3, -0.5, at) == TexResult::Degenerate);
+	TexAttrD d;
+	CHECK(!floor_vertex(v, FloorSurf{5, 6, 0, 0}, 10, 10, d));
+	// Per-polygon floor(min): every texcoord is >= 0 and < its spread + 1, w within [16, 2^24].
+	const FloorSurf fs{40000, 33000, -512, 0};
+	CHECK(floor_attrs(v, fs, tri, 3, -0.5, at) == TexResult::Ok);
+	double mins = 1e30, mint = 1e30;
+	for (int i = 0; i < 3; ++i)
+	{
+		CHECK(at[i].w >= 16.0f && at[i].w <= 16777216.0f);
+		mins = std::min<double>(mins, at[i].s);
+		mint = std::min<double>(mint, at[i].t);
+	}
+	CHECK(mins >= 0.0 && mins < 1.0 && mint >= 0.0 && mint < 1.0);
+	// ... and it is an integer shift: the fractional parts equal the raw ones.
+	{
+		TexAttrD raw[3];
+		for (int i = 0; i < 3; ++i)
+			CHECK(floor_vertex(v, fs, tri[i].x - 0.5, tri[i].y - 0.5, raw[i]));
+		for (int i = 0; i < 3; ++i)
+		{
+			const double fs_ = std::floor(std::min({raw[0].s, raw[1].s, raw[2].s}));
+			CHECK(std::fabs((raw[i].s - fs_) - at[i].s) < 1e-3);
+		}
+	}
+	// The sign guard: a floor below the eye (o.z < 0) with a vertex on the horizon row (sy' = 0, or +1/2 after
+	// the shift): its u/w keeps the polygon's sign, so w stays positive and finite and u/w has the sign of the others.
+	{
+		const int yh = v.hh + v.dtp;
+		const FloorSurf below{1000, 2000, -300, 1}, above{1000, 2000, 300, 1};
+		TexAttrD on_h, next, other;
+		CHECK(floor_vertex(v, below, 100, yh, on_h) && floor_vertex(v, below, 100, yh + 1, next));
+		CHECK(floor_vertex(v, below, 100, yh + 0.5, other));   // ey = yh + 1/2: sy' = -1/2 exactly
+		CHECK(std::isfinite(on_h.s) && std::isfinite(on_h.w) && on_h.w > 0 && on_h.w == other.w && on_h.s == other.s);
+		TexAttrD up;
+		CHECK(floor_vertex(v, above, 100, yh - 0.5, up));      // sy' = +1/2 exactly for a ceiling
+		TexAttrD on_h2;
+		CHECK(floor_vertex(v, above, 100, yh + 0.5, on_h2));   // past the horizon: the guard puts sy' at +1/2
+		CHECK(on_h2.w == up.w && on_h2.s == up.s && on_h2.t == up.t);
+		// the w of a vertex at the guard is the largest the polygon sees: |o.z| * wy / (1/2)
+		CHECK(std::fabs(on_h.w - 2.0 * 300 * 256) < 1e-9);
+	}
+	// Scale: 2x and 4x halve and quarter the texcoords' rate (same polygon, same raw u up to the origin term).
+	{
+		TexAttrD a0, a1, a2;
+		const FloorSurf f0{0, 0, -512, 0}, f1{0, 0, -512, 1}, f2{0, 0, -512, 2};
+		CHECK(floor_vertex(v, f0, 123, 200, a0) && floor_vertex(v, f1, 123, 200, a1) && floor_vertex(v, f2, 123, 200, a2));
+		CHECK(std::fabs(a0.s - 2 * a1.s) < 1e-12 && std::fabs(a0.t - 4 * a2.t) < 1e-12 && a0.w == a1.w && a0.w == a2.w);
+	}
+	// Non-finite input is reported, not drawn: a wall with a zero denominator row stays finite (SW's guard).
+	const Point2 q[4] = {{10, 10}, {20, 10}, {20, 20}, {10, 20}};
+	TexAttr aq[4];
+	CHECK(wall_attrs(v, WallSurf{1000, 0, 0, 0, 0, -1024}, q, 4, -0.5, aq) == TexResult::Ok);
+}
+
 static void test_m2_core()
 {
 	test_config_m2();
@@ -2484,6 +3138,9 @@ static void test_m2_core()
 	test_cache_eviction_rules();
 	test_cache_linear_full();
 	test_cache_stats();
+	test_config_m2_front();
+	test_texcoord_basics();
+	test_texcoords_vs_sw();
 }
 
 int main()
@@ -2506,6 +3163,7 @@ int main()
 	test_colour_and_cmdbuf();
 	test_config_m1();
 	test_acceptance_and_coverage();
+	test_acceptance_and_coverage_horizontal();
 	test_tie_pixels();
 	test_ring();
 	test_m2_core();

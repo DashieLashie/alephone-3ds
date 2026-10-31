@@ -43,10 +43,12 @@ class FilterRasterizer : public RasterizerClass
 public:
 	// fullbright: every forwarded _textured primitive without _SHADELESS_BIT gets
 	// ambient_shade = FIXED_ONE (the top shading table at any depth).
-	// c3d_only (C3D checks only, on both sides): a wall whose texture is transparent (SW skips texel 0,
-	// flat C3D would draw it solid; M1 cannot, section 7 "What C3D draws in M1") is dropped and counted.
-	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright, bool c3d_only = false)
-		: inner_(inner), cls_(cls), fullbright_(fullbright), c3d_only_(c3d_only) {}
+	// c3d_only (C3D checks only, on both sides): a textured-transfer wall or floor that c3d_supports()
+	// rejects (an odd-sized, RLE or shadeless bitmap; with `textures` off also a transparent wall: SW skips
+	// texel 0, flat C3D would draw it solid) is dropped and counted as excluded, instead of discarding the
+	// check (section 7, M2 specification "What C3D draws in M2").
+	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright, bool c3d_only = false, bool textures = false)
+		: inner_(inner), cls_(cls), fullbright_(fullbright), c3d_only_(c3d_only), textures_(textures) {}
 
 	unsigned excluded() const { return excluded_; }
 
@@ -62,11 +64,13 @@ public:
 
 private:
 	bool passes(int cls) const { return cls_ == kFrame || cls_ == cls; }
+	bool c3d_excluded(Entry e, const polygon_definition& p) const;
 
 	RasterizerClass* inner_;
 	int cls_;
 	bool fullbright_;
 	bool c3d_only_;
+	bool textures_;
 	unsigned excluded_ = 0;
 	bool foreground_ = false;
 };

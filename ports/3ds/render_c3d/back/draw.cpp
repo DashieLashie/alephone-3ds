@@ -298,7 +298,7 @@ ViewEnd finish_discarded()
 
 const char* skip_name(SkipReason r)
 {
-	static const char* const names[] = {"down", "gate", "size"};
+	static const char* const names[] = {"down", "gate", "size", "pref"};
 	return names[static_cast<int>(r)];
 }
 
@@ -306,6 +306,11 @@ const char* discard_name(DiscardReason r)
 {
 	static const char* const names[] = {"unsupported", "ring", "cmdbuf", "gx", "begin"};
 	return names[static_cast<int>(r)];
+}
+
+ViewBegin view_skip(SkipReason reason)
+{
+	return skipped(reason);
 }
 
 ViewBegin view_begin(int w, int h)
@@ -535,12 +540,12 @@ int draw_stats_text(char* buf, size_t size)
 	const Counters& n = s_n;
 	return snprintf(buf, size,
 	                " views=%u draws=%u polys=%u verts=%u idx=%u ring_hw_v=%u,%u ring_hw_i=%u,%u "
-	                "discards=%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin) skips=%u/%u/%u(down/gate/size) "
+	                "discards=%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin) skips=%u/%u/%u/%u(down/gate/size/pref) "
 	                "prog_restore_mismatch=%u",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
 	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.skips[0],
-	                n.skips[1], n.skips[2], n.prog_restore_mismatch);
+	                n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch);
 }
 
 } // namespace back

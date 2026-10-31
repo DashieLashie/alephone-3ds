@@ -25,10 +25,11 @@
 namespace a1_c3d {
 namespace back {
 
-// Nothing was drawn and nothing is open: the check is "skipped (down|gate|size)". Down also covers a
+// Nothing was drawn and nothing is open: the check is "skipped (down|gate|size|pref)". Down also covers a
 // release pending and citro3d off for the run (a failed ring or BufInfo check); Size also covers no memory
-// for the view target and staging (view_ensure).
-enum class SkipReason : uint8_t { Down, Gate, Size, kCount };
+// for the view target and staging (view_ensure); Pref is software_alpha_blending not off (SW blends walls
+// and floors then, M2 specification), decided by the front end before view_begin.
+enum class SkipReason : uint8_t { Down, Gate, Size, Pref, kCount };
 // The frame was started and is given up: no more draws, C3D_FrameEnd normally, no readback. The check
 // is "discarded (unsupported|ring|cmdbuf|gx|begin)" and not compared.
 enum class DiscardReason : uint8_t { Unsupported, Ring, Cmdbuf, Gx, Begin, kCount };
@@ -49,6 +50,8 @@ struct ViewBegin
 // size, the target and staging out of frame, the sentinel fill, frame_begin, the clear (before the first
 // draw), C3D_FrameDrawOn, the state save, the world program, attributes, buffers and GPU state.
 ViewBegin view_begin(int w, int h);
+// The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
+ViewBegin view_skip(SkipReason reason);
 
 // Appends one accepted polygon (3..16 vertices, already through core's accept_polygon, positions in view
 // pixels, w clamped, colour set) to the current ring half, fans it, and extends the pending draw when

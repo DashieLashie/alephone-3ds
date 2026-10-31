@@ -1,11 +1,13 @@
 /*
 	Aleph One for the Nintendo 3DS, citro3d back end: the C3D RasterizerClass (docs/3ds/CITRO3D_DESIGN.md,
-	section 7, M1 specification, "What C3D draws in M1" and "Polygon acceptance"). Engine headers and the
-	plain headers of back/ and core/ only: no <3ds.h>, no <citro3d.h>.
+	section 7, M1 specification, "What C3D draws in M1" and "Polygon acceptance"; M2 specification,
+	"What C3D draws in M2", "Texcoords"). Engine headers and the plain headers of back/ and core/ only: no
+	<3ds.h>, no <citro3d.h>.
 
-	Receives the traversal from the harness (through FilterRasterizer), accepts walls with an opaque
-	texture exactly as the software mapper would draw them, builds their vertices and hands them to
-	back/draw.cpp (view_polygon). Any other primitive discards the view frame (view_discard(Unsupported)).
+	Receives the traversal from the harness (through FilterRasterizer), accepts the walls and floors
+	c3d_supports() allows exactly as the software mapper would draw them (core/geometry accept_polygon,
+	vertical or horizontal), builds their vertices (position, perspective weight, texcoords) and hands them
+	to back/draw.cpp (view_polygon). Any other primitive discards the view frame (view_discard(Unsupported)).
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -32,6 +34,13 @@ class C3dRasterizer : public RasterizerClass
 public:
 	// The size of the target the polygons are accepted against (the view_begin size); resets the counters.
 	void set_target(int w, int h);
+	// debug-c3d `textures` (the support predicate's transparent-wall rule) and `uv_half` (the attribute
+	// shift of -1/2 pixel). Persist across set_target.
+	void set_options(bool textures, bool uv_half)
+	{
+		textures_ = textures;
+		uv_half_ = uv_half;
+	}
 
 	void SetView(view_data& View) override { view_ = &View; }
 	void Begin() override { foreground_ = false; }
@@ -46,13 +55,18 @@ public:
 	const uint8_t* tie_mask() const { return tie_mask_.data(); }
 
 	unsigned drawn() const { return drawn_; }
-	// Skipped polygons (SW draws nothing for them) by Accept kind (index = Accept; Draw is 0).
+	// Skipped polygons (SW draws nothing for them) by Accept kind (index = Accept; Draw is 0). A floor at
+	// eye height (o.z == 0) counts as Degenerate.
 	unsigned skipped(Accept a) const { return skipped_[static_cast<int>(a)]; }
 
 private:
 	view_data* view_ = nullptr;
 	int w_ = 0, h_ = 0;
+	void polygon(Entry e, polygon_definition& p);
+
 	bool foreground_ = false;
+	bool textures_ = false;
+	bool uv_half_ = true;
 	unsigned drawn_ = 0;
 	std::vector<uint8_t> tie_mask_;
 	unsigned skipped_[5] = {0, 0, 0, 0, 0};
