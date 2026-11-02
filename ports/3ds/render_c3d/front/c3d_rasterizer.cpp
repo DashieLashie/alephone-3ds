@@ -12,6 +12,8 @@
 #include "../back/draw.h"
 #include "../core/classify.h"
 
+#include <cstdio>
+
 namespace a1_c3d {
 
 void C3dRasterizer::set_target(int w, int h)
@@ -95,6 +97,11 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	}
 	if (tr != TexResult::Ok)
 	{
+		// SW draws this polygon, so the check is discarded (not skipped); logged apart from real unsupported
+		// primitives (a float precision limit, not a missing feature).
+		if (nonfinite_++ == 0)
+			printf("[c3d] front: texcoords non-finite or spread over 2^20 repeats: view frame discarded "
+			       "(unsupported); first of its kind\n");
 		back::view_discard(back::DiscardReason::Unsupported);
 		return;
 	}

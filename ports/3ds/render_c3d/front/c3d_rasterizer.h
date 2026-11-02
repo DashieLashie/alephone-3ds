@@ -55,6 +55,8 @@ public:
 	const uint8_t* tie_mask() const { return tie_mask_.data(); }
 
 	unsigned drawn() const { return drawn_; }
+	// Polygons whose texcoords came out non-finite or too spread (TexResult::NonFinite) since the start.
+	unsigned nonfinite() const { return nonfinite_; }
 	// Skipped polygons (SW draws nothing for them) by Accept kind (index = Accept; Draw is 0). A floor at
 	// eye height (o.z == 0) counts as Degenerate.
 	unsigned skipped(Accept a) const { return skipped_[static_cast<int>(a)]; }
@@ -68,6 +70,7 @@ private:
 	bool textures_ = false;
 	bool uv_half_ = true;
 	unsigned drawn_ = 0;
+	unsigned nonfinite_ = 0;   // not reset by set_target
 	std::vector<uint8_t> tie_mask_;
 	unsigned skipped_[5] = {0, 0, 0, 0, 0};
 };

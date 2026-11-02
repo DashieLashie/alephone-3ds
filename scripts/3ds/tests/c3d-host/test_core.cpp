@@ -385,12 +385,6 @@ static void test_diff()
 		CHECK(rh.common > 0 && rh.within_tol == 0 && rh.max_delta == 190 && rh.mean() == 190.0);
 		CHECK(rh.within_nb == rh.common && rh.sum_nb == 0 && rh.max_nb == 0 && rh.within_nb_pct() == 100.0);
 		CHECK(rb.within_tol == 0 && rb.within_nb == 0 && rb.max_nb == 90 && rb.mean_nb() == 90.0);
-		// Neighbours not covered in A do not count: A's pixel (6,4) alone covered would be an edge pixel, so
-		// check a covered pixel whose neighbour holds the match but is uncovered (alpha 0): not a match.
-		std::vector<uint32_t> pa2(nw * nh, 0xFF000000u | 0x0A0A0Au), b2(nw * nh, 0xFF000000u | 0x808080u);
-		Image32 ia2{pa2.data(), nw, nh, nw}, ib2{b2.data(), nw, nh, nw};
-		DiffResult r2 = diff_images(ia2, ib2, Coverage::TopByte, 0, 2);
-		CHECK(r2.common > 0 && r2.within_nb == 0 && r2.max_nb == 0x80 - 0x0A);
 		// The C3D line carries the new fields after tie_mismatch.
 		CHECK(diff_line_c3d(1, "floors", rh, 2, 0, 0).find(" tie_mismatch=0 within_nb=100.00% mean_nb=0.00 max_nb=0") !=
 		      std::string::npos);
@@ -2567,8 +2561,10 @@ static void test_cache_promotion()
 		TexCache e(fb, cfg_of(4096, 3584, 8));
 		run_frame(e, tight, 1);
 		e.create(K(1), 128);
-		p = run_frame(e, tight, 2, true);   // rule passes (4 <= 4), take(true) costs 2 <= 4: ok, used 2
-		CHECK(p.size() == 1 && tight.used() == 2);
+		p = run_frame(e, tight, 2, true);   // rule counts the split: 0+2+3 > 4, deferred (the readback keeps its room)
+		CHECK(p.empty() && tight.used() == 0 && e.stats().promotions_deferred == 1);
+		p = run_frame(e, tight, 3);         // empty command buffer: 0+1+3 <= 4, one promotion
+		CHECK(p.size() == 1 && tight.used() == 1);
 	}
 	// promote_max 0: nothing ever pending, nothing promoted
 	{

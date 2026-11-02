@@ -107,6 +107,13 @@ void load_config()
 	text << in.rdbuf();
 	std::vector<std::string> problems;
 	config_parse(s_cfg, text.str(), problems);
+	// M2 session 1: no texture upload yet (design 7, M2 parts 6-7), so `textures 1` would draw transparent
+	// walls solid and judge hash colours. Part 7 removes this.
+	if (s_cfg.textures)
+	{
+		s_cfg.textures = false;
+		problems.push_back("textures 1: not before M2 part 7 (no texture upload yet); using textures 0");
+	}
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
 	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "

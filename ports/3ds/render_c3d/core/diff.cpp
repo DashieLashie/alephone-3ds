@@ -116,6 +116,8 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 						const int nx = x + dx;
 						if ((dx == 0 && dy == 0) || nx < 0 || nx >= w)
 							continue;
+						// Always true for a common pixel (covered and not edge, so every in-image neighbour is
+						// covered in A); kept as the definition's guard.
 						if (cov[static_cast<size_t>(ny) * w + nx])
 							dn = std::min(dn, channel_delta(a.px[static_cast<size_t>(ny) * a.pitch + nx], pb[x]));
 					}

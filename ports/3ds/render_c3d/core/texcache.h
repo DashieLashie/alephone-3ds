@@ -16,10 +16,15 @@
 	               A new texture is created in Linear. With promote_max > 0 and a VRAM cap that can
 	               hold it, it is marked promote_pending; next_promotion() hands out, oldest first, the
 	               copies to issue in the current view frame (≤ promote_max a frame, and only while
-	               gx.used() + 1 + kViewReserveEntries <= gx.budget(); a refusal defers, never
+	               gx.used() + cost + kViewReserveEntries <= gx.budget(), cost 1, or 2 with a non-empty
+	               command buffer; a refusal defers, never
 	               discards). The slot keeps sampling its linear texture in the frame of the copy; the
 	               linear block goes on the deferred-free list at once (freed by the next on_retired(),
 	               which also switches the slot to its VRAM texture).
+	  ownership    the slot's handles are opaque and change at on_retired(): the C3D_Tex storage (and
+	               what it points to) belongs to the TexAllocator, never to the slot. The back end may
+	               release a handle only for a slot not bound in the current frame, after the frame's
+	               texture-binding restore (design 7, M2 "Texture binding and its restore").
 	  eviction     LRU by last_used_frame among the slots of the pool that must make room (any pool when
 	               the slot array is full); never a slot used in the current view frame, never a slot
 	               whose copy was issued in this frame (its linear source and VRAM destination are in

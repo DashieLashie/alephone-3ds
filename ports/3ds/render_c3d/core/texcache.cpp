@@ -212,7 +212,8 @@ bool TexCache::next_promotion(GxQueue& gx, bool command_buffer_not_empty, TexPro
 				s = &c;
 		if (!s)
 			return false;
-		if (gx.used() + 1 + kViewReserveEntries > gx.budget())
+		// The op itself (2 entries with a non-empty command buffer: the split, 2.4) plus the frame's own entries.
+		if (gx.used() + 1 + (command_buffer_not_empty ? 1 : 0) + kViewReserveEntries > gx.budget())
 		{
 			++stats_.promotions_deferred;
 			return false;
