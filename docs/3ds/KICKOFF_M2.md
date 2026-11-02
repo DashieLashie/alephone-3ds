@@ -6,6 +6,18 @@ milestones before this one), `KICKOFF_PLAN_B.md`, `KICKOFF_B_CONSOLE.md`, `KICKO
 
 ---
 
+**Session 2 (added 2026-11-02): read this first.** Session 1 is done (parts 1-5 of the design's "M2
+specification": commits `f35b2d8fe`..`946d4f294`, `PERF.md` "Stage 10 M2 session 1"), and the "M1 console
+check, short version" **passed on the console 2026-11-02**. So this session builds **parts 6-7 only**: the
+citro3d `TexAllocator` for `back/texcache.cpp` (stub today), linear textures + ranged flush, VRAM
+promotions, `--wrap=C3D_TexBind` and the restore, TEV, remove the `textures 1` refusal in
+`back/context.cpp` `load_config`, the orientation run first (`m2-orient.cfg`), **the non-convex sliver fix**
+(design M2 status: log the polygon's vertices to confirm, then draw non-convex polygons as SW's row spans;
+extend the host coverage model), then `m2-diff.cfg` / `m2-present-diff.cfg` and the acceptance under both
+Azahar backends (`AZAHAR_GRAPHICS_API=0` = software), the critic on the commit, the M2 commit and tag
+`port-stage10-M2`. The colour gate is the **neighbourhood rule** (user decision, design Review log "M2
+implementation, colour gate"). Skip "Order of work" step 1 and the session-1 parts of step 2 below.
+
 We are on Stage 10 of the Aleph One 3DS port (the optional citro3d GPU renderer behind `A1_RENDER_C3D`).
 **This session builds M2: textured walls and floors (full bright) and texture cache v1.** M2 is the first
 milestone with texture uploads and the first engine edit since M0 (hooks 2a/2b, `PATCHES.md` 46). Like
