@@ -1426,3 +1426,52 @@ V max 374 / p99 353, I max 582 / p99 549) and over the film (`m1-null-ring.cfg`,
 
 Not measured: time. Diff frames are not benchmark frames (each C3D check waits for its own
 retirement); M1 brings no speedup by design. Classic's world view was not exercised (HUD + Map only).
+
+### Stage 10 M1 — console, short check (New 3DS, 2026-11-02)
+
+`NEXT-SPRINT.md` "M1 console check, short version", run on `686e5cd01` (`build-3ds-c3d-prof`: M1's path
+plus M2 session 1, `textures 0`), HUD + Map, over 3dslink; transcripts in `build-3ds/hw/m1/` (not in git).
+
+| Launch | Result |
+| --- | --- |
+| 1, `m0-readback-cal.cfg` + `debug-perf` L0 | `readback_cal summary: 30 frames, orientation ok 30, current frame ok 30, channels ok 30, alpha ok 30, mismatched pixels 0 (sentinel 0), skipped 0` — **pass** |
+| 2, `m1-diff-walls.cfg` + `debug-perf` L0 | 20 compared, cov_mismatch **380 / 0** (edge / non-edge), band 103 882 → 0.366 %; `sentinel` 0; 0 discards; `c3d-diff.py --coverage walls` exit 0 — **pass**. Rings at phys `0x20310080` / `0x20320080`, physical range check ok |
+| command words (deterministic) | `view_frame_words=952 draw_words=254 readback_words=8`, `present_frame_words=286 present_end_words=10`: **identical to Azahar**; `prog_restore_mismatch=0` |
+| tie pixels | 440 ties, **380 tie mismatches** (Azahar 140): PICA leaves out most exact-tie pixels that SW covers; all inside the band (design M1 "Implementation notes" (a)) |
+
+Settles the readback on hardware (orientation, flags, the in-frame transfer with the retirement wait, the
+invalidate), the ranged ring flushes before the flushing split, and the ring buffers' physical range
+(design section 10 item 8). Per the kickoff, M2's texture upload code may now be written.
+
+## Stage 10 M2 session 1: conversion, cache logic, hooks, floors (Azahar — non-authoritative)
+
+Recorded 2026-11-02 on `stage10-c3d` (`f35b2d8fe` spec; `c28261369` parts 1-2, `015c8bd4a` part 3 =
+`PATCHES.md` 46, `a6d99f2d3` part 4, `c4756ffde` part 5, `b7eb81910` gate revision, `686e5cd01` review
+fixes; no tag: M2 is finished in session 2). Design section 7 "M2 specification". Builds 0 warnings; OFF
+builds' `objdump -d` differs only in one `vassert` line number (`PATCHES.md` 46); `nm` 0. Host tests
+95 164 checks, 0 failures: tiling and full conversion byte-identical to `tex3ds -f rgba8 -z none -r`
+(W 8/16/128/256); horizontal coverage model 0 mismatches on 5 257 convex polygons (ties apart).
+
+**Texcoord prediction (host, exact SW texel at the pixel centre):** walls 98.30 %, floors 89.62 % at
+`δ = −½` (26.69 % / 7.87 % at `δ = 0`), 100 % within one texel; the GPU vs the exact map 99.93 % /
+99.98 %: SW's integer mapper is the inexact side. Gate revised by the user (design Review log "M2
+implementation, colour gate"): neighbourhood rule.
+
+**Interim run** (`textures 0`, flat colour, coverage only, `classes walls,floors`; `build-3ds-c3d-prof`
+at `c4756ffde`; both Azahar backends: `graphics_api` default and 0 = software):
+
+| Run | Walls cov_mismatch edge/non-edge | Floors | Band (both) | Discards |
+| --- | --- | --- | --- | --- |
+| L0, host GPU / software | 140 / 0 | 180 / 0 | 0.150 % | 0 |
+| L6, both | 60 / 0 | 80 / 0 | 0.148 % | 0 |
+| L20, both | 72 / 0 | 72 / 0 | 0.315 % | 0 |
+| film (200 frames), both | 1 272 / 0 | 1 688 / **13** | 0.341 % | 0 |
+
+Walls equal M1's figures exactly (the shifted `w` changes no coverage). Both backends gave identical
+figures. **Finding:** the film's 13 non-edge floor pixels (frames 4, 18, 30; 0.0002 % of 7.36 M covered,
+inside M2's 0.1 % gate, not inside the interim run's 0) are a 1-row floor sliver near the horizon
+(frame 4, row 111: SW covers x 65-108, C3D x 60-108). Likely cause (UNVERIFIED): integer vertex
+rounding makes the sliver slightly non-convex; SW fills between its left and right chains, the C3D fan
+from vertex 0 covers outside them. Session 2: log such a polygon's vertices to confirm; draw non-convex
+polygons as SW's row spans (one 1-row quad per row, texcoords exact); extend the host coverage model to
+non-convex monotone polygons.

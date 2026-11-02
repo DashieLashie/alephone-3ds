@@ -1050,3 +1050,9 @@ Added 2026-10-31 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M2 spe
 Source_Files/RenderMain/shapes.cpp`, both volumes): **DIFFER: 2 lines, 0 with numbers normalised**
 (only `__LINE__` shifts; 145 403 and 139 138 preprocessed lines, stderr 0); `-fsyntax-only` exit 0,
 0 diagnostics.
+
+**3DS builds** (2026-11-02, on `686e5cd01`): the OFF builds (`build-3ds`, `build-3ds-prof`) compared with
+`d4dd81eb3` (before M2): `objdump -d` of `alephone.elf` differs in **one word** each, the line-number
+argument of `vassert` in `get_collection_headers` (`shapes.cpp`, 2314 → 2323: the 9 fenced lines above
+it), no instruction changed; `nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds
+(`build-3ds-c3d`, `build-3ds-c3d-prof` included).

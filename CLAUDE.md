@@ -21,9 +21,11 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   present): B-a measured on the console below the 0.5 ms rule; B-b is being built on its own branch `stage10-bb`
   (not merged; user decision 2026-10-26). **C (the renderer) on `stage10-c3d`: M0 done** (2026-10-27, tag
   `port-stage10-M0`, `PATCHES.md` 45); **M1 done** (2026-10-27, tag `port-stage10-M1`, Azahar only, no engine edit:
-  walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **next: M2** (user decision 2026-10-27; kickoff
-  `docs/3ds/KICKOFF_M2.md`). The console checks are deferred, but M2's texture upload code waits for
-  `NEXT-SPRINT.md` "M1 console check, short version" (two launches) to pass on the console. Another session may run Azahar on the same emulated card: take
+  walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **M2 session 1 done** (2026-11-02, no tag:
+  conversion, tiling, texture-cache logic, hooks 2a/2b = `PATCHES.md` 46, floors and texcoords, harness with
+  the user's neighbourhood colour gate; `PERF.md` "Stage 10 M2 session 1"). The **short M1 console check
+  passed** on 2026-11-02, so **next: M2 session 2** (the texture upload code, textured view frames, the
+  non-convex sliver fix, the acceptance; design section 7 "M2 specification"; kickoff `KICKOFF_M2.md`). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
@@ -80,8 +82,8 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
 2. **Every engine edit** (anything under `Source_Files/`) is fenced with `#ifdef A1_PLATFORM_3DS`, gets a numbered
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
-   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's (used), 46-48 are reserved by
-   stage 10 for M2/M6/M8; 49-55 are used or taken (55: B-b on `stage10-bb`); take 56+ for anything else.
+   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's (both used), 47-48 are reserved by
+   stage 10 for M6/M8; 49-55 are used or taken (55: B-b on `stage10-bb`); take 56+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

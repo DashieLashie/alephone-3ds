@@ -1151,6 +1151,15 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    kickoff `KICKOFF_M2.md`), console checks deferred; **M2's texture upload code waits for "M1 console
    check, short version"** (at the end of this file) to pass. The full "M1 console check" (it carries
    the M0 console check) waits for a longer session.
+   **M2 session 1 done (2026-11-02**, no tag; `PERF.md` "Stage 10 M2 session 1"): spec + critic, texture
+   conversion and tiling (tex3ds byte-identical), the pure texture cache, hooks 2a/2b (`PATCHES.md` 46),
+   floors and texcoords in the front end, the harness (neighbourhood colour gate, user decision
+   2026-10-31). Interim Azahar run (flat colour, both backends): pass except 13 film floor pixels (a
+   non-convex sliver, to fix in session 2). **"M1 console check, short version": run and passed on the
+   console 2026-11-02** (`PERF.md` "Stage 10 M1 — console, short check"). **Next: M2 session 2** (parts
+   6-7: the texture upload code, textured view frames, the sliver fix, the acceptance; design section 7
+   "M2 specification"). M2's console check (texture uploads on hardware) is folded into the full "M1
+   console check" below when M2 is done.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1408,7 +1417,9 @@ fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (register
 
 ## M1 console check, short version (15-20 min; when the user has little time)
 
-**Not run yet.** Written 2026-10-27 (user's choice: start M2, defer the full check below). Two launches
+**Run and passed on the console 2026-11-02** (`PERF.md` "Stage 10 M1 — console, short check": calibration
+30/30 ok, walls 0 non-edge, sentinel 0, command words identical to Azahar; ties 440 / 380).
+Written 2026-10-27 (user's choice: start M2, defer the full check below). Two launches
 that settle what M2's texture uploads would otherwise build on blind: the readback on hardware, the GPU
 sync and cache order (Azahar completes transfers synchronously and has no CPU cache), and the ring
 buffers' physical addresses. **Run it before M2's texture upload code is written.** The rest of the full

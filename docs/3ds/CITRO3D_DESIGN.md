@@ -2407,7 +2407,14 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (play mode, M4), any engine edit.
 
 ### M2 — textured walls and floors (full bright), texture cache v1
-- **Next (user decision 2026-10-27):** kickoff `KICKOFF_M2.md`. The upload code is written only after
+- **Status (2026-11-02): session 1 done** (parts 1-5; `PERF.md` "Stage 10 M2 session 1"; commits
+  `c28261369`..`686e5cd01`; critic on the code: APPROVE, six minors, five fixed, the sixth = the OFF-build
+  record in `PATCHES.md` 46). Interim run (flat, both Azahar backends) passes except 13 film floor pixels:
+  a non-convex 1-row sliver (fan vs SW's chain fill; UNVERIFIED cause) — session 2 draws non-convex
+  polygons as SW's row spans. **The "M1 console check, short version" passed on the console 2026-11-02**,
+  so session 2 (parts 6-7 and the acceptance) may write the upload code. Tiling: tex3ds does not flip;
+  source row j → memory row W−1−j (verified byte-for-byte; the sampling orientation is part 7's first run).
+- *Earlier:* **Next (user decision 2026-10-27):** kickoff `KICKOFF_M2.md`. The upload code is written only after
   `NEXT-SPRINT.md` "M1 console check, short version" has passed on the console.
 - Add: `core/tex_convert.cpp`, `core/tiling.cpp`, `back/texcache.cpp` (3.3);
   floors/ceilings/liquids, transparent walls, `_SCALE_2X/4X`; hooks 2a/2b
@@ -2854,6 +2861,8 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    edge), which Azahar leaves out on top edges where SW covers them. On the console: PICA's tie rule
    from the DIFF lines' `ties` / `tie_mismatch`, and whether float24 positions (clip × w) ever move a
    non-tie pixel on a shared edge (`NEXT-SPRINT.md` "M1 console check" step 5).
+   **Console 2026-11-02 (short check, L0, 20 frames):** 440 ties, 380 tie mismatches (Azahar 140): PICA
+   leaves out most exact ties SW covers; 0 non-tie mismatches.
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -2873,6 +2882,11 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    first readbacks of real draws: on the console `sentinel=0` and 0 non-edge mismatches prove the ring
    flushes, the flushing split, the retirement and the invalidate (`NEXT-SPRINT.md` "M1 console
    check").
+   **Console 2026-11-02 (short check, `PERF.md` "Stage 10 M1 — console, short check"):** calibration 30/30
+   ok (orientation, current frame, channels, alpha; 0 mismatched, sentinel 0); walls diff on L0: 0 non-edge,
+   `sentinel=0`, 0 discards, rings' physical range ok, command words identical to Azahar. **Settled** for
+   the readback, the ring flushes and the flushing split (L0, HUD + Map); the resize config, Classic and
+   L6/L20 wait for the full runbook.
 9. `C3D_FrameEnd(GX_CMDLIST_FLUSH)` + ranged flushes vs the whole-heap flush.
 10. Level-start hitch with the promotion cap (TextureCopy throughput, PPF
     latency); whether pre-warming is needed.
