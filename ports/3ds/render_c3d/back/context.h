@@ -13,6 +13,7 @@
 
 #include "../core/config.h"
 #include "../core/gate.h"
+#include "../core/gx_queue.h"
 
 #include <cstdint>
 
@@ -68,6 +69,9 @@ bool release_pending();
 // An operation that enters citro3d's GX queue is about to be issued: false = over the
 // budget, do not issue it. Call right before each C3D_Sync* / C3D_RenderTargetClear.
 bool gx_take();
+// The frame's queue accounting itself, for the texture cache's promotion rule (core/texcache
+// next_promotion takes its entry from it, with the same cost as gx_take()).
+GxQueue& gx_queue();
 // Wrapper form of gx_take(): runs `op` only if the budget allows.
 template <class F>
 inline bool gx_op(F&& op)
@@ -99,6 +103,11 @@ inline bool gx_split(F&& op)
 // typedef); nullptr before the first bind. `program_binds()` counts the recorded binds.
 void* program_recorded();
 unsigned program_binds();
+// M2: the same for the texture on unit 0 (-Wl,--wrap=C3D_TexBind): the C3D_Tex* last bound to unit 0 by
+// anyone but back/draw.cpp (which binds through __real_C3D_TexBind): the present's (present.cpp binds it
+// once at init). `tex_binds()` counts the recorded binds of every unit.
+void* tex_recorded();
+unsigned tex_binds();
 // The C3D_Init command-buffer size in words (cfg.cmdbuf_kib * 256).
 uint32_t cmdbuf_size_words();
 // Words of one C3D_DrawElements (state flush included) and of the readback sequence (flushing split +

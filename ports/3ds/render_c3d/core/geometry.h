@@ -13,6 +13,8 @@
 	  wall_attrs,      M2's per-vertex (w, s, t) of walls and floors, evaluated at (X + delta, Y + delta)
 	  floor_attrs      (design 7, M2 specification "Texcoords"), the w clamp and the per-polygon floor(min)
 	  fan_indices      the u16 triangle fan of a convex n-gon
+	  sw_spans,        SW's row/column tables of a polygon, and the convexity test that picks spans over a
+	  convex_cw        fan (design 7, M2 status: the non-convex sliver)
 	  DrawKey          the batching key (M0's null-mode key) and c3d_supports() (M2's draw set)
 	  shape_colour     the flat colour of a ShapeDesc (the textures 0 path)
 	  cmdbuf_words,    the command-buffer measurements and the reserve test of 2.4 and the M1
@@ -79,6 +81,23 @@ enum class Accept
 // SW's checks in SW's order: the bounds test comes before the min == max test (:449 before :459).
 Accept accept_polygon(const Point2* v, int n, int w, int h, Orient orient = Orient::Vertical);
 inline bool accepted(Accept a) { return a == Accept::Draw; }
+
+// One line of a polygon as SW's mapper writes it: Horizontal = row `line`, columns [a0, a1); Vertical = column
+// `line`, rows [a0, a1). a1 <= a0 writes nothing.
+struct Span
+{
+	int line, a0, a1;
+};
+// SW's tables of a polygon that accept_polygon(..., orient) draws, transliterated on shorts (horizontal:
+// scottish_textures.cpp:213-300 + build_x_table :1173-1223; vertical: :429-505 + build_y_table :1231-1290):
+// one span per line from the highest (horizontal) / leftmost (vertical) vertex. Returns the number of lines,
+// or -1 (a walk refused, or more than `max` lines). Exact for any polygon the walks accept, non-convex ones
+// included: the M2 fix for non-convex polygons draws these spans (one 1-line quad each) instead of a fan.
+int sw_spans(const Point2* v, int n, Orient orient, Span* out, int max);
+// Every vertex on the inner side of (or on) every edge of a polygon of positive area in y-down space
+// (accept_polygon's Draw). Then the fan from vertex 0 covers what SW's chains cover, ties apart; otherwise
+// (rounded vertices can make a thin polygon slightly concave) it may cover pixels outside them.
+bool convex_cw(const Point2* v, int n);
 
 // The tie pixels of a polygon (integer vertices): pixels (k, m) whose centre (k+1/2, m+1/2) lies exactly on
 // an edge, within the edge's x-span (sorted endpoints x0 < x1, columns x0 <= k < x1). Vertical and horizontal
@@ -180,12 +199,12 @@ struct Rgb
 };
 Rgb shape_colour(uint16_t shape);
 
-// 2.4 / M1: the command-buffer reserves, 2x the worst case measured in the M1 acceptance runs (Azahar;
-// command words are deterministic): 254 words for one C3D_DrawElements with citro3d's state flush (first
-// draw of a view frame: world program upload, AttrInfo, BufInfo, TEV, uniforms); 10 words for the end
-// (the readback's flushing split + transfer, and C3D_FrameEnd's own split on a discard path).
-// docs/3ds/CITRO3D_DESIGN.md, M1 status.
-constexpr uint32_t kDrawReserveWords = 508;
+// 2.4 / M1 / M2: the command-buffer reserves, 2x the worst case measured in the acceptance runs (Azahar;
+// command words are deterministic): 268 words for one C3D_DrawElements with citro3d's state flush (first
+// draw of a textured view frame: world program upload, AttrInfo, BufInfo, TEV, uniforms, texture unit 0;
+// M1's flat first draw was 254); 10 words for the end (the readback's flushing split + transfer, and
+// C3D_FrameEnd's own split on a discard path). docs/3ds/CITRO3D_DESIGN.md, M1 and M2 status.
+constexpr uint32_t kDrawReserveWords = 536;
 constexpr uint32_t kEndReserveWords = 20;
 
 struct CmdBufWords

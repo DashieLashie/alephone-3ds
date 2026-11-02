@@ -1255,7 +1255,7 @@ static void test_colour_and_cmdbuf()
 
 	// The reserve test: size - offset >= draw + end + extra.
 	CHECK(reserve_ok(131072, 0, kDrawReserveWords, kEndReserveWords, 0));
-	CHECK(kDrawReserveWords == 508 && kEndReserveWords == 20);
+	CHECK(kDrawReserveWords == 536 && kEndReserveWords == 20);
 	CHECK(reserve_ok(4096, 2048, 1024, 1024, 0) && !reserve_ok(4096, 2049, 1024, 1024, 0));
 	CHECK(reserve_ok(4096, 2048 - 5, 1024, 1024, 5) && !reserve_ok(4096, 2048 - 5, 1024, 1024, 6));
 	CHECK(!reserve_ok(131072, 0, 1024, 1024, 1000000));   // reserve_extra forces a refusal
@@ -1544,6 +1544,7 @@ static void coverage_model(Orient orient, CoverFn cover, uint64_t seed, const ch
 	unsigned long n_poly = 0, n_draw = 0, n_walk = 0, n_bounds = 0, n_degen = 0, n_area = 0;
 	unsigned long walk_mismatch = 0, area_sw_wrote = 0, refused_sw_wrote = 0, outside_writes = 0;
 	unsigned long identical_px = 0, tie_px = 0, tie_sw_covered = 0, tie_sw_clear = 0, bad_px = 0, drawn_cmp = 0, empty_drawn = 0;
+	unsigned long span_mismatch = 0, convex_mismatch = 0, nonconvex_drawn = 0;
 	std::vector<uint8_t> cov(static_cast<size_t>(W) * H);
 	for (int it = 0; it < 12000; ++it)
 	{
@@ -1581,6 +1582,27 @@ static void coverage_model(Orient orient, CoverFn cover, uint64_t seed, const ch
 		}
 		if (a != Accept::Draw)
 			continue;
+
+		// sw_spans (the drawing of non-convex polygons, M2 status) reproduces SW's coverage exactly, for every
+		// accepted polygon, concave ones included; convex_cw agrees with is_convex.
+		{
+			Span spans[1024];
+			const int ns = sw_spans(poly.data(), n, orient, spans, 1024);
+			std::vector<uint8_t> scov(cov.size(), 0);
+			bool ok = ns > 0;
+			for (int k = 0; ok && k < ns; ++k)
+				for (int t = spans[k].a0; t < spans[k].a1; ++t)
+				{
+					const int x = orient == Orient::Horizontal ? t : spans[k].line;
+					const int y = orient == Orient::Horizontal ? spans[k].line : t;
+					if (x >= 0 && x < W && y >= 0 && y < H)
+						scov[static_cast<size_t>(y) * W + x] = 1;
+				}
+			span_mismatch += !ok || scov != cov;
+			const bool cvx = is_convex(poly, true);
+			convex_mismatch += convex_cw(poly.data(), n) != cvx;
+			nonconvex_drawn += !cvx;
+		}
 
 		// Ideal pixel-centre rasterisation of the fan = the polygon's interior, in doubled coordinates.
 		// Only for convex polygons (all cross products of consecutive edges the same sign).
@@ -1654,6 +1676,9 @@ static void coverage_model(Orient orient, CoverFn cover, uint64_t seed, const ch
 	CHECK(walk_mismatch == 0 && refused_sw_wrote == 0 && area_sw_wrote == 0 && outside_writes == 0);
 	CHECK(bad_px == 0 && drawn_cmp > 1500);
 	CHECK(tie_px > 0);
+	std::printf("%s: sw_spans vs SW coverage: %lu mismatching polygons (%lu non-convex drawn); convex_cw vs is_convex "
+	            "differ %lu\n", label, span_mismatch, nonconvex_drawn, convex_mismatch);
+	CHECK(span_mismatch == 0 && convex_mismatch == 0 && nonconvex_drawn > 50);
 }
 
 static void test_acceptance_and_coverage()
@@ -2317,8 +2342,10 @@ public:
 	uintptr_t next = 0x1000;
 	int fail_next = 0;            // fail the next N allocations
 	unsigned bad_release = 0, allocs = 0, releases = 0;
-	void* alloc(TexPool pool, uint32_t bytes) override
+	void* alloc(TexPool pool, unsigned W, TexKind kind, uint32_t bytes) override
 	{
+		if (bytes != tex_bytes(W, kind))
+			++bad_release;   // the size the caps count must be the texture's
 		if (fail_next > 0)
 		{
 			--fail_next;
@@ -2411,6 +2438,13 @@ static void test_cache_keys_generations()
 	CHECK(fa.live.size() == 1 && fa.releases == 4 && c.retiring_count() == 0 && c.stats().deferred_frees == 4);
 	CHECK(c.used_bytes(TexPool::Linear) == 65536 && fa.bad_release == 0);
 	CHECK(c.lookup(a) == na);
+	// forget(): a fresh slot whose conversion failed goes at once (texture and slot), the others stay
+	TexSlot* nf = c.create(K(9), 128);
+	CHECK(nf && fa.live.size() == 2 && c.used_bytes(TexPool::Linear) == 2 * 65536);
+	c.forget(nf);
+	CHECK(fa.live.size() == 1 && c.used_bytes(TexPool::Linear) == 65536 && c.lookup(K(9)) == nullptr && c.lookup(a) == na);
+	c.forget(nullptr);
+	CHECK(fa.bad_release == 0);
 	// bumping twice before a retire is fine
 	c.bump_generation();
 	c.bump_generation();
@@ -3070,7 +3104,7 @@ static void test_texcoords_vs_sw()
 static void test_config_m2_front()
 {
 	Config d;
-	CHECK(!d.textures && d.uv_half && d.diff_tol == 2);
+	CHECK(d.textures && d.uv_half && d.diff_tol == 2);
 	Config c;
 	CHECK(config_apply(c, "textures", "1") && c.textures && config_apply(c, "textures", "0") && !c.textures);
 	CHECK(!config_apply(c, "textures", "2") && !config_apply(c, "textures", "yes") && !config_apply(c, "textures", "") && !c.textures);

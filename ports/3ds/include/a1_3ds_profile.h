@@ -44,6 +44,7 @@ enum Zone
 	C3dDiff,    // M0 diff harness, the whole of a diff frame (nested in Render; diff frames are not benchmark frames)
 	C3dReadback, // M0 view readback: out-of-frame transfer + cache invalidate + conversion (nested in Render)
 	C3dDraw,    // M1 view frame: the C3D side's draw submission, ring writes and flush (nested in c3d_diff)
+	C3dTex,     // M2 texture uploads: conversion into a linear texture, its flush, VRAM promotions issued (nested in c3d_draw)
 #endif
 	kZoneCount
 };

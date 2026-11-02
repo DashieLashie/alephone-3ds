@@ -75,6 +75,9 @@ bool s_view_frame_ran = false;       // a view frame ran since the present's las
 // M1: the program record (-Wl,--wrap=C3D_BindProgram) and the command-buffer measurements.
 shaderProgram_s* s_last_program = nullptr;
 unsigned s_program_binds = 0;
+// M2: the texture record (-Wl,--wrap=C3D_TexBind), unit 0.
+C3D_Tex* s_last_tex0 = nullptr;
+unsigned s_tex_binds = 0;
 const uint32_t* s_p0 = nullptr;      // gpuCmdBuf + gpuCmdBufOffset right after frame_begin() returned Ok
 struct CmdBufMax
 {
@@ -107,13 +110,6 @@ void load_config()
 	text << in.rdbuf();
 	std::vector<std::string> problems;
 	config_parse(s_cfg, text.str(), problems);
-	// M2 session 1: no texture upload yet (design 7, M2 parts 6-7), so `textures 1` would draw transparent
-	// walls solid and judge hash colours. Part 7 removes this.
-	if (s_cfg.textures)
-	{
-		s_cfg.textures = false;
-		problems.push_back("textures 1: not before M2 part 7 (no texture upload yet); using textures 0");
-	}
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
 	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
@@ -323,7 +319,8 @@ void release_and_fini()
 	C3D_Fini();
 	present_free();
 	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
-	texcache_release_all();   // every texture slot (part 6: their C3D_Tex)
+	texcache_log("final");
+	texcache_release_all();   // every texture slot and its C3D_Tex (C3D_TexDelete only frees memory)
 	draw_free();   // the world program and the rings (not on the abandon path, which returns above)
 	s_off = true;
 	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",
@@ -550,6 +547,21 @@ bool gx_take_split()
 	return s_gx.take_split();
 }
 
+GxQueue& gx_queue()
+{
+	return s_gx;
+}
+
+void* tex_recorded()
+{
+	return s_last_tex0;
+}
+
+unsigned tex_binds()
+{
+	return s_tex_binds;
+}
+
 void* program_recorded()
 {
 	return s_last_program;
@@ -579,7 +591,7 @@ void cmdbuf_log(const char* tag)
 {
 	if (s_cb.frames[0] + s_cb.frames[1] == 0)
 		return;
-	char draw[384];
+	char draw[512];
 	draw_stats_text(draw, sizeof draw);
 	printf("[c3d] cmdbuf %s: size_words=%lu view_frame_words=%lu view_end_words=%lu present_frame_words=%lu "
 	       "present_end_words=%lu draw_words=%lu readback_words=%lu usage_max=%.4f binds=%u reserves=%lu+%lu%s\n",
@@ -652,6 +664,7 @@ void stats_tick()
 	{
 		s_cb_views_logged = s_cb.frames[1];
 		cmdbuf_log("stats");
+		texcache_log("stats");
 	}
 	s_gpu_ms[0] = s_gpu_ms[1] = 0;
 	s_gpu_n[0] = s_gpu_n[1] = 0;
@@ -672,6 +685,25 @@ extern "C" void __wrap_C3D_BindProgram(shaderProgram_s* program)
 		printf("[c3d] program: first C3D_BindProgram recorded %p (the present's, at present_init)\n",
 		       static_cast<void*>(program));
 	__real_C3D_BindProgram(program);
+}
+
+// -Wl,--wrap=C3D_TexBind (CMakeLists.txt): records the texture last bound to unit 0 by anyone but
+// back/draw.cpp, which binds through __real_C3D_TexBind, so a textured view frame can put the present's
+// back (M2 specification, "Texture binding and its restore"; citro3d has no getter: texture.o C3D_TexBind
+// only stores the pointer in the context and sets a dirty bit). Logs the first unit-0 pointer.
+extern "C" void __real_C3D_TexBind(int unitId, C3D_Tex* tex);
+extern "C" void __wrap_C3D_TexBind(int unitId, C3D_Tex* tex)
+{
+	namespace b = a1_c3d::back;
+	++b::s_tex_binds;
+	if (unitId == 0)
+	{
+		if (!b::s_last_tex0)
+			printf("[c3d] texture: first C3D_TexBind(0) recorded %p (the present's, at present_init)\n",
+			       static_cast<void*>(tex));
+		b::s_last_tex0 = tex;
+	}
+	__real_C3D_TexBind(unitId, tex);
 }
 
 // --- the port-internal API (a1_c3d_port.h) -------------------------------------

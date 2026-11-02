@@ -76,9 +76,8 @@
 
 	Keys of M2 (design 7, "M2 specification", "Keys"):
 
-	  textures 0|1      default 0 until the textured view frames exist (M2 part 7): 0 = walls and
-	                    floors flat-coloured (coverage only; a wall with a _TRANSPARENT_BIT bitmap is
-	                    excluded as in M1), 1 = textured
+	  textures 0|1      default 1 (textured: M2 part 7); 0 = walls and floors flat-coloured
+	                    (coverage only; a wall with a _TRANSPARENT_BIT bitmap is excluded as in M1)
 	  uv_half 0|1       default 1: the vertex attributes (texcoords and w) are evaluated at the
 	                    vertex position shifted by -1/2 pixel in x and y (SW samples a pixel's integer
 	                    corner, the GPU its centre); 0 = at the vertex itself
@@ -136,7 +135,7 @@ struct Config
 	unsigned ring_indices = 2048;
 	unsigned reserve_extra = 0;
 	// M2
-	bool textures = false;
+	bool textures = true;
 	bool uv_half = true;
 	unsigned diff_tol = 2;
 	unsigned vram_cap = 3584;               // KiB

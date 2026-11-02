@@ -42,8 +42,9 @@
 #include "a1_3ds_profile.h"
 #endif
 
-// back/context.cpp: -Wl,--wrap=C3D_BindProgram. Everything below binds through the real one.
+// back/context.cpp: -Wl,--wrap=C3D_BindProgram and C3D_TexBind. Everything below binds through the real ones.
 extern "C" void __real_C3D_BindProgram(shaderProgram_s* program);
+extern "C" void __real_C3D_TexBind(int unitId, C3D_Tex* tex);
 
 namespace a1_c3d {
 namespace back {
@@ -86,6 +87,8 @@ struct Frame
 	DrawKey pkey{};
 	unsigned pfirst = 0, pcount = 0;   // index offset in the half, index count
 	shaderProgram_s* saved_prog = nullptr;
+	void* bound_tex = nullptr;         // what this frame bound to unit 0 (null: nothing, the present's stays)
+	unsigned tex_binds0 = 0;           // tex_binds() at the start: a change means someone else bound mid-frame
 	uint32_t sentinel_argb = 0;
 	int w = 0, h = 0;
 	int half = 0;
@@ -103,6 +106,7 @@ struct Counters
 	unsigned discards[static_cast<int>(DiscardReason::kCount)] = {};
 	unsigned skips[static_cast<int>(SkipReason::kCount)] = {};
 	unsigned prog_restore_mismatch = 0;
+	unsigned tex_bind_calls = 0, tex_restore_mismatch = 0;
 } s_n;
 
 // --- helpers ---
@@ -272,6 +276,16 @@ void restore_state()
 	C3D_SetBufInfo(&s_saved_buf);     // copy semantics: M0, buffers.h:21
 	if (program_recorded() != static_cast<void*>(s_f.saved_prog))
 		++s_n.prog_restore_mismatch;
+	// M2 "Texture binding and its restore": unit 0 back to the present's texture, if this frame bound one.
+	// A mismatch: no texture recorded (nothing to restore), or a recorded bind happened during the frame.
+	if (s_f.bound_tex)
+	{
+		C3D_Tex* const present_tex = static_cast<C3D_Tex*>(tex_recorded());
+		__real_C3D_TexBind(0, present_tex);
+		s_f.bound_tex = nullptr;
+		if (!present_tex || tex_binds() != s_f.tex_binds0)
+			++s_n.tex_restore_mismatch;
+	}
 }
 
 // The end of a frame that is given up (or never drew): ranged flush of what was written, normal end.
@@ -304,7 +318,7 @@ const char* skip_name(SkipReason r)
 
 const char* discard_name(DiscardReason r)
 {
-	static const char* const names[] = {"unsupported", "ring", "cmdbuf", "gx", "begin"};
+	static const char* const names[] = {"unsupported", "ring", "cmdbuf", "gx", "begin", "tex"};
 	return names[static_cast<int>(r)];
 }
 
@@ -372,6 +386,11 @@ ViewBegin view_begin(int w, int h)
 	if (fs != FrameStart::Ok)
 		return discarded_at_begin(DiscardReason::Begin);
 	s_f.open = true;
+	s_f.tex_binds0 = tex_binds();
+
+	// The texture cache's frame: what retired frames left is freed now (frame_begin returned), then this
+	// frame's VRAM promotions, before the clear (both cost 1 GX entry with an empty command buffer, 2.4).
+	texcache_frame_start(s_k);
 
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
 	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered".
@@ -406,11 +425,13 @@ ViewBegin view_begin(int w, int h)
 	C3D_AlphaTest(true, GPU_GEQUAL, 128);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 
-	// TEV stage 0 = the vertex colour, RGB and alpha (texenv.h:49-88); stages 1-5 and C3D_TexBind(0) are
-	// not touched.
+	// TEV stage 0, RGB and alpha (texenv.h:49-88): texture 0 with `textures 1` (M2 "View frame with
+	// textures"; the bind comes with the first draw), else the vertex colour (M1; C3D_TexBind(0) is then not
+	// touched). Stages 1-5 are not touched; the present sets its own stage 0 before each draw.
 	C3D_TexEnv* env = C3D_GetTexEnv(0);
 	C3D_TexEnvInit(env);
-	C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	const GPU_TEVSRC src = config().textures ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR;
+	C3D_TexEnvSrc(env, C3D_Both, src, src, src);
 	C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
 
 	// Pixels, x right, y down (M0's calibrated value); after the bind, which reloads the constants.
@@ -421,7 +442,7 @@ ViewBegin view_begin(int w, int h)
 	return ViewBegin{ViewBegin::Kind::Ok, SkipReason::Down, DiscardReason::Unsupported};
 }
 
-bool view_polygon(const Vertex* v, int n, const DrawKey& key)
+bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* tex)
 {
 	if (!s_f.open || s_f.discarded)
 		return false;
@@ -441,6 +462,29 @@ bool view_polygon(const Vertex* v, int n, const DrawKey& key)
 		issue_pending();
 		if (s_f.discarded)
 			return false;
+		if (tex)
+		{
+			void* t = nullptr;
+			switch (texcache_get(*tex, &t))
+			{
+			case TexGet::Ok:
+				break;
+			case TexGet::Discard:
+				discard(DiscardReason::Tex);
+				return false;
+			case TexGet::Unsupported:
+				discard(DiscardReason::Unsupported);
+				return false;
+			}
+			// After the previous draw was issued, before this one: citro3d reads the C3D_Tex at the next
+			// draw's state flush (texture.o C3D_TexBind: pointer + dirty bit only).
+			if (t != s_f.bound_tex)
+			{
+				__real_C3D_TexBind(0, static_cast<C3D_Tex*>(t));
+				s_f.bound_tex = t;
+				++s_n.tex_bind_calls;
+			}
+		}
 		s_f.pending = true;
 		s_f.pkey = key;
 		s_f.pfirst = s_ring.index_used();
@@ -541,12 +585,13 @@ int draw_stats_text(char* buf, size_t size)
 	const Counters& n = s_n;
 	return snprintf(buf, size,
 	                " views=%u draws=%u polys=%u verts=%u idx=%u ring_hw_v=%u,%u ring_hw_i=%u,%u "
-	                "discards=%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin) skips=%u/%u/%u/%u(down/gate/size/pref) "
-	                "prog_restore_mismatch=%u",
+	                "discards=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) skips=%u/%u/%u/%u(down/gate/size/pref) "
+	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
-	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.skips[0],
-	                n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch);
+	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.discards[5],
+	                n.skips[0], n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch, n.tex_bind_calls,
+	                n.tex_restore_mismatch);
 }
 
 } // namespace back

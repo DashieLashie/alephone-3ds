@@ -25,7 +25,7 @@ COLS = ["fps", "frame", "busy", "max", "world", "render", "hud", "blit", "presen
 # Zones of the citro3d back end (A1_RENDER_C3D profile builds), inside "present".
 C3D_COLS = ["c3d_wait", "c3d_fill", "c3d_upload", "c3d_vblank"]
 # M0 zones, nested in "render" (null mode, the diff harness, the view readback); not part of "present total".
-M0_COLS = ["c3d_null", "c3d_diff", "c3d_readback", "c3d_draw"]
+M0_COLS = ["c3d_null", "c3d_diff", "c3d_readback", "c3d_draw", "c3d_tex"]
 
 
 def load(path):

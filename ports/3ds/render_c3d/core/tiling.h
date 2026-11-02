@@ -36,8 +36,14 @@ inline size_t tile_index(unsigned W, unsigned m, unsigned s)
 	return (static_cast<size_t>(m >> 3) * (W >> 3) + (s >> 3)) * 64 + morton8(s, m);
 }
 
-// The memory row that holds source row j of a W-row image (the orientation rule above).
+// The memory row that holds source row j of a W-row image (the orientation rule above). A1_C3D_TILE_NOFLIP
+// (cmake -DA1_C3D_TILE_NOFLIP=ON, a test build only) stores row j in memory row j: M2's orientation run
+// (design 7, M2 specification "View frame with textures") compares both orders.
+#ifdef A1_C3D_TILE_NOFLIP
+inline unsigned tile_memory_row(unsigned, unsigned j) { return j; }
+#else
 inline unsigned tile_memory_row(unsigned W, unsigned j) { return W - 1 - j; }
+#endif
 
 // Tiles a linear W x W image (row m at src + m * W * texel_bytes, texel_bytes 1 or 4 or any size)
 // into dst (W * W * texel_bytes bytes; src and dst must not overlap). No row flip.

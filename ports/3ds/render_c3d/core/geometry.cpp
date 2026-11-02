@@ -14,6 +14,7 @@
 #include <utility>
 
 #include <cmath>
+#include <cstdlib>
 
 namespace a1_c3d {
 
@@ -105,6 +106,189 @@ Accept accept_polygon(const Point2* v, int n, int w, int h, Orient orient)
 	if (area2 <= 0)
 		return Accept::Area;
 	return Accept::Draw;
+}
+
+namespace {
+
+short sgn16(short v) { return v < 0 ? -1 : (v > 0 ? 1 : 0); }
+
+// scottish_textures.cpp:1173-1223, on shorts as in the original: for each row of the edge (x0,y0)-(x1,y1),
+// y0 < y1, the x the horizontal mapper starts or stops the row at. NULL = refused (dy < 0).
+short* build_x_table(short* table, short x0, short y0, short x1, short y1)
+{
+	short dx, dy, adx, ady;
+	short x, d, delta_d, d_max;
+	short* record;
+	dx = static_cast<short>(x1 - x0), adx = static_cast<short>(std::abs(dx)), dx = sgn16(dx);
+	dy = static_cast<short>(y1 - y0), ady = static_cast<short>(std::abs(dy)), dy = sgn16(dy);
+	if (dy > 0)
+	{
+		x = x0;
+		record = table;
+		if (adx >= ady)
+		{
+			d = static_cast<short>(adx - ady), delta_d = static_cast<short>(-2 * ady), d_max = static_cast<short>(2 * adx);
+			while ((adx -= 1) >= 0)
+			{
+				if (d < 0)
+					d = static_cast<short>(d + d_max), *record++ = x, ady -= 1;
+				x = static_cast<short>(x + dx), d = static_cast<short>(d + delta_d);
+			}
+			if (ady == 1)
+				*record++ = x;
+		}
+		else
+		{
+			d = static_cast<short>(ady - adx), delta_d = static_cast<short>(-2 * adx), d_max = static_cast<short>(2 * ady);
+			while ((ady -= 1) >= 0)
+			{
+				if (d < 0)
+					x = static_cast<short>(x + dx), d = static_cast<short>(d + d_max);
+				*record++ = x;
+				d = static_cast<short>(d + delta_d);
+			}
+		}
+	}
+	else if (dy < 0)
+		return nullptr;
+	return table;
+}
+
+// scottish_textures.cpp:1231-1290, on shorts: for each column of the edge, x0 <= x1, the y the vertical
+// mapper starts or stops the column at (a negative dy fills the table backwards). NULL = refused (dx < 0).
+short* build_y_table(short* table, short x0, short y0, short x1, short y1)
+{
+	short dx, dy, adx, ady;
+	short y, d, delta_d, d_max;
+	short* record;
+	dx = static_cast<short>(x1 - x0), adx = static_cast<short>(std::abs(dx)), dx = sgn16(dx);
+	dy = static_cast<short>(y1 - y0), ady = static_cast<short>(std::abs(dy)), dy = sgn16(dy);
+	if (dx < 0)
+		return nullptr;
+	if (dy >= 0)
+		y = y0, record = table;
+	else
+		y = y1, record = table + adx;
+	auto put = [&](short value) {
+		if (dy >= 0)
+			*record++ = value;
+		else
+			*--record = value;
+	};
+	if (adx >= ady)
+	{
+		d = static_cast<short>(adx - ady), delta_d = static_cast<short>(-2 * ady), d_max = static_cast<short>(2 * adx);
+		while ((adx -= 1) >= 0)
+		{
+			if (d < 0)
+				y = static_cast<short>(y + 1), d = static_cast<short>(d + d_max);
+			put(y);
+			d = static_cast<short>(d + delta_d);
+		}
+	}
+	else
+	{
+		d = static_cast<short>(ady - adx), delta_d = static_cast<short>(-2 * adx), d_max = static_cast<short>(2 * ady);
+		while ((ady -= 1) >= 0)
+		{
+			if (d < 0)
+			{
+				d = static_cast<short>(d + d_max), adx -= 1;
+				put(y);
+			}
+			y = static_cast<short>(y + 1), d = static_cast<short>(d + delta_d);
+		}
+		if (adx == 1)
+			put(y);
+	}
+	return table;
+}
+
+} // namespace
+
+int sw_spans(const Point2* v, int n, Orient orient, Span* out, int max)
+{
+	if (n < 3)
+		return -1;
+	const bool horiz = orient == Orient::Horizontal;
+	auto major = [&](int i) { return horiz ? v[i].y : v[i].x; };
+	int highest = 0, lowest = 0;
+	for (int i = 1; i < n; ++i)
+	{
+		if (major(i) < major(highest))
+			highest = i;
+		if (major(i) > major(lowest))
+			lowest = i;
+	}
+	const int total = major(lowest) - major(highest);
+	if (total <= 0 || total > max)
+		return -1;
+	// Tables of `total` lines plus the slack the walks may write past the end (SW's scratch tables are larger).
+	constexpr int kTable = 2048;
+	if (total + 2 > kTable)
+		return -1;
+	short left_table[kTable], right_table[kTable];
+	auto build = [&](short* table, int from, int to) {
+		const short x0 = static_cast<short>(v[from].x), y0 = static_cast<short>(v[from].y);
+		const short x1 = static_cast<short>(v[to].x), y1 = static_cast<short>(v[to].y);
+		return horiz ? build_x_table(table, x0, y0, x1, y1) : build_y_table(table, x0, y0, x1, y1);
+	};
+	// Horizontal: the left table walks to lower indices (counter-clockwise), the right one to higher; vertical:
+	// the other way round (scottish_textures.cpp:262, :276 and :479-505).
+	const int left_step = horiz ? n - 1 : 1, right_step = horiz ? 1 : n - 1;
+	int left_count = 0, right_count = 0, agg_left = 0, agg_right = 0, remaining = total;
+	int left = highest, right = highest;
+	while (remaining > 0)
+	{
+		if (left_count <= 0)
+		{
+			do
+			{
+				const int next = (left + left_step) % n;
+				left_count = major(next) - major(left);
+				if (left_count < 0 || agg_left + left_count > total || !build(left_table + agg_left, left, next))
+					return -1;
+				agg_left += left_count;
+				left = next;
+			} while (!left_count);
+		}
+		if (right_count <= 0)
+		{
+			do
+			{
+				const int next = (right + right_step) % n;
+				right_count = major(next) - major(right);
+				if (right_count < 0 || agg_right + right_count > total || !build(right_table + agg_right, right, next))
+					return -1;
+				agg_right += right_count;
+				right = next;
+			} while (!right_count);
+		}
+		const int delta = left_count < right_count ? left_count : right_count;
+		remaining -= delta;
+		left_count -= delta;
+		right_count -= delta;
+	}
+	const int first = major(highest);
+	for (int k = 0; k < total; ++k)
+		out[k] = Span{first + k, left_table[k], right_table[k]};
+	return total;
+}
+
+bool convex_cw(const Point2* v, int n)
+{
+	for (int i = 0; i < n; ++i)
+	{
+		const Point2& a = v[i];
+		const Point2& b = v[i + 1 == n ? 0 : i + 1];
+		for (int j = 0; j < n; ++j)
+		{
+			const int64_t cr = static_cast<int64_t>(b.x - a.x) * (v[j].y - a.y) - static_cast<int64_t>(b.y - a.y) * (v[j].x - a.x);
+			if (cr < 0)
+				return false;
+		}
+	}
+	return true;
 }
 
 int fan_indices(uint16_t* out, int n, unsigned base)

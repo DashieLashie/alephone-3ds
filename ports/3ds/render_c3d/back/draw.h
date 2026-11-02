@@ -18,6 +18,7 @@
 #define A1_C3D_BACK_DRAW_H
 
 #include "../core/geometry.h"
+#include "texcache.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,8 +32,9 @@ namespace back {
 // and floors then, M2 specification), decided by the front end before view_begin.
 enum class SkipReason : uint8_t { Down, Gate, Size, Pref, kCount };
 // The frame was started and is given up: no more draws, C3D_FrameEnd normally, no readback. The check
-// is "discarded (unsupported|ring|cmdbuf|gx|begin)" and not compared.
-enum class DiscardReason : uint8_t { Unsupported, Ring, Cmdbuf, Gx, Begin, kCount };
+// is "discarded (unsupported|ring|cmdbuf|gx|begin|tex)" and not compared. Tex: a texture found no room
+// in its pool even after eviction (M2 "Pools, caps, allocation").
+enum class DiscardReason : uint8_t { Unsupported, Ring, Cmdbuf, Gx, Begin, Tex, kCount };
 
 const char* skip_name(SkipReason r);
 const char* discard_name(DiscardReason r);
@@ -47,18 +49,22 @@ struct ViewBegin
 };
 
 // Starts one C3D view frame for a w x h view (the harness's replay of one recording): the gates and the
-// size, the target and staging out of frame, the sentinel fill, frame_begin, the clear (before the first
-// draw), C3D_FrameDrawOn, the state save, the world program, attributes, buffers and GPU state.
+// size, the target and staging out of frame, the sentinel fill, frame_begin, the texture cache's frame start
+// (retired frees, VRAM promotions), the clear (before the first draw), C3D_FrameDrawOn, the state save, the
+// world program, attributes, buffers and GPU state; TEV stage 0 = texture 0 with `textures 1`, else the
+// vertex colour.
 ViewBegin view_begin(int w, int h);
 // The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
 ViewBegin view_skip(SkipReason reason);
 
 // Appends one accepted polygon (3..16 vertices, already through core's accept_polygon, positions in view
 // pixels, w clamped, colour set) to the current ring half, fans it, and extends the pending draw when
-// `key` equals the previous polygon's, else issues the pending draw and starts a new one. False once the
-// frame is discarded (ring full, command-buffer reserve, or an earlier view_discard); the polygon is then
-// not drawn.
-bool view_polygon(const Vertex* v, int n, const DrawKey& key);
+// `key` equals the previous polygon's, else issues the pending draw and starts a new one; a new draw with
+// `tex` looks its texture up (or converts it, texcache_get) and binds it to unit 0 when it changes. False
+// once the frame is discarded (ring full, command-buffer reserve, no room for a texture, or an earlier
+// view_discard); the polygon is then not drawn. Equal keys imply equal textures (the key holds the bitmap,
+// the tables and the class, which fix the kind).
+bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* tex = nullptr);
 
 // Gives the frame up (first reason wins): the pending draw is dropped, nothing more is drawn. view_end()
 // still closes the frame.
@@ -70,7 +76,8 @@ struct ViewEnd
 	DiscardReason discard;  // !ok: why (the frame is closed either way)
 };
 
-// Issues the pending draw, restores program, AttrInfo and BufInfo, flushes exactly the ring bytes written,
+// Issues the pending draw, restores program, AttrInfo, BufInfo and (if one was bound) the texture of unit 0
+// (the present's, through the record of context.cpp), flushes exactly the ring bytes written,
 // then reads the target back (keeping alpha: ARGB with the alpha byte of the target) into out_argb
 // (w x h, `pitch` pixels per row) and counts the pixels still holding the frame's sentinel into
 // *sentinel_count (if non-null). A discarded frame is ended without a readback (ok false).

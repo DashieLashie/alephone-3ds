@@ -42,14 +42,38 @@ void C3dRasterizer::texture_vertical_polygon(polygon_definition& p)
 	polygon(Entry::Vertical, p);
 }
 
+TexResult C3dRasterizer::attrs(bool horizontal, const polygon_definition& p, const Point2* pts, int n,
+                               TexAttr* at) const
+{
+	TexView tv;
+	tv.hw = view_->half_screen_width;
+	tv.hh = view_->half_screen_height;
+	tv.wx = view_->world_to_screen_x;
+	tv.wy = view_->world_to_screen_y;
+	tv.dtp = view_->dtanpitch;
+	tv.cos_t = horizontal ? cosine_table[view_->yaw] : 0;
+	tv.sin_t = horizontal ? sine_table[view_->yaw] : 0;
+	const double delta = uv_half_ ? -0.5 : 0.0;
+	if (horizontal)
+		return floor_attrs(tv, FloorSurf{static_cast<int>(p.origin.x), static_cast<int>(p.origin.y),
+		                                 static_cast<int>(p.origin.z), p.flags & _SCALE_BITS},
+		                   pts, n, delta, at);
+	return wall_attrs(tv, WallSurf{static_cast<int>(p.origin.x), static_cast<int>(p.origin.y),
+	                               static_cast<int>(p.origin.z), p.vector.i, p.vector.j, p.vector.k},
+	                  pts, n, delta, at);
+}
+
 // Walls and floors (design 7, M2 specification). Acceptance first (what SW draws), then the vertex
-// attributes at (X + delta, Y + delta), delta = -1/2 with uv_half.
+// attributes at (X + delta, Y + delta), delta = -1/2 with uv_half. A convex polygon is one fan; a non-convex
+// one (rounded vertices can make a thin polygon slightly concave, M2 status) is drawn as SW's own spans,
+// one 1-line quad each, so its coverage is SW's exactly.
 void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 {
 	const bitmap_definition* tex = p.texture;
+	const bool transparent = tex && (tex->flags & _TRANSPARENT_BIT) != 0;
 	if (!view_ || !tex ||
 	    !c3d_supports(e, to_transfer(p.transfer_mode), tex->width, tex->height, tex->bytes_per_row == NONE,
-	                  (p.flags & _SHADELESS_BIT) != 0, (tex->flags & _TRANSPARENT_BIT) != 0, textures_))
+	                  (p.flags & _SHADELESS_BIT) != 0, transparent, textures_))
 	{
 		back::view_discard(back::DiscardReason::Unsupported);
 		return;
@@ -64,32 +88,16 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	for (int i = 0; i < n; ++i)
 		pts[i] = Point2{p.vertices[i].x, p.vertices[i].y};
 	const bool horizontal = e == Entry::Horizontal;
-	const Accept a = accept_polygon(pts, n, w_, h_, horizontal ? Orient::Horizontal : Orient::Vertical);
+	const Orient orient = horizontal ? Orient::Horizontal : Orient::Vertical;
+	const Accept a = accept_polygon(pts, n, w_, h_, orient);
 	if (!accepted(a))
 	{
 		++skipped_[static_cast<int>(a)];
 		return;
 	}
 
-	TexView tv;
-	tv.hw = view_->half_screen_width;
-	tv.hh = view_->half_screen_height;
-	tv.wx = view_->world_to_screen_x;
-	tv.wy = view_->world_to_screen_y;
-	tv.dtp = view_->dtanpitch;
-	tv.cos_t = horizontal ? cosine_table[view_->yaw] : 0;
-	tv.sin_t = horizontal ? sine_table[view_->yaw] : 0;
-	const double delta = uv_half_ ? -0.5 : 0.0;
 	TexAttr at[MAXIMUM_VERTICES_PER_SCREEN_POLYGON];
-	TexResult tr;
-	if (horizontal)
-		tr = floor_attrs(tv, FloorSurf{static_cast<int>(p.origin.x), static_cast<int>(p.origin.y),
-		                               static_cast<int>(p.origin.z), p.flags & _SCALE_BITS},
-		                 pts, n, delta, at);
-	else
-		tr = wall_attrs(tv, WallSurf{static_cast<int>(p.origin.x), static_cast<int>(p.origin.y),
-		                             static_cast<int>(p.origin.z), p.vector.i, p.vector.j, p.vector.k},
-		                pts, n, delta, at);
+	const TexResult tr = attrs(horizontal, p, pts, n, at);
 	if (tr == TexResult::Degenerate)
 	{
 		++skipped_[static_cast<int>(Accept::Degenerate)];
@@ -106,25 +114,98 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		return;
 	}
 
-	const Rgb col = shape_colour(static_cast<uint16_t>(p.ShapeDesc));
-	Vertex v[MAXIMUM_VERTICES_PER_SCREEN_POLYGON];
-	for (int i = 0; i < n; ++i)
+	// The texture (M2 "View frame with textures"): the bitmap's rows, the 32-bit tables (the harness runs at
+	// bit_depth 32 only, frame.cpp), keyed texel 0 only for a _TRANSPARENT_BIT bitmap on a wall (the floor
+	// mapper always writes, M2 "Transparent texels").
+	back::TexSource ts;
+	if (textures_)
 	{
-		Vertex& o = v[i];
-		o.x = static_cast<float>(pts[i].x);
-		o.y = static_cast<float>(pts[i].y);
-		o.w = at[i].w;
-		o.u0 = at[i].s;
-		o.v0 = at[i].t;
-		o.u1 = o.v1 = 0.0f;
-		o.r = col.r;
-		o.g = col.g;
-		o.b = col.b;
-		o.a = 0xFF;
+		ts.id = tex;
+		ts.bitmap.width = tex->width;
+		ts.bitmap.height = tex->height;
+		ts.bitmap.rows = const_cast<const uint8_t* const*>(reinterpret_cast<uint8_t* const*>(tex->row_addresses));
+		ts.bitmap.rle = tex->bytes_per_row == NONE;
+		ts.tables = static_cast<const uint32_t*>(p.shading_tables);
+		ts.kind = !horizontal && transparent ? TexKind::NormalKeyed : TexKind::Normal;
 	}
+	const back::TexSource* tsp = textures_ ? &ts : nullptr;
+	const Rgb col = textures_ ? Rgb{0xFF, 0xFF, 0xFF} : shape_colour(static_cast<uint16_t>(p.ShapeDesc));
 	const DrawKey key{classify(e, Transfer::Textured, foreground_), p.texture, p.shading_tables,
 	                  p.transfer_mode, p.transfer_data, static_cast<uint16_t>(p.flags & _SHADELESS_BIT)};
-	if (back::view_polygon(v, n, key))
+	auto make = [&](const Point2* q, const TexAttr* qa, int count, Vertex* out) {
+		for (int i = 0; i < count; ++i)
+		{
+			Vertex& o = out[i];
+			o.x = static_cast<float>(q[i].x);
+			o.y = static_cast<float>(q[i].y);
+			o.w = qa[i].w;
+			o.u0 = qa[i].s;
+			o.v0 = qa[i].t;
+			o.u1 = o.v1 = 0.0f;
+			o.r = col.r;
+			o.g = col.g;
+			o.b = col.b;
+			o.a = 0xFF;
+		}
+	};
+
+	if (!convex_cw(pts, n))
+	{
+		Span spans[1024];
+		const int ns = sw_spans(pts, n, orient, spans, 1024);
+		if (ns <= 0)
+		{
+			// Unreachable after accept_polygon (the same walks); a check that cannot be drawn faithfully.
+			back::view_discard(back::DiscardReason::Unsupported);
+			return;
+		}
+		if (span_polygons_++ < 8)
+		{
+			printf("[c3d] front: non-convex %s polygon drawn as %d spans (first 8 logged):", horizontal ? "floor" : "wall", ns);
+			for (int i = 0; i < n; ++i)
+				printf(" (%d,%d)", pts[i].x, pts[i].y);
+			printf("\n");
+		}
+		for (int k = 0; k < ns; ++k)
+		{
+			const Span& sp = spans[k];
+			if (sp.a1 <= sp.a0)
+				continue;
+			// [a0, a1) x [line, line + 1) (or its transpose): every edge on a pixel boundary, no tie.
+			Point2 q[4];
+			if (horizontal)
+			{
+				q[0] = Point2{sp.a0, sp.line};
+				q[1] = Point2{sp.a1, sp.line};
+				q[2] = Point2{sp.a1, sp.line + 1};
+				q[3] = Point2{sp.a0, sp.line + 1};
+			}
+			else
+			{
+				q[0] = Point2{sp.line, sp.a0};
+				q[1] = Point2{sp.line + 1, sp.a0};
+				q[2] = Point2{sp.line + 1, sp.a1};
+				q[3] = Point2{sp.line, sp.a1};
+			}
+			TexAttr qa[4];
+			if (attrs(horizontal, p, q, 4, qa) != TexResult::Ok)
+			{
+				back::view_discard(back::DiscardReason::Unsupported);
+				return;
+			}
+			Vertex v[4];
+			make(q, qa, 4, v);
+			if (!back::view_polygon(v, 4, key, tsp))
+				return;
+			++span_quads_;
+		}
+		++drawn_;
+		return;   // no tie pixels: span edges lie on pixel boundaries, and the spans are SW's own
+	}
+
+	Vertex v[MAXIMUM_VERTICES_PER_SCREEN_POLYGON];
+	make(pts, at, n, v);
+	if (back::view_polygon(v, n, key, tsp))
 	{
 		++drawn_;
 		tie_pixels(pts, n, w_, h_,

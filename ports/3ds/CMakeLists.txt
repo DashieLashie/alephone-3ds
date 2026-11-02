@@ -79,6 +79,8 @@ set(A1_3DS_SMDH_AUTHOR "Aleph One developers / 3DS port by DashieLashie" CACHE S
 set(A1_3DS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.png" CACHE FILEPATH "48x48 SMDH icon")
 option(A1_PROFILE "Frame profiler and benchmark mode (docs/3ds/PERF.md)" OFF)
 option(A1_RENDER_C3D "citro3d renderer (docs/3ds/CITRO3D_DESIGN.md)" OFF)
+# Test build for M2's orientation run only (render_c3d/core/tiling.h): textures stored without the row flip.
+option(A1_C3D_TILE_NOFLIP "citro3d renderer: store texture rows unflipped (orientation test build)" OFF)
 
 # --- Compiler flags ----------------------------------------------------------
 # The toolchain supplies -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -111,6 +113,9 @@ if(A1_PROFILE)
 endif()
 if(A1_RENDER_C3D)
   add_compile_definitions(A1_RENDER_C3D)
+  if(A1_C3D_TILE_NOFLIP)
+    add_compile_definitions(A1_C3D_TILE_NOFLIP)
+  endif()
 endif()
 if(NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "-D__3DS__")
   add_compile_definitions(__3DS__)   # normally already in the toolchain flags
@@ -375,6 +380,8 @@ if(A1_RENDER_C3D)
   target_link_options(alephone PRIVATE "LINKER:--wrap=gfxExit")
   # The program last bound by anyone else is recorded so a view frame can restore it (back/context.cpp).
   target_link_options(alephone PRIVATE "LINKER:--wrap=C3D_BindProgram")
+  # The same for the texture on unit 0 (the present's), which M2's textured view frames replace (back/context.cpp).
+  target_link_options(alephone PRIVATE "LINKER:--wrap=C3D_TexBind")
 endif()
 # Ogg Vorbis (Tremor) and MP3 (mpg123) decoders for Sound/Decoder.cpp.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/decoders_3ds.cpp")

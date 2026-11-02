@@ -54,13 +54,14 @@ namespace a1_c3d {
 
 enum class TexPool : uint8_t { Linear = 0, Vram = 1 };
 
-// The GPU side. alloc returns an opaque handle (nullptr: failed) for `bytes` in the pool; release
-// frees one. Handles are never interpreted by the cache.
+// The GPU side. alloc returns an opaque handle (nullptr: failed) for a W x W texture of `kind`
+// (`bytes` = tex_bytes(W, kind), what the caps count) in the pool; release frees one. Handles are never
+// interpreted by the cache.
 class TexAllocator
 {
 public:
 	virtual ~TexAllocator() {}
-	virtual void* alloc(TexPool pool, uint32_t bytes) = 0;
+	virtual void* alloc(TexPool pool, unsigned W, TexKind kind, uint32_t bytes) = 0;
 	virtual void release(TexPool pool, void* handle) = 0;
 };
 
@@ -152,6 +153,10 @@ public:
 	// supported size (tex_supported); the cache only needs W * W.
 	TexSlot* create(const TexKey& key, unsigned W);
 
+	// Undoes a create() of this frame whose texture could not be filled (the GPU never saw it): frees the
+	// slot and its texture at once; the conversion stays counted.
+	void forget(TexSlot* s);
+
 	// The next copy to issue this view frame (VRAM texture already allocated, one GX entry taken
 	// from `gx` with the cost of `command_buffer_not_empty`), or false: promote_max reached,
 	// nothing waiting, or the GX rule refused (counted in promotions_deferred).
@@ -187,7 +192,7 @@ private:
 	void evict(TexSlot& s);
 	void free_slot_memory(TexSlot& s);
 	TexSlot* take_free_slot();
-	void* alloc_with_eviction(TexPool pool, uint32_t bytes, uint32_t victims_used_below);
+	void* alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint32_t bytes, uint32_t victims_used_below);
 
 	TexAllocator& alloc_;
 	TexCacheConfig cfg_;

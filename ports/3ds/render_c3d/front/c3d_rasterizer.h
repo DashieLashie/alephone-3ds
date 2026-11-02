@@ -55,6 +55,10 @@ public:
 	const uint8_t* tie_mask() const { return tie_mask_.data(); }
 
 	unsigned drawn() const { return drawn_; }
+	// Polygons drawn as SW's spans (not convex: design 7, M2 status, the non-convex sliver) and their quads,
+	// since the start (not reset by set_target).
+	unsigned span_polygons() const { return span_polygons_; }
+	unsigned span_quads() const { return span_quads_; }
 	// Polygons whose texcoords came out non-finite or too spread (TexResult::NonFinite) since the start.
 	unsigned nonfinite() const { return nonfinite_; }
 	// Skipped polygons (SW draws nothing for them) by Accept kind (index = Accept; Draw is 0). A floor at
@@ -65,12 +69,15 @@ private:
 	view_data* view_ = nullptr;
 	int w_ = 0, h_ = 0;
 	void polygon(Entry e, polygon_definition& p);
+	// The attributes of n points of the polygon (wall or floor row of 2.2) into `at`.
+	TexResult attrs(bool horizontal, const polygon_definition& p, const Point2* pts, int n, TexAttr* at) const;
 
 	bool foreground_ = false;
 	bool textures_ = false;
 	bool uv_half_ = true;
 	unsigned drawn_ = 0;
 	unsigned nonfinite_ = 0;   // not reset by set_target
+	unsigned span_polygons_ = 0, span_quads_ = 0;   // not reset by set_target
 	std::vector<uint8_t> tie_mask_;
 	unsigned skipped_[5] = {0, 0, 0, 0, 0};
 };

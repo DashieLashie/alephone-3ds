@@ -81,7 +81,8 @@ TexSlot* TexCache::take_free_slot()
 	return victim;
 }
 
-void* TexCache::alloc_with_eviction(TexPool pool, uint32_t bytes, uint32_t victims_used_below)
+void* TexCache::alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint32_t bytes,
+                                    uint32_t victims_used_below)
 {
 	if (bytes > cap_[pi(pool)])
 		return nullptr;
@@ -90,7 +91,7 @@ void* TexCache::alloc_with_eviction(TexPool pool, uint32_t bytes, uint32_t victi
 	{
 		if (used_[pi(pool)] + bytes <= cap_[pi(pool)])
 		{
-			if (void* h = alloc_.alloc(pool, bytes))
+			if (void* h = alloc_.alloc(pool, W, kind, bytes))
 			{
 				used_[pi(pool)] += bytes;
 				return h;
@@ -169,7 +170,7 @@ TexSlot* TexCache::create(const TexKey& key, unsigned W)
 {
 	const uint32_t bytes = static_cast<uint32_t>(tex_bytes(W, key.kind));
 	TexSlot* s = take_free_slot();
-	void* h = s ? alloc_with_eviction(TexPool::Linear, bytes, frame_) : nullptr;
+	void* h = s ? alloc_with_eviction(TexPool::Linear, W, key.kind, bytes, frame_) : nullptr;
 	if (!h)
 	{
 		++stats_.discards_tex;
@@ -199,6 +200,12 @@ TexSlot* TexCache::create(const TexKey& key, unsigned W)
 	return s;
 }
 
+void TexCache::forget(TexSlot* s)
+{
+	if (s && s->state == TexSlotState::Live)
+		free_slot_memory(*s);
+}
+
 bool TexCache::next_promotion(GxQueue& gx, bool command_buffer_not_empty, TexPromotion& out)
 {
 	if (promoted_this_frame_ >= cfg_.promote_max)
@@ -219,7 +226,8 @@ bool TexCache::next_promotion(GxQueue& gx, bool command_buffer_not_empty, TexPro
 			return false;
 		}
 		// A VRAM slot is evicted for this one only if it was used less recently (no thrashing).
-		void* dst = alloc_with_eviction(TexPool::Vram, s->bytes, std::min(frame_, s->last_used_frame));
+		void* dst = alloc_with_eviction(TexPool::Vram, s->W, s->key.kind, s->bytes,
+		                                std::min(frame_, s->last_used_frame));
 		if (!dst)
 		{
 			s->tried_frame = frame_;   // stays linear and pending; the next waiting slot may fit
