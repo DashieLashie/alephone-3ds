@@ -2617,7 +2617,15 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     host prediction decides the gate:** if its best texel agreement (walls and floors separately) is
     under 98 %, session 1 stops and records a revised gate in the Review log (the host figure minus 1
     point, or Δ judged with a ±1-texel neighbourhood) and reports it to the user before session 2; the gate
-    is never tuned against Azahar. The same holds for the 0.1 % non-edge coverage rule on grates. `c3d-diff.py log LOG --colour
+    is never tuned against Azahar. The same holds for the 0.1 % non-edge coverage rule on grates.
+    **Revised gate (user decision 2026-10-31, Review log "M2 implementation, colour gate"):** the host
+    prediction came out at walls 98.30 %, floors 89.62 % exact texel agreement (`δ = −½`; 100 % within one
+    texel), so colour is judged by the **neighbourhood rule**: a common non-edge pixel is *within* if its Δ
+    to A's pixel **or to any of A's 8 neighbours that are covered in A** is ≤ 2 (`diff_tol`); gate **≥ 98 %
+    within (neighbourhood)** per class over the run; the strict figures (Δ to A's own pixel: within % and
+    mean) are still computed and printed, **mean ≤ 1.0 is judged on the neighbourhood Δ** (the minimum over
+    the 3×3), the strict mean is informative. The host texcoord test gates **within one texel ≥ 99.5 %**
+    (walls and floors separately) and prints the exact agreement. `c3d-diff.py log LOG --colour
     CLASS[,CLASS] --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks N`. Only with
     `fullbright 1` are the colour figures meaningful (M2 draws full bright); `--colour` fails a log whose
     `[c3d] debug-c3d:` line lacks `fullbright 1` or has `textures 0`.
@@ -2642,8 +2650,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     polygons, every covered pixel's SW texel `(col, row)` from the integer code vs the texel the GPU
     would sample at the pixel centre (perspective-correct barycentric interpolation of the vertex
     attributes in double over the fan triangle, `floor(u·W) mod W`); agreement printed for `δ = 0` and
-    `δ = −½`, walls and floors separately (it predicts `uv_half`); the test fails only below the gate
-    recorded in the Review log (98 % until revised under the reachability rule; round 2); the horizontal coverage model and
+    `δ = −½`, walls and floors separately (it predicts `uv_half`); gate (revised, see *Colour metric*):
+    the better δ's agreement **within one texel ≥ 99.5 %**, exact agreement printed; the horizontal coverage model and
     tie set; the new keys.
   - *Interim run (session 1, part 5; Azahar, non-authoritative, not M2's acceptance).* With `textures 0`:
     `m2-diff-flat.cfg` (`renderer c3d`, `diff 1`, `diff_frames 20`, `classes walls,floors`) on L0/L6/L20
@@ -3374,3 +3382,15 @@ protected, a waiting slot is evicted and dropped from the queue, `promote_max 0`
 host test fills the linear cap in both modes; (2) `o.z = 0` is an acceptance skip (`degenerate`), not
 unsupported; (3) the texcoord host test fails only below the gate recorded here (98 % until revised).
 Max rounds reached; implementation starts.
+
+### M2 implementation, colour gate (coordinator, 2026-10-31; user decision; a tolerance change)
+
+Part 4's host texcoord test (`a6d99f2d3`): exact SW-texel agreement at the pixel centre, walls 98.30 %,
+floors 89.62 % at `δ = −½` (26.69 % / 7.87 % at `δ = 0`), 100 % within one texel; by W, floors 94.36 % (128),
+90.41 % (256), 84.69 % (512). Against the exact projective map at the pixel corner the GPU agrees 99.93 % /
+99.98 %: the misses are SW's integer inexactness (the floor branch's truncate-then-multiply, :1069-1072,
+and `source_dx` truncation accumulating along a row), not the formulas. Under the round 1 reachability
+rule session 1 stopped and the user chose the **neighbourhood rule** (*Colour metric* bullet): Δ is the
+minimum over A's covered 3×3 neighbourhood, gate ≥ 98 % within and mean ≤ 1.0 on it; strict figures
+printed; host gate within one texel ≥ 99.5 %. `uv_half` default 1 (`δ = −½`) is confirmed by the host;
+the Azahar measurement in session 2 still records both.
