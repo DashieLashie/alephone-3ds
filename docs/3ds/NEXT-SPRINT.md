@@ -1540,8 +1540,10 @@ drops alpha; record the quad's pixels from `c3d-rbcal-0.bmp`, stop. Step 5:
 
 **Run and passed on the console 2026-11-03** (`PERF.md` "Stage 10 M2 — console, short check": both runs exit 0,
 non-edge 0, `sentinel` 0, 0 discards, `promo 11/10`, command words identical to Azahar; checks identical at equal
-coverage, but L0's walls coverage cycles on the console (something in view moves), so "the 20 identical" holds per
-view, not across the run. Press A at once at the menu: its demo otherwise takes the diff frames.)
+coverage, but L0's walls coverage cycles on the console (something in view moves; likely, not verified, an effect
+of the NPC fight L0 starts with; 69 pixels, `within_nb` ±0.01 point), so "the 20 identical" holds per view, not
+across the run: in later runbooks on L0, compare checks at equal coverage. Press A at once at the menu: its demo
+otherwise takes the diff frames.)
 Written 2026-11-02 for `port-stage10-M2`. Azahar has no CPU cache and copies textures
 synchronously, so this is the first hardware test of M2's texture path: the ranged flush after each
 conversion into a linear texture, and the VRAM promotion (`C3D_SyncTextureCopy` RAW copy, linear → VRAM)

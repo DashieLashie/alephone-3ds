@@ -1544,7 +1544,16 @@ Per benchmark check (every check, both runs, at the same coverage; Azahar in bra
 **The checks are not all identical, and that is the scene, not the texture path.** In both runs the walls'
 coverage cycles 40140 → 40114 → 40097 → 40071 and back (floors stay 52624/52631): it moves on side A
 (software) by the same amount as on side B, so something in view moves on the console that is still in
-Azahar's run. Every check at a given coverage has exactly the same diff figures, whatever the texture
+Azahar's run. **Likely cause, not verified:** L0 starts with allied and enemy NPCs fighting. The NPCs
+themselves cannot enter the figures (each class is replayed through a filter onto a cleared image, walls or
+floors polygons only, and both sides come from the same recording of the same frame), and the camera did not
+move (floors constant); an indirect effect of the fight on wall geometry, such as a door a monster opens,
+would fit, but no capture or log shows it. The console seeds from real entropy, so the fight differs per run;
+why Azahar's 20 checks stayed identical is not known either. **Size of the effect** (the 18 / 20 benchmark
+checks): walls coverage 40071-40140 (69 pixels, 0.17 %), `differ` 576-579, `within_nb` 99.53-99.54 %
+(0.01 point), `mean_nb` 0.08, `max_nb` 60, `cov_mismatch` and `tie_mismatch` 19 unchanged; floors: only `ties`
+35 / 36. That is about a tenth of the console-Azahar gap (0.15 / 0.11 point) and far inside the gate (98 %,
+mean 1.0). Every check at a given coverage has exactly the same diff figures, whatever the texture
 residency: run 1's first benchmark check (linear textures, promoted during it), run 2's checks 1-3 (promotions
 still deferred) and both runs' last checks (all VRAM) all read `differ=579 within_nb=99.53% mean_nb=0.08
 max_nb=60`. The demo's first view also gives identical figures in both runs (`walls covered=42584/42586
