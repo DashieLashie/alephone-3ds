@@ -1548,19 +1548,29 @@ check, short version" above (HUD + Map; `cmake --build build-3ds-c3d-prof` at `p
 and `scripts/3ds/tests/c3d/m2-diff.cfg` as `/3ds/alephone/debug-c3d`. Y in the launcher,
 `$H/m1/run.sh build-3ds-c3d-prof m2s-l0`; A twice; the game quits after the BENCH line. Then
 `python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m2s-l0.txt --colour walls,floors --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks 20`.
-**Pass:** exit 0, and **every check's figures equal Azahar's** (`PERF.md` "Stage 10 M2": the scene is
-the same each check; walls `within_nb=99.68%`, floors `99.85%`, `sentinel=0`). Check 1 samples the new
-linear textures, checks 2-3 the first VRAM copies (`[c3d] tex … promo 8/0`, then 11/0): a worse check 1
-= a missing/short conversion flush; worse from check 2 or 3 on = the promotion copy.
+**Pass:** exit 0, `sentinel=0` on every line, 0 discards, and **the 20 checks identical to each other**
+(the benchmark parks the player, so the view is the same in every check; Azahar's 20 are identical).
+Check 1 samples the new linear textures; the walls check of frame 1 promotes 8 textures and the floors
+check the other 3, so from check 2 on everything samples the VRAM copies. A check 1 worse than the rest
+= a missing/short conversion flush; checks 2+ worse than check 1 = the promotion copy. Close to Azahar
+is expected but not required to the digit: the console excludes more edge-tie pixels than Azahar (M1
+short check: `tie_mismatch` 380 vs 140), which moves `cov_mismatch` edge counts and can move the colour
+figures slightly. Azahar per check (`PERF.md` "Stage 10 M2"): walls `covered=40140/40137
+cov_mismatch=7/0 ties=22 tie_mismatch=7 within_nb=99.68% mean_nb=0.05 max_nb=60`, floors
+`covered=52624/52627 cov_mismatch=9/0 ties=35 tie_mismatch=9 within_nb=99.85% mean_nb=0.02 max_nb=32`;
+`[c3d] tex … [final]`: `conv 11 (704 KiB) promo 11/0 evict 0 alloc-fail 0 discards 0`.
 
 **2. Deferred promotions** (~5 min). ftpd: `scripts/3ds/tests/c3d/m2-gxq4.cfg` as `debug-c3d`
-(`debug-perf` stays); `$H/m1/run.sh build-3ds-c3d-prof m2s-gxq4`; same `c3d-diff.py` command. **Pass:**
-exit 0, `promo 11/10` (one promotion a frame), 0 discards, the same figures in every check.
+(`debug-perf` stays); `$H/m1/run.sh build-3ds-c3d-prof m2s-gxq4`; same `c3d-diff.py` command. **Pass:** exit 0, 0 discards, `[c3d] tex … [final]` with `promo 11/10` (11 done, 10 deferred: one
+promotion per view frame, as Azahar), and the same figures in every check (here the textures move to
+VRAM one at a time over the first 6 checks, so a bad copy would show as checks drifting).
 
 **End:** ftpd: delete `/3ds/alephone/debug-perf` and `/3ds/alephone/debug-c3d`. **Record** in `PERF.md`
 ("Stage 10 M2 — console, short check") the two tables, the `[c3d] tex … [final]` and `[c3d] cmdbuf final`
-lines (Azahar: `draw_words=268`; command words are deterministic), and the `c3d_tex` zone from the BENCH
-line (the upload cost on hardware). **Reading a failure:** isolated wrong texels or garbage in check 1
+lines (Azahar: `view_frame_words=1288 draw_words=268 readback_words=8`; command words are deterministic, so
+a difference means something real), and the `ties` / `tie_mismatch` per class. (The upload cost is not
+measured here: diff frames are not benchmark frames, so `c3d_tex` reads 0 in the BENCH line.) Then
+`CITRO3D_DESIGN.md` M2 status and the Review log entry "M2 commit review" ("Needs console verification"). **Reading a failure:** isolated wrong texels or garbage in check 1
 only = the conversion flush; a texture wrong from the frame after its promotion = the TextureCopy
 (arguments: `texture.o` `C3D_TexLoadImage`); a crash or hang at a promotion = the GX queue order.
 Record the log and stop; M3 waits for the fix.
