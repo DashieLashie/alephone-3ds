@@ -73,6 +73,10 @@ bottom-screen modes" are stage 7 ([STAGE7.md](STAGE7.md)).
 | Swaps keep per-screen state: citro3d swapping top on the GSP thread and the port swapping bottom on the main thread do not race | gfx.o per critic (settled) |
 | `C3D_FrameEnd(flags)` without `GX_CMDLIST_FLUSH` flushes the whole linear heap (~19.5 MiB) | `gx.h`:66; per critic |
 | `C3D_Init` defaults: cull back CCW, depth test GREATER + write, alpha blend SRC_ALPHA — must be overridden | `enums.h`:174, 231, 307; base.o per critic |
+| `C3D_Init` zeroes the three texture-unit pointers and sets **all six TEV stages** to `C3D_TexEnvInit`'s values (sources `PREVIOUS`, operands 0, `REPLACE`, colour `0xFFFFFFFF`, scale 1: a pass-through) | base.o `C3D_Init`+0x14c-0x154, +0x15c-0x178 (M3 spec, main session); `texenv.h`:33-43 |
+| The state flush enables texture unit *i* only if its pointer is non-null (a null unit is skipped, not dereferenced) and sets the unit mask + bit 16 (texture-cache clear) in the tex config | base.o `C3Di_UpdateContext`+0x1e0-0x230 (M3 spec) |
+| `C3D_SetTexEnv(id, env)` copies the 20-byte stage into the context and marks it dirty; `env == NULL` writes `C3D_TexEnvInit`'s values | texenv.o `C3D_SetTexEnv`+0x14-0x58, +0x5c-0x90 (M3 spec) |
+| **`C3D_TexBind(unit ≥ 1, NULL)` dereferences NULL + 12** (it reads `tex->param` to refuse non-2D types before storing; only unit 0 skips the test): once bound, units 1-2 can only be re-bound to another texture | texture.o `C3D_TexBind`+0x10-0x20 (M3 round 1, critic) |
 
 ### 0.4 Current numbers
 
@@ -2698,6 +2702,226 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   ambient, weapon flash.
 - Accept: host LUT ≤ 1 level everywhere; diff `walls,floors` lit ≥ 98% Δ ≤ 4,
   mean ≤ 1.5 on L0/L6/L20 + 2 films; infravision via the Lua plugin.
+- **M3 specification (revision of 2026-11-03, before code; Review log "M3 pre-implementation").**
+  Where the lines above, 2.1-2.2, 4.1-4.3 and the code disagree, this block rules. Citations are the code
+  as of `6533f8b01`. M3 runs **only on diff frames** (side B of a C3D check), as M1/M2; play frames stay SW
+  until M4. **No engine edit.** Kickoff `KICKOFF_M3.md`.
+  - *Parts and order.* 1 `core/shade_lut.*` + host tests (LUT vs SW, L8 tiling vs tex3ds, the lit colour
+    prediction); 2 texcoord1 in the front end (the flash, `a < 0`, shadeless) + host tests; 3 the LUT's
+    lifecycle in a new `back/shade.cpp`, TEV 4.2, unit 1, the state restore; 4 infravision (shadeless kinds
+    drawn), the counters; 5 configs, the plugin, `c3d-diff.py --shading`, the second film; then the
+    acceptance. One commit per piece where it builds alone (`stage10: M3 part N …`), the M3 commit + tag at
+    the end.
+  - *What exists already* (checked at HEAD). The vertex already carries texcoord1 (`core/geometry.h`
+    `Vertex::u1, v1`, set to 0 by `front/c3d_rasterizer.cpp` `make`); the AttrInfo already loads it
+    (`back/draw.cpp` `world_init`: loader 2 = `GPU_FLOAT, 2`); `shaders/world.v.pica` already outputs it
+    (`mov otc1, v2`). **The vertex format and the shader do not change**; texcoord1 is a front-end change.
+    The conversion kinds `Shadeless`/`ShadelessKeyed` exist and are host-tested (`core/tex_convert.h`:36);
+    `normal` already writes A 128 for self-luminous colours (3.2).
+  - *SW model, exactly* (`scottish_textures.cpp`:131-170, 32-bit: `shading_table_fractional_bits` 8,
+    `shapes.cpp`:1579; 256 tables). `s = PIN(M − (d << 3), 0, 65536)` (`DEPTH_TO_SHADE`, :132, with
+    `WORLD_FRACTIONAL_BITS` 10), `M = view->maximum_depth_intensity` = `weapon_intensity`
+    (`screen.cpp`:1466; `NATURAL_LIGHT_INTENSITY` = `FIXED_ONE_HALF` by default, `player.cpp`:338, plus the
+    firing intensity while it decays, `weapons.cpp`:641-654). Index = `(a > s ? a + (s >> 1) : s + (a >> 1))
+    >> 8`, `a < 0` → `(−a) >> 8`; level = `CEILING(index, 255)` (no lower clamp is needed: both are ≥ 0).
+    Depth `d`: walls `(short)MIN(world_x, SHRT_MAX)` per column (:991), floors `(short)MIN(|hworld_to_screen
+    / screen_y|, SHRT_MAX)` per row (:1084-1091); shadeless → table 0 = `polygon->shading_tables` (:984-986,
+    :1085-1087). Ambient `a`: floors `get_light_intensity(…)` **unpinned** (`RenderRasterize.cpp`:460: may be
+    negative or above 1), walls `+ ambient_delta` pinned to `[0, 65536]` (:598-599): **negative ambient
+    reaches floors/ceilings only**. Table entries: channel = `((c16 · m) / 255) >> 8`, `m = L` normal,
+    `128 + (L >> 1)` self-luminous (`shapes.cpp`:1952-1960).
+  - *Shade LUT* (`core/shade_lut.*`, plain C++). 256 × 256 **L8** (`GPU_L8`, `enums.h`; 64 KiB), column `i` =
+    s bin, row `j` = a bin; value = SW's level at a **representative** `(s_i, a_j)`: `s_0 = 0`, `s_255 =
+    65536`, else `256·i + 128` (the bin centre); `a_j = 256·j + 128`. So the two clamped cases that cover
+    most pixels are exact: far pixels (`s` pinned to 0, texel 0) and `a < 0` (row `(−a) >> 8`, `s = 0`:
+    index `a_j >> 8 = j`, exact); full bright (`a ≥ 65280`, row 255) gives 255 everywhere. Inside a bin the
+    true index spreads over ≤ 1.5 levels (slope 1 in the larger of `s`, `a`, ½ in the other), so the bin
+    representative is within 1 level of SW everywhere — the host test proves it on the grid below. Tiled with
+    `core/tiling` (`tile_image(…, texel_bytes 1, …)`, the source row `j` into memory row `255 − j` as every
+    texture, M2 "Tiling"), checked byte for byte against `tex3ds -f l8 -z none -r` as M2's RGBA8 test.
+  - *texcoord1* (front end, `core/shade_lut` `shade_texcoord1()`, host-tested; the vertex's other attributes
+    unchanged). Per polygon: `shadeless` (`_SHADELESS_BIT`) → `(u, v) = (255.5/256, 255.5/256)` (LUT 255:
+    the texture's own colour, exact); `a < 0` → `u = 0.5/256` (bin 0), `v = (min(k, 255) + 0.5)/256` with
+    `k` = SW's own index (below); else per vertex **`u = M/65536 − w/8192`** and per polygon **`v = (min(a >> 8,
+    255) + 0.5)/256`** (a row centre: `a` is constant on the polygon, so its row is chosen exactly, never at a
+    texel boundary). **SW's index wraps** (round 1 finding 2): `table_index` is a `short` (:151) assigned a
+    `_fixed >> 8` (:156, :162) and `CEILING` is `MIN` (`csmacros.h`:42), with no lower clamp. So for `a < 0`
+    the front end computes SW's index exactly, `k = (int16_t)((int32_t)(0u − (uint32_t)a) >> 8)` (32-bit
+    negation wrap, arithmetic shift, truncation): `a = −2³¹` gives `k = 0` (black, as SW), `a = −2³¹ + r`
+    (r ≥ 1) gives `k = −1` and SW reads the table **before** `shading_tables` (out of bounds). A polygon with
+    `k < 0`, or with `a ≥ 2²³ − 32 768` (where `a + (s >> 1)` can wrap the short for some pixel: floors' `a`
+    is unpinned, `RenderRasterize.cpp`:460), is **excluded on both sides** by the filter (`c3d_only`, as
+    M2's unsupported bitmaps; counted `c3d_ambient_wrap`, printed apart from `excluded` in the DIFF
+    summary), never drawn and never a discard: SW's output is undefined there. The test reads the ambient SW
+    will see (after the filter's `fullbright` rewrite, i.e. skipped when `fullbright` is on) and skips
+    shadeless polygons (SW ignores their ambient, :984, :1085; round 2 minor 1). `w` is the vertex's perspective
+    weight (already evaluated at `(X + δ, Y + δ)` and clamped to `[16, 2²⁴]`, M2 "Texcoords"): it is the eye
+    depth SW uses (walls `world_x`, floors `hworld_to_screen/screen_y`) at the pixel corner SW samples, and
+    perspective-correct interpolation of an attribute equal to `w` yields `1/(interpolated 1/w)` = the depth
+    the texcoords use, so `u` is exact per pixel (SW: per column / per row; walls and floors have constant
+    depth along those, so there is no per-pixel-vs-per-line difference for M3's classes). **The `SHRT_MAX`
+    depth clamp needs no vertex clamp** (a correction of M2's "M3's texcoord1 keeps it"): for `d ≥ 32 767` SW's
+    `s = PIN(M − 262 136, …) = 0` whenever `M ≤ 262 136`, and the GPU's `u < M/65536 − 3.9999 < 0` samples
+    texel 0 (`GPU_CLAMP_TO_EDGE`); clamping the vertex value would bend the interpolation. `M > 262 136`
+    (never in Marathon 2's definitions: `firing_light_intensity` ≤ 1.0) → the polygon is unsupported, counted
+    `flash_over` (discard). The `u` range at the far clamp (−2 048) is within float24 (UNVERIFIED precision
+    of PICA's interpolation, section 10 item 6; the diff catches it). The weapon flash is just `M`: read per
+    polygon from the view, no uniform. Known inexactness (round 1 finding 7, named in the gate report): a
+    floor vertex on or past the horizon gets M2's sign-guarded `sy' = ±½` (`geometry.cpp` `floor_vertex`), a
+    fictitious `w`, so texcoord1 interpolates a wrong depth across such a polygon (as texcoord0 does since
+    M2); `w < 16` is clamped to 16 (M2), so very near pixels are within 1 level, not exact.
+  - *TEV* (design 4.2's table, `texenv.h`, `enums.h`:331-383). Stage 0: RGB `MODULATE(TEXTURE0
+    RGB_SRC_ALPHA, TEXTURE1 RGB_ONE_MINUS_SRC_R)` = `x = A·(1 − L)`; alpha `REPLACE(TEXTURE0 A_SRC_ALPHA)`,
+    scale 1 by default. Stage 1 (built from `C3D_TexEnvInit`, scale 1): RGB `MODULATE(TEXTURE0 RGB_SRC_COLOR,
+    PREVIOUS RGB_ONE_MINUS_SRC_COLOR)` = `c·(1 − x)`; alpha `REPLACE(PREVIOUS A_SRC_ALPHA)`. Alpha test
+    `GEQUAL 128` (M1's, unchanged). **The alpha ×2 is not the default** (round 1 finding 3; a change from
+    4.2): stage 0's RGB reads the *texel's* alpha, so the scale only changes the alpha written to the target,
+    and M3 needs none of that: with scale 1 a written pixel has alpha 255 or 128 (self-luminous), as in M2,
+    both pass the test and neither is the sentinel's 0x01. Key `alpha_x2 1` sets `C3D_TexEnvScale(env,
+    C3D_Alpha, GPU_TEVSCALE_2)` on stage 0 (alpha 255 everywhere if PICA clamps, **UNVERIFIED**); it is run as
+    an A/B (`m3-alpha2.cfg`) in Azahar and on the console because M5's static (4.3: `(TEX0.A ×2)·noise.A`)
+    will depend on the clamp. **Should the ×2 wrap**, A 255 → 254 still passes, A 128 → 0 is dropped by the
+    alpha test: self-luminous texels go missing as non-edge coverage mismatches, which that run's coverage
+    gate shows. Normal texel (A 255): `x = 1 − L`, out = `c·L`;
+    self-luminous (A 128): out = `c·(0.5 + 0.5·L)` ≈ SW's `128 + L/2`; shadeless (A 255, LUT 255): out = `c`.
+    `lit 0` keeps M2's single stage (`REPLACE TEXTURE0`; stage 1 untouched, unit 1 unbound); `textures 0`
+    keeps M1's flat colour (no LUT, no stage 1).
+  - *Lit colour prediction* (host, informative; the gate's support). SW channel `((c16·m)/255) >> 8` vs the
+    two stages on `c8 = c16 >> 8` (texture = top table, M2), integer TEV `(a·b)/255` (Azahar's software
+    backend) or rounded float (the host-GPU backend), over every `c16` (step 7) and `L`: normal max Δ 1,
+    mean 0.24-0.30; self-luminous max 1-2, mean 0.33-0.36; **with the LUT off by ±1 level: max Δ 2, mean ≤
+    0.47** in all four cases (main session, 2026-11-03; the host test reprints it). So lighting adds at most
+    2 to M2's texel-choice error.
+  - *The LUT's lifecycle* (`back/shade.cpp`, new; `<3ds.h>`/`<citro3d.h>`; main thread). States `None →
+    Linear → Copying → Vram`. **None**, at a lit view frame's start (after `frame_begin()` returned, before
+    the clear): `C3D_TexInit(256, 256, GPU_L8)` linear, `C3D_TexSetFilter(NEAREST, NEAREST)`,
+    `C3D_TexSetWrap(CLAMP_TO_EDGE, CLAMP_TO_EDGE)` (`texture.h`:157-173), build + tile straight into it,
+    **one ranged `GSPGPU_FlushDataCache` of its 65 536 bytes**, sampled from linear in this frame; allocation
+    failure → the check is discarded `tex` (retried at the next lit frame). **Linear**, at a later lit view
+    frame's start, **before** the texture cache's promotions: if `gx.used() + 1 + kViewReserveEntries ≤
+    budget` (M2's rule, `core/texcache.cpp`:228) and `C3D_TexInitVRAM(256, 256, GPU_L8)` succeeds, one
+    `gx_op`-counted in-frame `C3D_SyncTextureCopy(lin, 0, vram, 0, 65536, GX_TRANSFER_RAW_COPY(1))` (M2's
+    verified promotion, `back/texcache.cpp` `texcache_frame_start`); still sampled from linear this frame
+    (the copy runs before the draws, but the binding switches only after it retired). A refusal or a failed
+    VRAM allocation leaves it **Linear** (retried; the failure logged once). **Copying**, at the next lit view
+    frame's start (`frame_begin()` returned: the copy retired, 0.3): unit 1 re-bound to the VRAM texture
+    **first** (unit 1 keeps the LUT between frames, below), then `C3D_TexDelete` of the linear one, state
+    **Vram**, sampled from VRAM. `shade_free()` after `C3D_Fini` (`release_and_fini`, beside `draw_free()`
+    and `texcache_release_all()`): both deleted, state None (a re-init rebuilds it). Not touched by
+    `collections_changed()` (the LUT depends on no collection). VRAM 64 KiB of 9.1's "shade LUT + noise"
+    128 KiB, outside `vram_cap`; linear 64 KiB transiently. Log lines `[c3d] shade: LUT built (linear,
+    65536 B)` and `[c3d] shade: LUT promoted to VRAM`.
+  - *Binding and the state the present relies on* (`back/draw.cpp`; `present.cpp` is not edited). The
+    present binds its program, AttrInfo and `C3D_TexBind(0, …)` once at init (`present.cpp`:432-453) and sets
+    **TEV stage 0 in full** (`C3D_TexEnvInit` first, so its scale is reset) and the depth/write mask before
+    every draw (`set_present_draw`, :314-330); it never touches stage 1 or unit 1. A lit view frame adds:
+    Both are configured **only after M2's SAVE block** (`draw.cpp`:413-415), at stage 0's place (:431), so the
+    early returns of `view_begin` (:400-410, before the SAVE) leave nothing to restore; `lit 0` and
+    `textures 0` frames neither touch nor save stage 1 or unit 1 (round 1 finding 4).
+    (1) **Unit 1 = the LUT, and it stays bound** (round 1 finding 1). `C3D_TexBind(unit ≥ 1, NULL)` reads
+    `tex->param` before storing (texture.o `C3D_TexBind`+0x10-0x20: `ldr ip, [r1, #12]`): a data abort on
+    hardware (Azahar returns 0 for the unmapped read and would hide it), and citro3d has no other way back to
+    a null unit 1. So `view_begin` binds the LUT to unit 1 through `__real_C3D_TexBind(1, …)` on every lit
+    frame and **`restore_state` leaves it**: from the first lit frame on, unit 1 holds the LUT until
+    `C3D_Fini` (the struct and its memory live until `shade_free()`, after `C3D_Fini`; the Copying → Vram step
+    re-binds before deleting). During the present unit 1 is then **enabled** (0.3: non-null → enabled) but
+    unread: the present's TEV stage 0 reads `TEXTURE0` only and stage 1 is a pass-through; the present's
+    shader has no texcoord1 output, so unit 1 samples an undefined coordinate whose value nobody uses (the
+    cost of the extra unit on PICA: section 10). The `C3D_TexBind` wrap's record is extended from unit 0 to
+    units 0-2 (`back/context.cpp` `__wrap_C3D_TexBind`): a foreign unit-1 bind ever, or during a frame,
+    counts `tex1_restore_mismatch` (must be 0: only `back/` binds unit 1, through the real function).
+    (2) **TEV stage 1**, saved by copy in `view_begin` (`*C3D_GetTexEnv(1)`) and put back with
+    `C3D_SetTexEnv(1, &saved)` in `restore_state` (copy semantics, 0.3); the saved value is compared with
+    the init value (0.3) and a difference counted `tev1_not_init` (must be 0: nothing else configures stage
+    1; `view.cpp`'s calibration re-inits stage 0 only and needs stages 1-5 pass-through, :431-435, which this
+    gives). (3) **Stage 0** is left as the view frame set it, as in M2: the present re-sets it in full before
+    each draw. (4) The **AttrInfo** is M2's save/restore (copy; the present's has two loaders, the view
+    frame's four); texcoord1 never reaches the present: its program has no texcoord1 output and the restored
+    AttrInfo has no third loader. Proof: `m3-present-diff.cfg` (`m2-present-diff.cfg` with lit view frames:
+    `fullbright 0`) → `present_diff` 0, `tex_restore_mismatch` 0, `tex1_restore_mismatch` 0, `tev1_not_init`
+    0, `prog_restore_mismatch` 0.
+  - *Infravision* (3.1, 4.3). `_SHADELESS_BIT` on walls/floors comes only from `view->shading_mode ==
+    _shading_infravision` (`RenderRasterize.cpp`:463, 602); `shading_tables` is then the collection's tint
+    table (one table, 256 entries). `c3d_supports` stops refusing `shadeless` **when `textures` is on** (with
+    `textures 0` the flat path has no kind to draw it with: still refused, so `c3d_only` excludes it); the
+    kind is `Shadeless`, or `ShadelessKeyed` for a `_TRANSPARENT_BIT` bitmap on a wall (M2's keying rule);
+    texcoord1 `(1, 1)` as above. The cache key already holds the tables pointer and the kind, so tinted and
+    normal copies of a bitmap coexist (3.3 "CLUT change"). The filter's `fullbright` already leaves shadeless
+    primitives alone (`filter.cpp`:49, 64).
+  - *Counters* (the DIFF summary): `c3d_lit_polys` (drawn with depth/ambient shading), `c3d_shadeless_polys`,
+    `c3d_neg_ambient_polys`, `c3d_flash_checks` (checks whose `M` > `NATURAL_LIGHT_INTENSITY`), `c3d_m_max`,
+    `c3d_flash_over`, `c3d_ambient_wrap` (excluded polygons). The `[c3d] cmdbuf` line gains `lut=<state> lut_builds=N tex1_restore_mismatch=N
+    tev1_not_init=N`.
+  - *GX queue and command buffer.* One more GX entry, once (the LUT promotion), inside M2's per-frame bound
+    (promotions ≤ 8 + LUT 1 + clear 1 + split 1 + readback 1 = 12, + `C3D_FrameEnd` 1; the budget rule keeps it
+    ≤ 24). The first lit draw adds TEV stage 1 and texture unit 1 state words: the reserve is re-measured over
+    the acceptance runs (`[c3d] cmdbuf final`, deterministic: Azahar authoritative) and `kDrawReserveWords`
+    set to 2 × the worst first-draw words (536 today = 2 × 268); `view_frame_words` and `draw_words` recorded.
+  - *Zones:* the LUT build, its flush and its promotion issue run in **`c3d_tex`** (M2's zone, nested in
+    `c3d_draw`). No new zone.
+  - *Colour gate (lit).* **M2's neighbourhood rule** (Review log "M2 implementation, colour gate", a user
+    decision) **with 8.3's lit numbers unchanged**: per class (walls, floors) over the run, non-edge coverage
+    mismatches ≤ 0.1 % of A's covered pixels, **≥ 98 % of common non-edge pixels within Δ ≤ 4 (`diff_tol 4`)
+    to A's pixel or one of its covered 8 neighbours, neighbourhood mean ≤ 1.5**; strict figures printed.
+    Lighting does not change which texel is sampled (texcoord0 is M2's), and neighbours along a wall column
+    or a floor row share SW's shade, so the neighbourhood rule absorbs exactly what it absorbed in M2; the
+    prediction above bounds lighting's own share at 2. **No tolerance changes** (8.3's row as written, M2's
+    approved metric), so the user is not asked; the report names the gate used. Infravision: 8.3's row
+    "full bright (M2), infravision", `diff_tol 2`, mean ≤ 1.0, neighbourhood. `fullbright 1` runs keep M2's
+    gate (Δ ≤ 2, mean ≤ 1.0) on the M3 binary (`lit 1` at LUT 255 is exact: `x = 0`).
+  - *`c3d-diff.py`.* `--shading full|lit|infra` (default `full` = today's check: the debug line shows
+    `fullbright 1` and not `textures 0`). `lit`: the debug line shows `fullbright 0`, `lit 1` and not
+    `textures 0`, and `c3d_lit_polys` > 0. `infra`: as `lit`, plus `c3d_shadeless_polys` > 0 and
+    `c3d_lit_polys` == 0 (every compared polygon was shadeless). The lit counters are printed in every mode.
+  - *Films* (8.2). Film 1: M2's "M2 L01 Waterloo Waterpark" (`m3-film.cfg`; combat, so weapon flashes).
+    **Film 2: "M2 L08 Nuke and Pave.682.filA"** (`m3-film-l08.cfg`): an offline parse of `Map.sceA` (light
+    definitions × polygon floor/ceiling lights, by area; main session) finds **one** Marathon 2 level with a
+    light that can go negative, L08 (its light 5: `secondary_active` intensity −32 768.0, i.e. `0x80000000`,
+    on 13 % of the floor/ceiling area; SW's short index then wraps: black for exactly −2³¹, an out-of-bounds
+    table otherwise, so such polygons are excluded and counted `c3d_ambient_wrap`, above), with
+    25 % of the floor/ceiling area under ambient 0.35. Darkness is also covered by the bench spots: L6
+    (Ex Cathedra, 52 % under 0.35) and L20 (Thermopylae, 65 %); depth shading appears on every level (`M =
+    0.5` by default: `s > 0` only for `d < 4 096`). Whether the film looks at the negative light while it is
+    negative is printed (`c3d_neg_ambient_polys`, `c3d_ambient_wrap`), not gated: 0 is recorded as "not
+    reached", as M2's ≥ 16 conversions. (A moderately negative `a`, `k` in [0, 255], is the drawn case; the
+    host test covers it.)
+  - *The infravision plugin.* `scripts/3ds/tests/plugins/Infravision Test/` (after `Terminal Test/`): solo
+    Lua, `Triggers.init` sets `Players[0].infravision_duration = 3000` and `Triggers.idle` keeps it above
+    1 500 (`lua_player.cpp`:2412); installed by a new `run-azahar.sh --infravision-test` (removed otherwise,
+    as the other test plugins). `m3-infra.cfg`: `diff 15` (so the first check comes after init and the first
+    idle ticks: the run-wide `c3d_lit_polys == 0` rule needs every check in infravision, round 1 finding 6),
+    `diff_frames 20`, `classes walls,floors`, `diff_tol 2`; gate `--shading infra --tol 2 --within 98 --mean
+    1.0`.
+  - *Keys* (`core/config.*` + host test): `lit 0|1` (default 1), `alpha_x2 0|1` (default 0). Both printed in
+    the `[c3d] debug-c3d:` line.
+  - *Configs.* `m3-diff.cfg` (`diff 1`, `diff_frames 20`, `classes walls,floors`, `fullbright 0`,
+    `textures 1`, `lit 1`, `diff_tol 4`), `m3-film.cfg` and `m3-film-l08.cfg` (`diff 2`, 200 checks),
+    `m3-infra.cfg`, `m3-present-diff.cfg`, `m3-alpha2.cfg` (`m3-diff.cfg` + `alpha_x2 1`: the clamp A/B).
+  - *Host tests* (8.4; round 1 finding 5: a grid that runs in seconds and models the GPU's continuous
+    depth). The LUT vs a transliterated `calculate_shading_table` (short index, `CEILING`) for `M` ∈ {32 768,
+    65 536, 98 304, 131 072, 262 136}: every integer `d` in [0, M/8 + 64] (beyond, `s` is pinned to 0; one far
+    `d` per `M` checks the pinning and one `d ≥ 32 767` the `SHRT_MAX` case), each also at `d ± ½` for the
+    GPU's `u` (SW keeps the integer), × `a` at every bin edge `256·j + {0, 1, 127, 128, 255}` for j in 0..256
+    and the negative mirror, plus `a` ∈ {−2³¹, −2³¹ + 1, −2³¹ + 255, ±(2²³ ± 1), 2²³ − 32 768 ± 1}; sampling as
+    the GPU does (texel `clamp(floor(u·256), 0, 255)` of the front-end texcoord1, row from `v`), and with `u`
+    nudged by ±1/65 536 to model a one-bin miss at a boundary: **|LUT − SW| ≤ 1 everywhere** (asserted; the
+    gate), exact-agreement % printed; exactness asserted for `s` pinned to 0, `0 ≤ k ≤ 255` with `a < 0`,
+    `a ≥ 65 280` and shadeless; the wrap cases excluded exactly where SW's index is < 0 or can wrap; L8 tiling vs tex3ds
+    (byte for byte; skipped, printed, if tex3ds is absent); the lit colour prediction (printed); the keys.
+  - *Accept* (Azahar, non-authoritative, both backends unless said): `m3-diff.cfg` on L0/L6/L20
+    (`--min-checks 20`) and both films (`--min-checks 200`) pass `--colour walls,floors --shading lit
+    --nonedge-pct 0.1 --within 98 --tol 4 --mean 1.5`, `sentinel` 0, 0 discards; `m3-infra.cfg` on L0
+    passes `--shading infra`; `m2-diff.cfg` (`fullbright 1`) on L0 still passes M2's gate on the M3 binary;
+    `m3-present-diff.cfg` (host GPU) `present_diff` 0 and the four restore counters 0 (`tex_restore_mismatch`, `tex1_restore_mismatch`, `tev1_not_init`,
+    `prog_restore_mismatch`); the LUT log lines
+    (built once, promoted once, VRAM from then on); the re-measured reserve; M1's walls coverage
+    (`m1-diff-walls.cfg` L0), M0's calibration (`m0-readback-cal.cfg`) and P1 scripts 07, 08, 13, 14, 22
+    unharmed (host GPU); the OFF builds' `objdump -d` unchanged and `nm` clean. The lit counters of the
+    films are recorded (flash checks > 0 expected on both; negative ambient on L08 if reached).
+    `m3-alpha2.cfg` (L0, both backends) is **recorded, not gated** (the clamp's Azahar answer; the console's
+    in the short check).
+  - *Not in M3:* sprites/weapons and their constant texcoord1 (M4), landscapes `(1, 1)` and static noise on
+    unit 1 (M5), play-mode C3D frames (M4).
 
 ### M4 — sprites, weapons, invisibility; play mode on (readback)
 - Add: rectangles (RLE, flip, clip), mask textures, tinted blend; play mode on
@@ -2876,6 +3100,10 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    non-tie pixel on a shared edge (`NEXT-SPRINT.md` "M1 console check" step 5).
    **Console 2026-11-02 (short check, L0, 20 frames):** 440 ties, 380 tie mismatches (Azahar 140): PICA
    leaves out most exact ties SW covers; 0 non-tie mismatches.
+   **M3:** PICA's modulate rounding against Azahar's `(a·b)/255` (the lit-colour prediction assumes it); the
+   alpha ×2 clamp (`m3-alpha2.cfg`: self-luminous coverage intact = clamps); texcoord1 precision at LUT bin
+   edges and float24 at `u ≈ −2 048`; unit 1 left enabled (the LUT) during the present's draws: no visual
+   effect (`present_diff` 0) and no measurable cost in `present`.
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -3452,3 +3680,40 @@ appear in no neighbour, so the neighbourhood rule cannot absorb them. The user a
 recorded; a texel-space metric (compare texel indices, not colours) is the fix if a later milestone
 needs it.
 
+
+### M3 pre-implementation (coordinator, 2026-11-03)
+
+Kickoff `KICKOFF_M3.md`. The design checked against the code at `6533f8b01` and the citro3d binary: texcoord1
+is already in the vertex, the AttrInfo and the shader (M3 is a front-end change there); `C3D_Init` zeroes the
+texture units and sets every TEV stage to a pass-through, a null unit is disabled by the state flush, and
+`C3D_SetTexEnv` copies (three new 0.3 rows). Corrections folded into the M3 specification: the `SHRT_MAX`
+shading-depth clamp is reproduced by the LUT's clamp, not by clamping the vertex value (M2's note said it
+would be kept); texcoord1's `v` is a row centre chosen per polygon, and the LUT's first and last columns hold
+the exact clamped values, so the common cases are exact. The colour gate is M2's neighbourhood rule with 8.3's
+lit numbers unchanged (no tolerance change; host prediction: lighting adds ≤ 2 per channel, mean ≤ 0.47). The
+second film is L08 "Nuke and Pave", the only Marathon 2 level with a light that can go negative (offline
+parse of `Map.sceA`).
+
+### M3 pre-implementation, round 1 (critic: REVISE, 1 critical, 1 major, 5 minor; applied)
+
+(1) *Critical:* `C3D_TexBind(1, NULL)` dereferences NULL + 12 (texture.o `C3D_TexBind`+0x10-0x20; Azahar
+hides it): unit 1 now keeps the LUT from the first lit frame until `C3D_Fini`, the Copying → Vram step
+re-binds before deleting, `tex1_restore_mismatch` counts foreign unit-1 binds; new 0.3 row; section 10 item 6
+gains "unit 1 enabled during the present". (2) *Major:* SW's `table_index` is a `short` with no lower clamp,
+so a strongly negative (or ≥ 2²³) ambient wraps; L08's light at −32 768.0 gives black (exactly −2³¹) or an
+out-of-bounds table, not full bright: the front end computes SW's wrapped index, and polygons where it is
+negative or can wrap are excluded on both sides (`c3d_ambient_wrap`); film paragraph corrected (the
+coordinator's entry above said "capped at 255: full bright", which is wrong). (3) `alpha_x2` defaults to 0
+(M2's written alpha; the ×2 has no M3 use and only adds the UNVERIFIED clamp), run as the `m3-alpha2.cfg`
+A/B for M5. (4) Stage 1 and unit 1 are set only after the SAVE block; `lit 0` / `textures 0` frames touch
+neither. (5) Host grid replaced by a practical one with bin edges, `d ± ½` and a one-bin `u` nudge. (6) The
+infravision plugin also sets the duration in `Triggers.init`. (7) The floor sign guard's fictitious `w`
+named as a known inexactness.
+
+### M3 pre-implementation, round 2 (critic: APPROVE, 2 minor, folded)
+
+The wrap exclusion through `c3d_only` is sound on both sides (`filter.cpp`:30-35, :43, :58); leaving unit 1
+bound is safe for the present and `view.cpp`'s calibration (neither reads unit 1). Folded: the wrap test uses
+the ambient after the `fullbright` rewrite and skips shadeless polygons; `c3d_ambient_wrap` is printed apart
+from `excluded`. Console-only (section 10 item 6): the ×2 clamp, PICA's modulate rounding, texcoord1
+precision, unit 1 enabled during the present (no visual effect, no cost, no hang).
