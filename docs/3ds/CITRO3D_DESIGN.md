@@ -2416,7 +2416,10 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   reserve 536 (first textured draw 268 words). **One recorded exception (user decision 2026-11-02, Review
   log "M2 acceptance, load test colour"):** the load test's level-1 floors reach 97.78 % within (a minified
   ceiling, host-predicted). Not reached: ≥ 16 conversions in one view frame (at most 10 on these levels).
-  M2 has not run on the console (`NEXT-SPRINT.md` "M2 console check, short version").
+  **Console short check passed (2026-11-03,** `PERF.md` "Stage 10 M2 — console, short check"): L0 textured
+  diff and deferred promotions (`gxq_budget 4`, `promo 11/10`) exit 0, 0 non-edge, `sentinel` 0, 0 discards;
+  every check at a given coverage identical whatever the texture residency; command words identical to
+  Azahar. The conversion flush and the TextureCopy promotion are verified on hardware.
 - *Earlier:* **Status (2026-11-02): session 1 done** (parts 1-5; `PERF.md` "Stage 10 M2 session 1"; commits
   `c28261369`..`686e5cd01`; critic on the code: APPROVE, six minors, five fixed, the sixth = the OFF-build
   record in `PATCHES.md` 46). Interim run (flat, both Azahar backends) passes except 13 film floor pixels:
@@ -3432,7 +3435,8 @@ span corner counted as `nonfinite`; (3) an allocation failing with room under th
 pool was empty: at most 2 more victims (`kEvictAfterAllocFail`). Speculative, not acted on: after an
 abandon `release_and_fini` returns before `texcache_release_all` (citro3d never comes back after an
 abandon). Needs console verification: the RAW `GX_TextureCopy` linear → VRAM, the ranged conversion flush
-on real caches, the cost of promotions and per-miss flushes (`c3d_tex`).
+on real caches (both **verified** on the console 2026-11-03, `PERF.md` "Stage 10 M2 — console, short
+check"), the cost of promotions and per-miss flushes (`c3d_tex`; still not measured).
 
 ### M2 acceptance, load test colour (coordinator, 2026-11-02; user decision; a recorded exception)
 

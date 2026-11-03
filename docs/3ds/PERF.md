@@ -1519,3 +1519,40 @@ differences; `m1-diff-walls.cfg` L0 (now `textures 0`): `--coverage walls` exit 
 `m0-readback-cal.cfg` / `-resize.cfg`: 30/30 ok, both; P1 scripts 07 (`p1-diff.cfg`, every `present_diff` 0),
 14 (`present_diff final: 11 checks, 0`), 22 (`gate closed`, 3 skipped presents, `release done`, 17 692 KiB
 linear free). Azahar 2126.2 hung in its own teardown after the game's clean exit once (script 13); killed.
+
+### Stage 10 M2 — console, short check (New 3DS, 2026-11-03)
+
+`NEXT-SPRINT.md` "M2 console check, short version", run on `c5730dbef` (code = tag `port-stage10-M2`;
+`build-3ds-c3d-prof`, nothing rebuilt), HUD + Map, Framerate Target 60 (the card's setting, unchanged), over
+3dslink; transcripts `build-3ds/hw/m1/m2s-l0.txt`, `m2s-gxq4.txt`, `m2s-gxq4-demo.txt` (not in git). Same
+`c3d-diff.py log … --colour walls,floors --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks 20`.
+
+| Launch | Result |
+| --- | --- |
+| 1, `m2-diff.cfg` + `debug-perf` L0 | exit 0; non-edge 0; `sentinel` 0; 0 discards. The menu's demo started before the A presses and took diff frames 1-2 (its own 10 textures, `conv 21` in all); frames 3-20 are the benchmark — **pass** |
+| 2, `m2-gxq4.cfg` + `debug-perf` L0 | first attempt: the demo took all 20 diff frames (moving view; exit 0, 0 discards, `promo 11/9`, `view_frame_words=1376`; kept as `m2s-gxq4-demo.txt`, inconclusive). Repeated with A pressed at once: all 20 checks in the benchmark, exit 0, non-edge 0, `sentinel` 0, 0 discards — **pass** |
+| `[c3d] tex … [final]`, run 2 | `conv 11 (704 KiB, max/frame 512 KiB, over 0) promo 11/10 evict 0 dfree 11 alloc-fail 0 discards 0`: **as Azahar**; promotions one per view frame (`promo 3/3` → `9/9` → `11/10` over the first checks) |
+| command words (deterministic), both runs | `view_frame_words=1288 draw_words=268 readback_words=8`, `present_frame_words=286 present_end_words=10`: **identical to Azahar**; `tex_restore_mismatch=0`, `prog_restore_mismatch=0` |
+
+Per benchmark check (every check, both runs, at the same coverage; Azahar in brackets):
+
+| Class | covered A/B | cov_mismatch | ties / tie_mismatch | within_nb | mean_nb | max_nb |
+| --- | --- | --- | --- | --- | --- | --- |
+| walls | 40140/40133 (40140/40137) | 19/0 (7/0) | 22 / 19 (22 / 7) | 99.53 % (99.68 %) | 0.08 (0.05) | 60 (60) |
+| floors | 52624/52631 (52624/52627) | 19/0 (9/0) | 35 / 19 (35 / 9) | 99.74 % (99.85 %) | 0.04 (0.02) | 60 (32) |
+
+**The checks are not all identical, and that is the scene, not the texture path.** In both runs the walls'
+coverage cycles 40140 → 40114 → 40097 → 40071 and back (floors stay 52624/52631): it moves on side A
+(software) by the same amount as on side B, so something in view moves on the console that is still in
+Azahar's run. Every check at a given coverage has exactly the same diff figures, whatever the texture
+residency: run 1's first benchmark check (linear textures, promoted during it), run 2's checks 1-3 (promotions
+still deferred) and both runs' last checks (all VRAM) all read `differ=579 within_nb=99.53% mean_nb=0.08
+max_nb=60`. The demo's first view also gives identical figures in both runs (`walls covered=42584/42586
+differ=514 within_nb=99.55%`) with all 8+3 promotions done in run 1 and only some in run 2. No check is
+worse than its peers: no sign of a missing conversion flush or a bad TextureCopy. The console's lower colour
+figures are uniform across checks: its rasteriser leaves out more tie pixels (19 vs 7 / 9, as M1's 380 vs 140)
+and its sampling is not Azahar's host GPU. The upload cost is not measured (`c3d_tex` 0 in BENCH: diff frames
+are not benchmark frames); BENCH runs 59.52 / 59.81 fps, `gaps=0`.
+
+Settles design section 7 "Upload model" on hardware: the ranged `GSPGPU_FlushDataCache` after each
+conversion, and the `C3D_SyncTextureCopy` RAW promotion queued after `frame_begin()` and before the clear.

@@ -1161,9 +1161,10 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    textured walls and floors (full bright) on diff frames, texture cache v1 (linear upload, VRAM
    promotions, generations), the texture-binding restore, non-convex polygons as SW's spans; colour
    gate passes on L0/L6/L20 and the film under both Azahar backends, one recorded exception (the load
-   test's level-1 ceiling, user decision). **Next: the user's choice** — M3 (lighting), or the console
-   first: "M2 console check, short version" (end of this file; the first hardware run of the texture
-   uploads), then the full "M1 console check" in a longer session.
+   test's level-1 ceiling, user decision). **"M2 console check, short version": run and passed on the
+   console 2026-11-03** (`PERF.md` "Stage 10 M2 — console, short check": the conversion flush and the
+   TextureCopy promotion verified). **Next: the user's choice** — M3 (lighting, kickoff to be written),
+   or the full "M1 console check" in a longer session.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1537,7 +1538,11 @@ drops alpha; record the quad's pixels from `c3d-rbcal-0.bmp`, stop. Step 5:
 
 ## M2 console check, short version (15-20 min; when the user is at the console)
 
-**Not run yet.** Written 2026-11-02 for `port-stage10-M2`. Azahar has no CPU cache and copies textures
+**Run and passed on the console 2026-11-03** (`PERF.md` "Stage 10 M2 — console, short check": both runs exit 0,
+non-edge 0, `sentinel` 0, 0 discards, `promo 11/10`, command words identical to Azahar; checks identical at equal
+coverage, but L0's walls coverage cycles on the console (something in view moves), so "the 20 identical" holds per
+view, not across the run. Press A at once at the menu: its demo otherwise takes the diff frames.)
+Written 2026-11-02 for `port-stage10-M2`. Azahar has no CPU cache and copies textures
 synchronously, so this is the first hardware test of M2's texture path: the ranged flush after each
 conversion into a linear texture, and the VRAM promotion (`C3D_SyncTextureCopy` RAW copy, linear → VRAM)
 queued before the clear (design section 7 "M2 specification", "Upload model"; Review log "M2 commit
