@@ -11,6 +11,9 @@
 #include "filter.h"
 #include "../back/draw.h"
 #include "../core/classify.h"
+#include "../core/shade_lut.h"
+
+#include "player.h"
 
 #include <cstdio>
 
@@ -22,6 +25,7 @@ void C3dRasterizer::set_target(int w, int h)
 	h_ = h;
 	foreground_ = false;
 	drawn_ = 0;
+	m_noted_ = false;
 	tie_mask_.assign(static_cast<size_t>(w > 0 ? w : 0) * static_cast<size_t>(h > 0 ? h : 0), 0);
 	for (unsigned& s : skipped_)
 		s = 0;
@@ -114,9 +118,38 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		return;
 	}
 
+	// texcoord1 (M3 "texcoord1"): the shade LUT's coordinates from M (the weapon flash), the ambient and the
+	// vertex's perspective weight; constant for shadeless and negative-ambient polygons.
+	const bool shadeless = (p.flags & _SHADELESS_BIT) != 0;
+	const bool lit = textures_ && lit_;
+	const int32_t M = static_cast<int32_t>(view_->maximum_depth_intensity);
+	if (!m_noted_)
+	{
+		m_noted_ = true;
+		if (M > NATURAL_LIGHT_INTENSITY)
+			++flash_checks_;
+		if (M > m_max_)
+			m_max_ = M;
+	}
+	ShadePoly sp;
+	if (lit)
+	{
+		sp = shade_polygon(M, static_cast<int32_t>(p.ambient_shade), shadeless);
+		if (sp.kind == ShadeKind::FlashOver || sp.kind == ShadeKind::Excluded)
+		{
+			// FlashOver: SW's SHRT_MAX depth clamp would leave s > 0 (never in Marathon 2). Excluded: the filter
+			// drops these on both sides first (FilterRasterizer::ambient_wraps), so reaching here is a bug.
+			if (sp.kind == ShadeKind::FlashOver && flash_over_++ == 0)
+				printf("[c3d] front: maximum_depth_intensity %ld above %ld: view frame discarded (unsupported); first of "
+				       "its kind\n", static_cast<long>(M), static_cast<long>(kFlashMax));
+			back::view_discard(back::DiscardReason::Unsupported);
+			return;
+		}
+	}
+
 	// The texture (M2 "View frame with textures"): the bitmap's rows, the 32-bit tables (the harness runs at
 	// bit_depth 32 only, frame.cpp), keyed texel 0 only for a _TRANSPARENT_BIT bitmap on a wall (the floor
-	// mapper always writes, M2 "Transparent texels").
+	// mapper always writes, M2 "Transparent texels"); infravision's tint table through the shadeless kinds (M3).
 	back::TexSource ts;
 	if (textures_)
 	{
@@ -126,7 +159,9 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		ts.bitmap.rows = const_cast<const uint8_t* const*>(reinterpret_cast<uint8_t* const*>(tex->row_addresses));
 		ts.bitmap.rle = tex->bytes_per_row == NONE;
 		ts.tables = static_cast<const uint32_t*>(p.shading_tables);
-		ts.kind = !horizontal && transparent ? TexKind::NormalKeyed : TexKind::Normal;
+		const bool keyed = !horizontal && transparent;
+		ts.kind = shadeless ? (keyed ? TexKind::ShadelessKeyed : TexKind::Shadeless)
+		                    : (keyed ? TexKind::NormalKeyed : TexKind::Normal);
 	}
 	const back::TexSource* tsp = textures_ ? &ts : nullptr;
 	const Rgb col = textures_ ? Rgb{0xFF, 0xFF, 0xFF} : shape_colour(static_cast<uint16_t>(p.ShapeDesc));
@@ -141,7 +176,8 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			o.w = qa[i].w;
 			o.u0 = qa[i].s;
 			o.v0 = qa[i].t;
-			o.u1 = o.v1 = 0.0f;
+			o.u1 = lit ? shade_u(sp, qa[i].w) : 0.0f;
+			o.v1 = lit ? sp.v : 0.0f;
 			o.r = col.r;
 			o.g = col.g;
 			o.b = col.b;
@@ -231,6 +267,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			++span_quads_;
 		}
 		++drawn_;
+		count_lit(lit, shadeless, p.ambient_shade < 0);
 		return;   // no tie pixels: span edges lie on pixel boundaries, and the spans are SW's own
 	}
 
@@ -239,6 +276,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	if (back::view_polygon(v, n, key, tsp))
 	{
 		++drawn_;
+		count_lit(lit, shadeless, p.ambient_shade < 0);
 		tie_pixels(pts, n, w_, h_,
 		           [](void* ctx, int k, int m) {
 			           auto* self = static_cast<C3dRasterizer*>(ctx);

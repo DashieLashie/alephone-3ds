@@ -130,9 +130,10 @@ struct DrawKey
 
 // M2's draw set (design 7, M2 specification "What C3D draws in M2"): textured-transfer walls and floors
 // (Entry::Vertical / Entry::Horizontal) with a supported bitmap (tex_supported: not RLE, square, a power of
-// two in [128, 512]) and without _SHADELESS_BIT. With `textures` off (flat colour, coverage only) a wall
-// whose bitmap has _TRANSPARENT_BIT is not supported either (M1's rule: flat C3D would draw it solid; a
-// floor never skips texel 0). `transparent_texture` is the already extracted flag.
+// two in [128, 512]). With `textures` off (flat colour, coverage only) a wall whose bitmap has
+// _TRANSPARENT_BIT is not supported either (M1's rule: flat C3D would draw it solid; a floor never skips
+// texel 0), nor a _SHADELESS_BIT (infravision) primitive: M3 draws those with the shadeless kinds, which need
+// textures. `transparent_texture` is the already extracted flag.
 bool c3d_supports(Entry e, Transfer t, int width, int height, bool rle, bool shadeless, bool transparent_texture,
                   bool textures);
 

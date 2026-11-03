@@ -9,6 +9,8 @@
 */
 #include "filter.h"
 
+#include "../core/shade_lut.h"
+
 #include "../core/geometry.h"
 
 namespace a1_c3d {
@@ -36,6 +38,16 @@ bool FilterRasterizer::c3d_excluded(Entry e, const polygon_definition& p) const
 	                     (p.flags & _SHADELESS_BIT) != 0, (t->flags & _TRANSPARENT_BIT) != 0, textures_);
 }
 
+// M3 "texcoord1": SW's short index wraps for this ambient (negative index: SW reads before the tables; or
+// a + (s >> 1) can pass 2^23 at some pixel), so SW's output is undefined. The ambient SW will see: the
+// fullbright rewrite makes it FIXED_ONE, and shadeless polygons ignore it (scottish_textures.cpp:984, 1085).
+bool FilterRasterizer::ambient_wraps(const polygon_definition& p) const
+{
+	if (!c3d_only_ || !textures_ || fullbright_ || p.transfer_mode != _textured_transfer || (p.flags & _SHADELESS_BIT))
+		return false;
+	return shade_ambient_wraps(static_cast<int32_t>(p.ambient_shade));
+}
+
 void FilterRasterizer::texture_horizontal_polygon(polygon_definition& p)
 {
 	if (!passes(classify(Entry::Horizontal, to_transfer(p.transfer_mode), foreground_)))
@@ -43,6 +55,12 @@ void FilterRasterizer::texture_horizontal_polygon(polygon_definition& p)
 	if (c3d_excluded(Entry::Horizontal, p))
 	{
 		++excluded_;
+		return;
+	}
+	if (ambient_wraps(p))
+	{
+		++excluded_;
+		++ambient_wrap_;
 		return;
 	}
 	polygon_definition copy = p;
@@ -58,6 +76,12 @@ void FilterRasterizer::texture_vertical_polygon(polygon_definition& p)
 	if (c3d_excluded(Entry::Vertical, p))
 	{
 		++excluded_;
+		return;
+	}
+	if (ambient_wraps(p))
+	{
+		++excluded_;
+		++ambient_wrap_;
 		return;
 	}
 	polygon_definition copy = p;

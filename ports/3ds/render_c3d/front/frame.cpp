@@ -79,6 +79,7 @@ unsigned s_dump_files = 0;
 bool s_diff_summary_printed = false;
 unsigned s_c3d_compared = 0, s_c3d_discarded = 0, s_c3d_skipped = 0;
 unsigned long long s_c3d_ties = 0, s_c3d_tie_mismatch = 0;
+unsigned s_c3d_ambient_wrap = 0;   // M3: polygons excluded because SW's short index wraps (FilterRasterizer)
 unsigned s_c3d_drawn = 0, s_c3d_accept_skips[5] = {0, 0, 0, 0, 0};
 C3dRasterizer s_c3d_rast;
 
@@ -209,11 +210,15 @@ void diff_summary()
 	s_diff_summary_printed = true;
 	printf("[c3d] DIFF summary frames=%u checks=%u differ_total=%llu dropped=%u c3d_compared=%u c3d_discarded=%u "
 	       "c3d_skipped=%u c3d_drawn=%u c3d_accept_skips=degenerate:%u,bounds:%u,walk:%u,area:%u c3d_ties=%llu c3d_tie_mismatch=%llu "
-	       "c3d_span_polygons=%u c3d_span_quads=%u c3d_span_quads_max=%d c3d_span_ring_refused=%u\n", s_diff_done,
+	       "c3d_span_polygons=%u c3d_span_quads=%u c3d_span_quads_max=%d c3d_span_ring_refused=%u "
+	       "c3d_lit_polys=%u c3d_shadeless_polys=%u c3d_neg_ambient_polys=%u c3d_flash_checks=%u c3d_m_max=%ld "
+	       "c3d_flash_over=%u c3d_ambient_wrap=%u\n", s_diff_done,
 	       s_diff_checks, static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped, s_c3d_compared,
 	       s_c3d_discarded, s_c3d_skipped, s_c3d_drawn, s_c3d_accept_skips[1], s_c3d_accept_skips[2],
 	       s_c3d_accept_skips[3], s_c3d_accept_skips[4], s_c3d_ties, s_c3d_tie_mismatch, s_c3d_rast.span_polygons(),
-	       s_c3d_rast.span_quads(), s_c3d_rast.span_quads_max(), s_c3d_rast.span_ring_refused());
+	       s_c3d_rast.span_quads(), s_c3d_rast.span_quads_max(), s_c3d_rast.span_ring_refused(),
+	       s_c3d_rast.lit_polys(), s_c3d_rast.shadeless_polys(), s_c3d_rast.neg_ambient_polys(),
+	       s_c3d_rast.flash_checks(), s_c3d_rast.m_max(), s_c3d_rast.flash_over(), s_c3d_ambient_wrap);
 	fflush(stdout);
 }
 
@@ -240,6 +245,7 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 	swr->screen = s_a.get();
 	FilterRasterizer fa(sw, c, cfg.fullbright, true, cfg.textures);
 	s_recorder.replay(&fa);
+	s_c3d_ambient_wrap += fa.ambient_wrap();
 
 	// Zone c3d_draw (design 7, M1 "Zones"): the C3D side from view_begin to view_end, the front end's
 	// replay through C3dRasterizer included; the readback and its retirement wait inside view_end are
@@ -257,7 +263,7 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 			texture_random_seed() = s0;
 			s_b.clear(0);
 			s_c3d_rast.set_target(w, h);
-			s_c3d_rast.set_options(cfg.textures, cfg.uv_half);
+			s_c3d_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit);
 			FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true, cfg.textures);
 			s_recorder.replay(&fb);
 			ve = back::view_end(s_b.pixels.data(), s_b.w, &sentinel);

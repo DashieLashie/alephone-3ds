@@ -1186,8 +1186,9 @@ static void test_fan_and_key()
 		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 256, false, false, false, tex));       // not square
 		CHECK(!sup(Entry::Vertical, Transfer::Textured, 192, 192, false, false, false, tex));       // not a power of two
 		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, true, false, false, tex));        // RLE (sprites)
-		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, false, true, false, tex));        // shadeless (M3)
-		CHECK(!sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, true, false, tex));
+		// shadeless (infravision): drawn with textures (M3, the shadeless kinds), excluded on the flat path
+		CHECK(sup(Entry::Vertical, Transfer::Textured, 128, 128, false, true, false, tex) == tex);
+		CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, true, false, tex) == tex);
 		CHECK(!sup(Entry::Rectangle, Transfer::Textured, 128, 128, false, false, false, tex));
 		CHECK(!sup(Entry::Vertical, Transfer::BigLandscaped, 128, 128, false, false, false, tex));
 		CHECK(!sup(Entry::Horizontal, Transfer::BigLandscaped, 128, 128, false, false, false, tex));

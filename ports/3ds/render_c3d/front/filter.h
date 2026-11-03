@@ -46,11 +46,13 @@ public:
 	// c3d_only (C3D checks only, on both sides): a textured-transfer wall or floor that c3d_supports()
 	// rejects (an odd-sized, RLE or shadeless bitmap; with `textures` off also a transparent wall: SW skips
 	// texel 0, flat C3D would draw it solid) is dropped and counted as excluded, instead of discarding the
-	// check (section 7, M2 specification "What C3D draws in M2").
+	// check (section 7, M2 specification "What C3D draws in M2"). M3: also a polygon whose ambient wraps SW's
+	// short table index (ambient_wraps; counted in excluded and in ambient_wrap).
 	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright, bool c3d_only = false, bool textures = false)
 		: inner_(inner), cls_(cls), fullbright_(fullbright), c3d_only_(c3d_only), textures_(textures) {}
 
 	unsigned excluded() const { return excluded_; }
+	unsigned ambient_wrap() const { return ambient_wrap_; }
 
 	void SetView(view_data& View) override { inner_->SetView(View); }
 	void Begin() override { foreground_ = false; inner_->Begin(); }
@@ -65,6 +67,7 @@ public:
 private:
 	bool passes(int cls) const { return cls_ == kFrame || cls_ == cls; }
 	bool c3d_excluded(Entry e, const polygon_definition& p) const;
+	bool ambient_wraps(const polygon_definition& p) const;
 
 	RasterizerClass* inner_;
 	int cls_;
@@ -72,6 +75,7 @@ private:
 	bool c3d_only_;
 	bool textures_;
 	unsigned excluded_ = 0;
+	unsigned ambient_wrap_ = 0;
 	bool foreground_ = false;
 };
 

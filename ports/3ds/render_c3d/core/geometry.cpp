@@ -310,7 +310,7 @@ bool c3d_supports(Entry e, Transfer t, int width, int height, bool rle, bool sha
 {
 	if (t != Transfer::Textured || (e != Entry::Vertical && e != Entry::Horizontal))
 		return false;
-	if (!tex_supported(width, height, rle) || shadeless)
+	if (!tex_supported(width, height, rle) || (shadeless && !textures))
 		return false;
 	if (e == Entry::Vertical && transparent_texture && !textures)
 		return false;

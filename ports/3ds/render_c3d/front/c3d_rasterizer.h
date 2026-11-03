@@ -34,12 +34,14 @@ class C3dRasterizer : public RasterizerClass
 public:
 	// The size of the target the polygons are accepted against (the view_begin size); resets the counters.
 	void set_target(int w, int h);
-	// debug-c3d `textures` (the support predicate's transparent-wall rule) and `uv_half` (the attribute
-	// shift of -1/2 pixel). Persist across set_target.
-	void set_options(bool textures, bool uv_half)
+	// debug-c3d `textures` (the support predicate's transparent-wall rule), `uv_half` (the attribute
+	// shift of -1/2 pixel) and `lit` (texcoord1 for the shade LUT, M3; with textures only). Persist across
+	// set_target.
+	void set_options(bool textures, bool uv_half, bool lit)
 	{
 		textures_ = textures;
 		uv_half_ = uv_half;
+		lit_ = lit;
 	}
 
 	void SetView(view_data& View) override { view_ = &View; }
@@ -68,16 +70,43 @@ public:
 	// eye height (o.z == 0) counts as Degenerate.
 	unsigned skipped(Accept a) const { return skipped_[static_cast<int>(a)]; }
 
+	// M3 counters since the start (not reset by set_target; design 7, M3 "Counters"): polygons drawn with depth
+	// and ambient shading, shadeless (infravision), with a negative ambient; polygons refused because M is above
+	// SW's SHRT_MAX equivalence (discard); targets (checks) whose M exceeded NATURAL_LIGHT_INTENSITY (the weapon
+	// flash), and the largest M seen.
+	unsigned lit_polys() const { return lit_polys_; }
+	unsigned shadeless_polys() const { return shadeless_polys_; }
+	unsigned neg_ambient_polys() const { return neg_ambient_polys_; }
+	unsigned flash_over() const { return flash_over_; }
+	unsigned flash_checks() const { return flash_checks_; }
+	long m_max() const { return m_max_; }
+
 private:
 	view_data* view_ = nullptr;
 	int w_ = 0, h_ = 0;
 	void polygon(Entry e, polygon_definition& p);
+	void count_lit(bool lit, bool shadeless, bool negative)
+	{
+		if (!lit)
+			return;
+		if (shadeless)
+			++shadeless_polys_;
+		else
+		{
+			++lit_polys_;
+			neg_ambient_polys_ += negative;
+		}
+	}
 	// The attributes of n points of the polygon (wall or floor row of 2.2) into `at`.
 	TexResult attrs(bool horizontal, const polygon_definition& p, const Point2* pts, int n, TexAttr* at) const;
 
 	bool foreground_ = false;
 	bool textures_ = false;
 	bool uv_half_ = true;
+	bool lit_ = true;
+	bool m_noted_ = false;   // this target's M was looked at (reset by set_target)
+	unsigned lit_polys_ = 0, shadeless_polys_ = 0, neg_ambient_polys_ = 0, flash_over_ = 0, flash_checks_ = 0;
+	long m_max_ = 0;
 	unsigned drawn_ = 0;
 	unsigned nonfinite_ = 0;   // not reset by set_target
 	unsigned span_polygons_ = 0, span_quads_ = 0;   // not reset by set_target
