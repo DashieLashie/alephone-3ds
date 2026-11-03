@@ -87,6 +87,13 @@
 	  promote_max N     0..8, default 8: linear-to-VRAM promotions per view frame; 0 = never
 	                    (linear sampling only)
 
+	Keys of M3 (design 7, "M3 specification", "Keys"):
+
+	  lit 0|1           default 1: textured view frames shade with the shade LUT on texture unit 1 and
+	                    two TEV stages (design 4.2); 0 = M2's single stage (the texture as it is)
+	  alpha_x2 0|1      default 0: with lit 1, TEV stage 0's alpha is scaled x2 (the UNVERIFIED clamp
+	                    A/B of m3-alpha2.cfg); 0 = scale 1 (alpha 255 or 128 written, as in M2)
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -141,6 +148,9 @@ struct Config
 	unsigned vram_cap = 3584;               // KiB
 	unsigned linear_cap = 4096;             // KiB
 	unsigned promote_max = 8;
+	// M3
+	bool lit = true;
+	bool alpha_x2 = false;
 	std::string film;
 };
 

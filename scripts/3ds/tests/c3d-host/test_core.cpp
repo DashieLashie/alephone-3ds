@@ -20,6 +20,7 @@
 #include "geometry.h"
 #include "gx_queue.h"
 #include "ring.h"
+#include "shade_lut.h"
 #include "stats.h"
 #include "tex_convert.h"
 #include "texcache.h"
@@ -2226,21 +2227,23 @@ static bool read_file(const std::string& path, std::vector<uint8_t>& d)
 	return true;
 }
 
-// Runs tex3ds -f rgba8 -z none -r on `rgba` (W x W, row 0 first); returns the texel bytes after the
-// 4-byte compression header (checked here). False: tex3ds failed or the header is wrong.
-static bool run_tex3ds(const std::string& dir, unsigned W, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& texels)
+// Runs tex3ds -f <fmt> -z none -r on `rgba` (W x W, row 0 first); returns the texel bytes after the
+// 4-byte compression header (checked here). False: tex3ds failed or the header is wrong. fmt rgba8 (4 bytes
+// per texel) or, for M3's LUT, l8 (1 byte).
+static bool run_tex3ds(const std::string& dir, unsigned W, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& texels,
+                       const char* fmt = "rgba8", unsigned texel_bytes = 4)
 {
 	const std::string in = dir + "/in.png", out = dir + "/out.bin";
 	if (!write_file(in, make_png(W, rgba)))
 		return false;
-	const std::string cmd = "'/opt/devkitpro/tools/bin/tex3ds' -f rgba8 -z none -r -o '" + out + "' '" + in + "' > '" + dir + "/log.txt' 2>&1";
+	const std::string cmd = std::string("'/opt/devkitpro/tools/bin/tex3ds' -f ") + fmt + " -z none -r -o '" + out + "' '" + in + "' > '" + dir + "/log.txt' 2>&1";
 	if (std::system(cmd.c_str()) != 0)
 		return false;
 	std::vector<uint8_t> raw;
-	if (!read_file(out, raw) || raw.size() != 4 + static_cast<size_t>(W) * W * 4)
+	if (!read_file(out, raw) || raw.size() != 4 + static_cast<size_t>(W) * W * texel_bytes)
 		return false;
 	const uint32_t size = raw[1] | (raw[2] << 8) | (raw[3] << 16);
-	if (raw[0] != 0x00 || size != W * W * 4)   // compression type 0 (none), 24-bit little-endian size
+	if (raw[0] != 0x00 || size != W * W * texel_bytes)   // compression type 0 (none), 24-bit little-endian size
 		return false;
 	texels.assign(raw.begin() + 4, raw.end());
 	return true;
@@ -3249,6 +3252,254 @@ static void test_m2_core()
 	test_texcoords_vs_sw();
 }
 
+// --- M3 (design 7, "M3 specification", "Host tests")
+
+static void test_config_m3()
+{
+	Config d;
+	CHECK(d.lit && !d.alpha_x2);
+	Config c;
+	CHECK(config_apply(c, "lit", "0") && !c.lit && config_apply(c, "lit", "1") && c.lit);
+	CHECK(config_apply(c, "alpha_x2", "1") && c.alpha_x2 && config_apply(c, "alpha_x2", "0") && !c.alpha_x2);
+	CHECK(!config_apply(c, "lit", "2") && !config_apply(c, "alpha_x2", "") && c.lit && !c.alpha_x2);
+}
+
+// calculate_shading_table (scottish_textures.cpp:146-165) at bit_depth 32, written out again on its own
+// types: short table_index, _fixed shade, CEILING = MIN (csmacros.h:42). The index, or -1000 - x for an index
+// x < 0 that SW would use to read before the tables.
+static int sw_calc_index(int32_t M, short depth, int32_t ambient_shade)
+{
+	short table_index;
+	int32_t shade;
+	if (ambient_shade < 0)
+		table_index = static_cast<short>(static_cast<int32_t>(0u - static_cast<uint32_t>(ambient_shade)) >> (16 - 8));
+	else
+	{
+		shade = M - (static_cast<int32_t>(depth) << (16 - 10 - 3));
+		shade = shade < 0 ? 0 : (shade > 65536 ? 65536 : shade);
+		const uint32_t v = ambient_shade > shade ? static_cast<uint32_t>(ambient_shade) + static_cast<uint32_t>(shade >> 1)
+		                                          : static_cast<uint32_t>(shade) + static_cast<uint32_t>(ambient_shade >> 1);
+		table_index = static_cast<short>(static_cast<int32_t>(v) >> (16 - 8));
+	}
+	const int idx = table_index < 255 ? table_index : 255;
+	return idx;
+}
+
+// The GPU's LUT texel for texcoord1 (u, v) with nearest sampling and clamp to edge.
+static int lut_sample(double u, double v)
+{
+	auto texel = [](double c) {
+		const double f = std::floor(c * 256.0);
+		return f < 0 ? 0 : (f > 255 ? 255 : static_cast<int>(f));
+	};
+	return shade_lut_value(static_cast<unsigned>(texel(u)), static_cast<unsigned>(texel(v)));
+}
+
+static void test_shade_lut()
+{
+	// The representatives and the transliteration agree with the module's own SW index.
+	CHECK(shade_lut_s(0) == 0 && shade_lut_s(255) == 65536 && shade_lut_s(1) == 384 && shade_lut_a(0) == 128 && shade_lut_a(255) == 65408);
+	for (unsigned j = 0; j < 256; ++j)
+		CHECK(shade_lut_value(0, j) == j);   // column 0 (s = 0): exactly the row (a_j >> 8 = j)
+	for (unsigned i = 0; i < 256; ++i)
+		CHECK(shade_lut_value(i, 255) == 255);   // full bright
+	CHECK(shade_lut_value(255, 0) == 255);       // s = 1: 65536 + 64 >> 8 = 256 -> 255
+
+	// The wrap rules (round 1 finding 2).
+	CHECK(sw_shade_index(65536, 0, INT32_MIN) == 0 && !shade_ambient_wraps(INT32_MIN));   // -2^31: table 0, black
+	CHECK(sw_shade_index(65536, 0, INT32_MIN + 1) == -1 && shade_ambient_wraps(INT32_MIN + 1));
+	CHECK(shade_ambient_wraps(INT32_MIN + 255) && shade_ambient_wraps(-(1 << 23)) && !shade_ambient_wraps(-(1 << 23) + 1));
+	CHECK(sw_shade_index(65536, 0, -(1 << 23) + 1) == 255);
+	CHECK(!shade_ambient_wraps(kAmbientWrapMin - 1) && shade_ambient_wraps(kAmbientWrapMin));
+	CHECK(sw_shade_index(65536, 0, kAmbientWrapMin - 1) == 255);   // a + 32768 = 2^23 - 1: index 32767, no wrap
+	CHECK(sw_shade_index(65536, 0, kAmbientWrapMin) < 0);          // a + 32768 = 2^23: the short wraps
+	CHECK(shade_polygon(65536, kAmbientWrapMin, false).kind == ShadeKind::Excluded);
+	CHECK(shade_polygon(65536, INT32_MIN + 7, false).kind == ShadeKind::Excluded);
+	CHECK(shade_polygon(kFlashMax + 1, 1000, false).kind == ShadeKind::FlashOver);
+	CHECK(shade_polygon(kFlashMax, 1000, false).kind == ShadeKind::Depth);
+	{
+		const ShadePoly p = shade_polygon(65536, INT32_MIN, false);   // drawn as SW: row 0, column 0 = level 0
+		CHECK(p.kind == ShadeKind::Constant && p.row == 0 && lut_sample(p.u, p.v) == 0);
+		const ShadePoly q = shade_polygon(65536, 123456, true);       // shadeless: LUT 255
+		CHECK(q.kind == ShadeKind::Constant && lut_sample(q.u, q.v) == 255);
+	}
+
+	// Negative ambient (no depth): exact wherever SW's index is in [0, 255].
+	unsigned neg_n = 0, neg_bad = 0;
+	for (int64_t a = -1; a >= INT32_MIN; a = a * 3 / 2 - 1)
+		for (int64_t da : {0LL, -1LL, -127LL, -128LL, -255LL})
+		{
+			const int64_t aa = a + da;
+			if (aa >= 0 || aa < INT32_MIN)
+				continue;
+			const int32_t a32 = static_cast<int32_t>(aa);
+			const int sw = sw_calc_index(65536, 0, a32);
+			CHECK(sw == sw_shade_index(65536, 0, a32));
+			CHECK(shade_ambient_wraps(a32) == (sw < 0));
+			if (sw < 0)
+				continue;
+			const ShadePoly p = shade_polygon(65536, a32, false);
+			++neg_n;
+			neg_bad += lut_sample(p.u, p.v) != sw;
+		}
+	CHECK(neg_bad == 0 && neg_n > 100);
+
+	// The grid: every integer d in [0, M/8 + 64] (s pinned to 0 beyond) plus far d, every a at the bin edges
+	// 256 j + {0, 1, 127, 128, 255} (j = 0..256) and a few large ones; the GPU's w at d - 1/2, d, d + 1/2 (SW keeps
+	// the integer d) and u nudged by +-1/65536 (a one-bin miss at a boundary). |LUT - SW| <= 1 everywhere.
+	std::vector<int32_t> as;
+	for (int j = 0; j <= 256; ++j)
+		for (int o : {0, 1, 127, 128, 255})
+			as.push_back(256 * j + o);
+	for (int32_t a : {100000, 131072, 1 << 20, kAmbientWrapMin - 1})
+		as.push_back(a);
+	unsigned long long n = 0, exact = 0, worse = 0, pinned_bad = 0, full_bad = 0;
+	int worst = 0;
+	for (int32_t M : {32768, 65536, 98304, 131072, kFlashMax})
+	{
+		std::vector<int> ds;
+		const int dmax = std::min(32767, M / 8 + 64);
+		for (int d = 0; d <= dmax; ++d)
+			ds.push_back(d);
+		for (int d : {dmax + 500, 20000, 32767})
+			if (d > dmax && d <= 32767)
+				ds.push_back(d);
+		for (int32_t a : as)
+		{
+			const ShadePoly p = shade_polygon(M, a, false);
+			CHECK(p.kind == ShadeKind::Depth);
+			for (int d : ds)
+			{
+				const int sw = sw_calc_index(M, static_cast<short>(d), a);
+				for (int k = 0; k < 5; ++k)
+				{
+					static const double dd[5] = {-0.5, 0.0, 0.5, 0.0, 0.0};
+					static const double nudge[5] = {0.0, 0.0, 0.0, -1.0 / 65536, 1.0 / 65536};
+					const double w = std::max(16.0, d + dd[k]);   // the vertex weight's clamp (M2)
+					const double u = static_cast<double>(M) / 65536.0 - w / 8192.0 + nudge[k];
+					const int g = lut_sample(u, p.v);
+					const int e = std::abs(g - sw);
+					++n;
+					exact += e == 0;
+					worse += e > 1;
+					worst = std::max(worst, e);
+					if (u < -1.0 / 256 && e != 0)
+						++pinned_bad;   // s pinned to 0 far from the bin edge: exact
+					if (a >= 65280 && e != 0)
+						++full_bad;     // full bright: exact
+				}
+			}
+		}
+	}
+	CHECK(worse == 0 && pinned_bad == 0 && full_bad == 0);
+	std::printf("shade LUT vs SW: %llu samples, exact %.3f%%, worst |dL| %d (gate <= 1); negative ambient %u cases "
+	            "exact; s-pinned and full-bright cases exact: %s\n",
+	            n, 100.0 * exact / n, worst, neg_n, pinned_bad == 0 && full_bad == 0 ? "yes" : "NO");
+
+	// tiling: the built LUT is tile_l8 of the plain image.
+	std::vector<uint8_t> plain(kLutBytes), a(kLutBytes), b(kLutBytes);
+	for (unsigned j = 0; j < 256; ++j)
+		for (unsigned i = 0; i < 256; ++i)
+			plain[j * 256 + i] = shade_lut_value(i, j);
+	tile_l8(256, plain.data(), a.data());
+	shade_lut_build(b.data());
+	CHECK(a == b);
+	CHECK(b[tile_index(256, 255, 0)] == 0 && b[tile_index(256, 0, 0)] == 255);   // row 0 (a ~ 0) is the last memory row
+}
+
+// The lit colour prediction (informative): SW's channel ((c16 * m) / 255) >> 8 against the two TEV stages on
+// c8 = c16 >> 8, integer (a * b) / 255 (Azahar's software backend) and rounded float (host GPU), the LUT exact
+// and off by one level.
+static void test_lit_prediction()
+{
+	auto sw = [](int c, int L, bool self) { const int m = self ? 128 + (L >> 1) : L; return ((c * m) / 255) >> 8; };
+	auto mulf = [](int a, int b) { return (a * b) / 255; };
+	auto mulr = [](int a, int b) { return static_cast<int>(std::floor(a * b / 255.0 + 0.5)); };
+	int worst_all = 0;
+	for (int self = 0; self < 2; ++self)
+		for (int r = 0; r < 2; ++r)
+			for (int lerr = 0; lerr < 2; ++lerr)
+			{
+				long n = 0, sum = 0;
+				int mx = 0;
+				for (int c = 0; c < 65536; c += 7)
+					for (int L = 0; L < 256; ++L)
+						for (int e = -lerr; e <= lerr; ++e)
+						{
+							const int Lg = L + e;
+							if (Lg < 0 || Lg > 255)
+								continue;
+							const int A = self ? 128 : 255;
+							const int x = r ? mulr(A, 255 - Lg) : mulf(A, 255 - Lg);
+							const int g = r ? mulr(c >> 8, 255 - x) : mulf(c >> 8, 255 - x);
+							const int d = std::abs(sw(c, L, self) - g);
+							mx = std::max(mx, d);
+							sum += d;
+							++n;
+						}
+				worst_all = std::max(worst_all, mx);
+				std::printf("lit prediction %s, TEV %s, LUT %s: max delta %d, mean %.3f\n", self ? "self-luminous" : "normal",
+				            r ? "rounded" : "floor", lerr ? "+-1 level" : "exact", mx, static_cast<double>(sum) / n);
+			}
+	CHECK(worst_all <= 2);
+}
+
+static void test_tiling_tex3ds_l8()
+{
+	const char* tex3ds = "/opt/devkitpro/tools/bin/tex3ds";
+	if (access(tex3ds, X_OK) != 0)
+	{
+		std::printf("SKIPPED tex3ds L8 test: %s not found\n", tex3ds);
+		return;
+	}
+	const char* tmp = std::getenv("TMPDIR");
+	std::string tmpl = std::string(tmp && *tmp ? tmp : "/tmp") + "/c3d-tex3ds-l8.XXXXXX";
+	std::vector<char> dirbuf(tmpl.begin(), tmpl.end());
+	dirbuf.push_back(0);
+	if (!mkdtemp(dirbuf.data()))
+	{
+		CHECK(false);
+		return;
+	}
+	const std::string dir = dirbuf.data();
+	// A grey PNG (R = G = B = value, A 255) whose row r is source row W - 1 - r; tex3ds -f l8's bytes must equal
+	// tile_l8's. W = 16 with a varied pattern, and the LUT itself (W = 256).
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		const unsigned W = pass ? 256u : 16u;
+		std::vector<uint8_t> src(W * W);
+		for (unsigned j = 0; j < W; ++j)
+			for (unsigned s = 0; s < W; ++s)
+				src[j * W + s] = pass ? shade_lut_value(s, j) : static_cast<uint8_t>((j * W + s) * 37 + 11);
+		std::vector<uint8_t> rgba(W * W * 4);
+		for (unsigned r = 0; r < W; ++r)
+			for (unsigned x = 0; x < W; ++x)
+			{
+				uint8_t* p = &rgba[(r * W + x) * 4];
+				p[0] = p[1] = p[2] = src[(W - 1 - r) * W + x];
+				p[3] = 255;
+			}
+		std::vector<uint8_t> t3x, ours(W * W);
+		const bool ran = run_tex3ds(dir, W, rgba, t3x, "l8", 1);
+		CHECK(ran);
+		tile_l8(W, src.data(), ours.data());
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds L8 tiling W=%u%s: %s\n", W, pass ? " (the shade LUT)" : "", same ? "byte-identical" : "MISMATCH");
+	}
+	std::string cmd = "rm -rf '" + dir + "'";
+	if (std::system(cmd.c_str()) != 0)
+		std::printf("note: could not remove %s\n", dir.c_str());
+}
+
+static void test_m3_core()
+{
+	test_config_m3();
+	test_shade_lut();
+	test_lit_prediction();
+	test_tiling_tex3ds_l8();
+}
+
 int main()
 {
 	test_config();
@@ -3273,6 +3524,7 @@ int main()
 	test_tie_pixels();
 	test_ring();
 	test_m2_core();
+	test_m3_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

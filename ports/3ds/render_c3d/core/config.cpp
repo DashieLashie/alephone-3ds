@@ -167,6 +167,10 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 64, 16384, cfg.linear_cap);
 	if (key == "promote_max")
 		return parse_unsigned(value, 0, 8, cfg.promote_max);
+	if (key == "lit")
+		return parse_flag(value, cfg.lit);
+	if (key == "alpha_x2")
+		return parse_flag(value, cfg.alpha_x2);
 	if (key == "film")
 	{
 		if (value.empty())
