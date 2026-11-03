@@ -209,11 +209,11 @@ void diff_summary()
 	s_diff_summary_printed = true;
 	printf("[c3d] DIFF summary frames=%u checks=%u differ_total=%llu dropped=%u c3d_compared=%u c3d_discarded=%u "
 	       "c3d_skipped=%u c3d_drawn=%u c3d_accept_skips=degenerate:%u,bounds:%u,walk:%u,area:%u c3d_ties=%llu c3d_tie_mismatch=%llu "
-	       "c3d_span_polygons=%u c3d_span_quads=%u\n", s_diff_done,
+	       "c3d_span_polygons=%u c3d_span_quads=%u c3d_span_quads_max=%d c3d_span_ring_refused=%u\n", s_diff_done,
 	       s_diff_checks, static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped, s_c3d_compared,
 	       s_c3d_discarded, s_c3d_skipped, s_c3d_drawn, s_c3d_accept_skips[1], s_c3d_accept_skips[2],
 	       s_c3d_accept_skips[3], s_c3d_accept_skips[4], s_c3d_ties, s_c3d_tie_mismatch, s_c3d_rast.span_polygons(),
-	       s_c3d_rast.span_quads());
+	       s_c3d_rast.span_quads(), s_c3d_rast.span_quads_max(), s_c3d_rast.span_ring_refused());
 	fflush(stdout);
 }
 

@@ -66,6 +66,10 @@ ViewBegin view_skip(SkipReason reason);
 // the tables and the class, which fix the kind).
 bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* tex = nullptr);
 
+// True if `vertices` vertices and `indices` indices still fit in the current ring half (an open, undiscarded
+// frame): the front end asks before drawing a polygon as many span quads (M2 commit review, minor 1).
+bool view_ring_room(unsigned vertices, unsigned indices);
+
 // Gives the frame up (first reason wins): the pending draw is dropped, nothing more is drawn. view_end()
 // still closes the frame.
 void view_discard(DiscardReason reason);

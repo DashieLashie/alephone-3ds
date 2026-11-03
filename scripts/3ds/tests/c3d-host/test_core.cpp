@@ -2499,6 +2499,19 @@ static void test_cache_lru()
 	CHECK(d.create(K(1), 128) == nullptr);
 	CHECK(d.stats().alloc_failed_free == 1 && d.stats().discards_tex == 1);
 	CHECK(d.create(K(1), 128) != nullptr && d.stats().alloc_failed_free == 1);
+
+	// a failure that persists with room under the cap evicts at most kEvictAfterAllocFail victims (minor 3 of the
+	// M2 commit review: fragmentation must not empty the pool)
+	FakeAlloc fe;
+	TexCache e(fe, cfg_of(4096, 0, 0));
+	run_frame(e, gx, 1);
+	for (int i = 0; i < 6; ++i)
+		CHECK(e.create(K(i), 128) != nullptr);
+	run_frame(e, gx, 2);
+	fe.fail_next = 100;
+	CHECK(e.create(K(50), 128) == nullptr);
+	CHECK(e.stats().evictions == kEvictAfterAllocFail && e.live_count(TexPool::Linear) == 6 - kEvictAfterAllocFail);
+	CHECK(fe.bad_release == 0);
 }
 
 static void test_cache_slot_array_full()
@@ -2897,6 +2910,7 @@ static void test_texcoords_vs_sw()
 	const double deltas[2] = {0.0, -0.5};
 	TexAgree wall[2], floor_[2], floor_h_[2];
 	TexAgree wall_b[3][2], floor_b[3][2];
+	TexAgree floor_minif[3];   // floors at delta -0.5 by texels per pixel: < 1, 1-2, >= 2 (informative)
 	TexAgree sw_vs_exact_w, sw_vs_exact_f, gpu_vs_exact_w, gpu_vs_exact_f;   // the exact map at the pixel's corner (informative)   // by TEXBITS 7, 8, 9 (informative)
 	unsigned long walls_made = 0, walls_used = 0, floors_made = 0, floors_used = 0, floors_h_used = 0, nonfinite = 0, degenerate = 0;
 	std::vector<uint8_t> cov(static_cast<size_t>(VW) * VH);
@@ -3065,6 +3079,13 @@ static void test_texcoords_vs_sw()
 							floor_b[bits - 7][di].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
 						if (di == 1 && !near_horizon)
 						{
+							// By minification (texels per pixel step along the row, the larger coordinate): where
+							// neighbouring pixels sample texels >= 2 apart, a one-texel miss of SW's mapper shows in
+							// no neighbour (the load test's level-1 ceiling, M2 acceptance; informative).
+							const double step = std::max(std::fabs(static_cast<double>(static_cast<int32_t>(row.dx))),
+							                             std::fabs(static_cast<double>(static_cast<int32_t>(row.dy)))) /
+							                    std::ldexp(1.0, 32 - bits);
+							floor_minif[step < 1.0 ? 0 : step < 2.0 ? 1 : 2].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
 							TexAttrD e;
 							floor_vertex(v, o, k, m, e);
 							sw_vs_exact_f.add(sw_col, sw_row, texel_of(e.s, W), texel_of(e.t, W), W);
@@ -3075,6 +3096,10 @@ static void test_texcoords_vs_sw()
 			}
 		}
 	}
+	std::printf("texcoords vs SW, floors at delta -0.5 by texels per pixel: < 1 %.3f%% exact (%.3f%% within 1) of %lu px; "
+	            "1-2 %.3f%% (%.3f%%) of %lu; >= 2 %.3f%% (%.3f%%) of %lu (informative)\n",
+	            floor_minif[0].pct(), floor_minif[0].pct1(), floor_minif[0].total, floor_minif[1].pct(), floor_minif[1].pct1(),
+	            floor_minif[1].total, floor_minif[2].pct(), floor_minif[2].pct1(), floor_minif[2].total);
 	std::printf("texcoords vs SW: %lu walls generated, %lu compared; %lu floors generated, %lu compared (+ %lu on the horizon row), "
 	            "%lu non-finite, %lu degenerate\n", walls_made, walls_used, floors_made, floors_used, floors_h_used, nonfinite, degenerate);
 	for (int di = 0; di < 2; ++di)

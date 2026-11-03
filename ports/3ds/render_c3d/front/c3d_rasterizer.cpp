@@ -159,37 +159,68 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			back::view_discard(back::DiscardReason::Unsupported);
 			return;
 		}
+		// Consecutive lines with the same [a0, a1) are one rectangle (still exact: every edge on a pixel boundary).
+		Span rects[1024];
+		int nr = 0;
+		for (int k = 0; k < ns; ++k)
+		{
+			if (spans[k].a1 <= spans[k].a0)
+				continue;
+			if (nr && rects[nr - 1].a0 == spans[k].a0 && rects[nr - 1].a1 == spans[k].a1 &&
+			    rects[nr - 1].line + span_len_[nr - 1] == spans[k].line)
+				++span_len_[nr - 1];
+			else
+			{
+				rects[nr] = spans[k];
+				span_len_[nr++] = 1;
+			}
+		}
 		if (span_polygons_++ < 8)
 		{
-			printf("[c3d] front: non-convex %s polygon drawn as %d spans (first 8 logged):", horizontal ? "floor" : "wall", ns);
+			printf("[c3d] front: non-convex %s polygon drawn as %d spans in %d quads (first 8 logged):",
+			       horizontal ? "floor" : "wall", ns, nr);
 			for (int i = 0; i < n; ++i)
 				printf(" (%d,%d)", pts[i].x, pts[i].y);
 			printf("\n");
 		}
-		for (int k = 0; k < ns; ++k)
+		if (nr > span_quads_max_)
+			span_quads_max_ = nr;
+		// The whole polygon or nothing: a ring that cannot take every quad is the ring discard, counted apart.
+		if (!back::view_ring_room(4u * static_cast<unsigned>(nr), 6u * static_cast<unsigned>(nr)))
 		{
-			const Span& sp = spans[k];
-			if (sp.a1 <= sp.a0)
-				continue;
-			// [a0, a1) x [line, line + 1) (or its transpose): every edge on a pixel boundary, no tie.
+			++span_ring_refused_;
+			back::view_discard(back::DiscardReason::Ring);
+			return;
+		}
+		for (int k = 0; k < nr; ++k)
+		{
+			const Span& sp = rects[k];
+			const int l0 = sp.line, l1 = sp.line + span_len_[k];
+			// [a0, a1) x [l0, l1) (or its transpose): every edge on a pixel boundary, no tie.
 			Point2 q[4];
 			if (horizontal)
 			{
-				q[0] = Point2{sp.a0, sp.line};
-				q[1] = Point2{sp.a1, sp.line};
-				q[2] = Point2{sp.a1, sp.line + 1};
-				q[3] = Point2{sp.a0, sp.line + 1};
+				q[0] = Point2{sp.a0, l0};
+				q[1] = Point2{sp.a1, l0};
+				q[2] = Point2{sp.a1, l1};
+				q[3] = Point2{sp.a0, l1};
 			}
 			else
 			{
-				q[0] = Point2{sp.line, sp.a0};
-				q[1] = Point2{sp.line + 1, sp.a0};
-				q[2] = Point2{sp.line + 1, sp.a1};
-				q[3] = Point2{sp.line, sp.a1};
+				q[0] = Point2{l0, sp.a0};
+				q[1] = Point2{l1, sp.a0};
+				q[2] = Point2{l1, sp.a1};
+				q[3] = Point2{l0, sp.a1};
 			}
 			TexAttr qa[4];
-			if (attrs(horizontal, p, q, 4, qa) != TexResult::Ok)
+			const TexResult qr = attrs(horizontal, p, q, 4, qa);
+			if (qr != TexResult::Ok)
 			{
+				// A quad corner lies on a pixel boundary, possibly just outside the polygon (near the horizon its
+				// texcoords can blow up): counted as the fan path's non-finite case, not as unsupported (minor 2).
+				if (nonfinite_++ == 0)
+					printf("[c3d] front: span texcoords non-finite or spread over 2^20 repeats: view frame discarded "
+					       "(unsupported); first of its kind\n");
 				back::view_discard(back::DiscardReason::Unsupported);
 				return;
 			}

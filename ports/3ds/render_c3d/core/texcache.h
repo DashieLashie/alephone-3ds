@@ -70,6 +70,7 @@ constexpr int kViewReserveEntries = 3;          // clear, flushing split, readba
 constexpr uint32_t kTexSoftBudgetBytes = 512u * 1024;   // converted per view frame: counted, not enforced
 constexpr unsigned kTexGenWindow = 10;          // view frames after a generation change that are recorded
 constexpr uint32_t kNoFrame = 0xFFFFFFFFu;
+constexpr unsigned kEvictAfterAllocFail = 2;   // victims tried after an allocation failed with room under the cap
 
 struct TexKey
 {

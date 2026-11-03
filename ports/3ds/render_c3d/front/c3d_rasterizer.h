@@ -59,6 +59,9 @@ public:
 	// since the start (not reset by set_target).
 	unsigned span_polygons() const { return span_polygons_; }
 	unsigned span_quads() const { return span_quads_; }
+	// The most quads one polygon needed, and the polygons refused because the ring could not take them all.
+	int span_quads_max() const { return span_quads_max_; }
+	unsigned span_ring_refused() const { return span_ring_refused_; }
 	// Polygons whose texcoords came out non-finite or too spread (TexResult::NonFinite) since the start.
 	unsigned nonfinite() const { return nonfinite_; }
 	// Skipped polygons (SW draws nothing for them) by Accept kind (index = Accept; Draw is 0). A floor at
@@ -78,6 +81,9 @@ private:
 	unsigned drawn_ = 0;
 	unsigned nonfinite_ = 0;   // not reset by set_target
 	unsigned span_polygons_ = 0, span_quads_ = 0;   // not reset by set_target
+	int span_quads_max_ = 0;
+	unsigned span_ring_refused_ = 0;
+	int span_len_[1024];   // lines per merged span rectangle (scratch of polygon())
 	std::vector<uint8_t> tie_mask_;
 	unsigned skipped_[5] = {0, 0, 0, 0, 0};
 };

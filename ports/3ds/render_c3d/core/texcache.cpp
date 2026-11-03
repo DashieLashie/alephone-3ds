@@ -87,6 +87,7 @@ void* TexCache::alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint
 	if (bytes > cap_[pi(pool)])
 		return nullptr;
 	bool counted = false;
+	unsigned evicted_after_fail = 0;
 	for (;;)
 	{
 		if (used_[pi(pool)] + bytes <= cap_[pi(pool)])
@@ -102,6 +103,10 @@ void* TexCache::alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint
 				counted = true;
 			}
 		}
+		// After a failure with room under the cap, at most kEvictAfterAllocFail more victims: fragmentation must
+		// not empty the pool for one texture (M2 commit review, minor 3).
+		if (counted && evicted_after_fail++ >= kEvictAfterAllocFail)
+			return nullptr;
 		TexSlot* victim = lru_victim(false, pool, victims_used_below);
 		if (!victim)
 			return nullptr;

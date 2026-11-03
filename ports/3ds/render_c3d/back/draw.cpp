@@ -501,6 +501,11 @@ bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* t
 	return true;
 }
 
+bool view_ring_room(unsigned vertices, unsigned indices)
+{
+	return s_f.open && !s_f.discarded && s_ring.fits(vertices, indices);
+}
+
 void view_discard(DiscardReason reason)
 {
 	if (s_f.open)
