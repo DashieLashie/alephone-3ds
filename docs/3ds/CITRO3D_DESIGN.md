@@ -2407,7 +2407,17 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (play mode, M4), any engine edit.
 
 ### M2 — textured walls and floors (full bright), texture cache v1
-- **Status (2026-11-02): session 1 done** (parts 1-5; `PERF.md` "Stage 10 M2 session 1"; commits
+- **Status (2026-11-02): M2 done** (tag `port-stage10-M2`; `PERF.md` "Stage 10 M2", Azahar — non-authoritative;
+  commits `1c3b9c6f5` parts 6-7, `38ca4868e` review fixes). The tiler's row flip is confirmed (orientation
+  run: walls/floors within 99.68 % / 99.85 % with the flip, 55.75 % / 59.79 % without); `uv_half 1`
+  (`δ = −½`) wins (`uv_half 0`: 45-82 % within) and stays the default; L0/L6/L20 and the film pass under both
+  Azahar backends (0 non-edge coverage mismatches, within 99.1-99.85 %); the film's sliver was a non-convex
+  polygon (logged: `(200,158) (290,139) (399,142) (400,142) (400,154)`) and is drawn as SW's spans; draw
+  reserve 536 (first textured draw 268 words). **One recorded exception (user decision 2026-11-02, Review
+  log "M2 acceptance, load test colour"):** the load test's level-1 floors reach 97.78 % within (a minified
+  ceiling, host-predicted). Not reached: ≥ 16 conversions in one view frame (at most 10 on these levels).
+  M2 has not run on the console (`NEXT-SPRINT.md` "M2 console check, short version").
+- *Earlier:* **Status (2026-11-02): session 1 done** (parts 1-5; `PERF.md` "Stage 10 M2 session 1"; commits
   `c28261369`..`686e5cd01`; critic on the code: APPROVE, six minors, five fixed, the sixth = the OFF-build
   record in `PATCHES.md` 46). Interim run (flat, both Azahar backends) passes except 13 film floor pixels:
   a non-convex 1-row sliver (fan vs SW's chain fill; UNVERIFIED cause) — session 2 draws non-convex
@@ -3408,3 +3418,33 @@ rule session 1 stopped and the user chose the **neighbourhood rule** (*Colour me
 minimum over A's covered 3×3 neighbourhood, gate ≥ 98 % within and mean ≤ 1.0 on it; strict figures
 printed; host gate within one texel ≥ 99.5 %. `uv_half` default 1 (`δ = −½`) is confirmed by the host;
 the Azahar measurement in session 2 still records both.
+
+### M2 commit review (critic: APPROVE, 0 major, 3 minor; 2026-11-02; folded in `38ca4868e`)
+
+On `1c3b9c6f5` (effort medium). Sync and lifetimes checked against `libcitro3d.a`: `C3D_FrameBegin` waits
+for the queue (`gxCmdQueueWait(-1)`) and clears it, `C3D_FrameEnd` runs it in order (copy, clear, draws,
+split, readback); the conversion flush covers every byte a promotion later copies; nothing is freed while
+a frame in flight or the context's unit-0 pointer can reach it (`restore_state` on every `view_end`
+path); a promotion costs 1 GX entry after `C3D_FrameBegin` zeroed the offset. Minors, all fixed: (1) a
+large non-convex polygon could overflow the ring mid-polygon: spans are merged into rectangles and the
+ring is asked for all of them first (`c3d_span_ring_refused`, `c3d_span_quads_max`); (2) a non-finite
+span corner counted as `nonfinite`; (3) an allocation failing with room under the cap evicted until the
+pool was empty: at most 2 more victims (`kEvictAfterAllocFail`). Speculative, not acted on: after an
+abandon `release_and_fini` returns before `texcache_release_all` (citro3d never comes back after an
+abandon). Needs console verification: the RAW `GX_TextureCopy` linear → VRAM, the ranged conversion flush
+on real caches, the cost of promotions and per-miss flushes (`c3d_tex`).
+
+### M2 acceptance, load test colour (coordinator, 2026-11-02; user decision; a recorded exception)
+
+`15-load-test.txt` with `m2-load.cfg` (diff 30): three generation changes, deferred frees, 0 discards,
+0 non-edge coverage mismatches, walls 99.51 % within; **floors 97.78 % within (< 98 %)**, all of it after
+the teleport to level 1 (L0's checks 99.85 %). A dump of level 1 (`--perf 1`) puts the misses on one
+far, steep ceiling with a high-frequency texture: rows 0-59 fail the neighbourhood rule at 7.7 %, rows
+140-239 at 0.0-0.2 %; no constant screen shift helps (80.3 % exact unshifted, ~22 % at ±1 px), so it is
+not an offset. The host prediction, split by texels per pixel along the row (informative, `38ca4868e`):
+floors < 1: 98.14 % exact; 1-2: 93.16 %; ≥ 2: **80.72 % exact, 100 % within one texel** — the Azahar
+ceiling's 80.3 % exactly. Where neighbouring pixels sample texels ≥ 2 apart, SW's one-texel misses
+appear in no neighbour, so the neighbourhood rule cannot absorb them. The user accepted M2 with this
+recorded; a texel-space metric (compare texel indices, not colours) is the fix if a later milestone
+needs it.
+

@@ -1156,10 +1156,14 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    floors and texcoords in the front end, the harness (neighbourhood colour gate, user decision
    2026-10-31). Interim Azahar run (flat colour, both backends): pass except 13 film floor pixels (a
    non-convex sliver, to fix in session 2). **"M1 console check, short version": run and passed on the
-   console 2026-11-02** (`PERF.md` "Stage 10 M1 — console, short check"). **Next: M2 session 2** (parts
-   6-7: the texture upload code, textured view frames, the sliver fix, the acceptance; design section 7
-   "M2 specification"). M2's console check (texture uploads on hardware) is folded into the full "M1
-   console check" below when M2 is done.
+   console 2026-11-02** (`PERF.md` "Stage 10 M1 — console, short check").
+   **M2 done (2026-11-02**, tag `port-stage10-M2`; `PERF.md` "Stage 10 M2", Azahar — non-authoritative):
+   textured walls and floors (full bright) on diff frames, texture cache v1 (linear upload, VRAM
+   promotions, generations), the texture-binding restore, non-convex polygons as SW's spans; colour
+   gate passes on L0/L6/L20 and the film under both Azahar backends, one recorded exception (the load
+   test's level-1 ceiling, user decision). **Next: the user's choice** — M3 (lighting), or the console
+   first: "M2 console check, short version" (end of this file; the first hardware run of the texture
+   uploads), then the full "M1 console check" in a longer session.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1530,3 +1534,34 @@ drops alpha; record the quad's pixels from `c3d-rbcal-0.bmp`, stop. Step 5:
   heap sits beyond the 28-bit offsets on this console; record the addresses, stop (a design change).
 - A Luma dump: fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at
   0x28), stop.
+
+## M2 console check, short version (15-20 min; when the user is at the console)
+
+**Not run yet.** Written 2026-11-02 for `port-stage10-M2`. Azahar has no CPU cache and copies textures
+synchronously, so this is the first hardware test of M2's texture path: the ranged flush after each
+conversion into a linear texture, and the VRAM promotion (`C3D_SyncTextureCopy` RAW copy, linear → VRAM)
+queued before the clear (design section 7 "M2 specification", "Upload model"; Review log "M2 commit
+review", "Needs console verification"). Setup, driving and the `$H/m1/run.sh` helper as in "M1 console
+check, short version" above (HUD + Map; `cmake --build build-3ds-c3d-prof` at `port-stage10-M2` or later).
+
+**1. Textured diff on L0** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf`
+and `scripts/3ds/tests/c3d/m2-diff.cfg` as `/3ds/alephone/debug-c3d`. Y in the launcher,
+`$H/m1/run.sh build-3ds-c3d-prof m2s-l0`; A twice; the game quits after the BENCH line. Then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m2s-l0.txt --colour walls,floors --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks 20`.
+**Pass:** exit 0, and **every check's figures equal Azahar's** (`PERF.md` "Stage 10 M2": the scene is
+the same each check; walls `within_nb=99.68%`, floors `99.85%`, `sentinel=0`). Check 1 samples the new
+linear textures, checks 2-3 the first VRAM copies (`[c3d] tex … promo 8/0`, then 11/0): a worse check 1
+= a missing/short conversion flush; worse from check 2 or 3 on = the promotion copy.
+
+**2. Deferred promotions** (~5 min). ftpd: `scripts/3ds/tests/c3d/m2-gxq4.cfg` as `debug-c3d`
+(`debug-perf` stays); `$H/m1/run.sh build-3ds-c3d-prof m2s-gxq4`; same `c3d-diff.py` command. **Pass:**
+exit 0, `promo 11/10` (one promotion a frame), 0 discards, the same figures in every check.
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf` and `/3ds/alephone/debug-c3d`. **Record** in `PERF.md`
+("Stage 10 M2 — console, short check") the two tables, the `[c3d] tex … [final]` and `[c3d] cmdbuf final`
+lines (Azahar: `draw_words=268`; command words are deterministic), and the `c3d_tex` zone from the BENCH
+line (the upload cost on hardware). **Reading a failure:** isolated wrong texels or garbage in check 1
+only = the conversion flush; a texture wrong from the frame after its promotion = the TextureCopy
+(arguments: `texture.o` `C3D_TexLoadImage`); a crash or hang at a promotion = the GX queue order.
+Record the log and stop; M3 waits for the fix.
+

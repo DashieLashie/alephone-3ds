@@ -1475,3 +1475,47 @@ rounding makes the sliver slightly non-convex; SW fills between its left and rig
 from vertex 0 covers outside them. Session 2: log such a polygon's vertices to confirm; draw non-convex
 polygons as SW's row spans (one 1-row quad per row, texcoords exact); extend the host coverage model to
 non-convex monotone polygons.
+
+## Stage 10 M2: textured walls and floors, texture cache v1 (Azahar — non-authoritative)
+
+Recorded 2026-11-02 on `stage10-c3d` (`1c3b9c6f5` parts 6-7, `38ca4868e` review fixes; tag `port-stage10-M2`).
+Design section 7 "M2 specification" and "M2 status". `build-3ds-c3d-prof`; the series ran at `1c3b9c6f5`, and
+the runs the review fixes touch (L0, L6, `vram512`, film; host GPU) were re-run at `38ca4868e` with the same
+figures. Builds 0 warnings; OFF builds' `objdump -d` identical to the session start, `nm` 0; no engine edit
+(patch 46 unchanged). Host tests 95 178 checks, 0 failures. Colour judged with `c3d-diff.py log … --colour
+walls,floors --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0` (neighbourhood rule; "within" and "mean" below
+are the neighbourhood figures, "strict" is Δ to A's own pixel).
+
+**Orientation run first** (`m2-orient.cfg`, L0, 3 checks): with the tiler's row flip walls 99.68 % / mean 0.05,
+floors 99.85 % / 0.02; `A1_C3D_TILE_NOFLIP` build 55.75 % / 9.87 and 59.79 % / 7.88. The flip stays.
+
+| Run (`m2-diff.cfg` unless named) | Backend | Walls within / mean (strict) | Floors within / mean (strict) | Non-edge | Discards |
+| --- | --- | --- | --- | --- | --- |
+| L0 | host GPU (software) | 99.68 % / 0.05 (99.05 %); software 99.69 % | 99.85 % / 0.02 (99.39 %); software 99.85 % | 0 | 0 |
+| L6 | host GPU (software) | 99.38 % / 0.13 (98.80 %); software 99.35 % | 99.66 % / 0.05 (98.62 %); software 99.64 % | 0 | 0 |
+| L20 | host GPU / software | 99.58 % / 0.08 (99.02 %), both | 99.21 % / 0.14 (98.24 %), both | 0 | 0 |
+| film `m2-film.cfg` (200) | host GPU | 99.76 % / 0.05 (98.84 %) | 99.14 % / 0.16 (97.22 %) | 0 | 0 |
+| film (200) | software | 99.83 % / 0.03 (98.85 %) | 99.10 % / 0.19 (96.75 %) | 0 | 0 |
+| `m2-diff-uv0.cfg` L0 / L6 / L20 | host GPU | 72.2 / 45.7 / 67.5 % | 69.8 / 72.5 / 82.0 % | 0 | 0 (**fails**: `uv_half 1` wins) |
+| `m2-gxq4.cfg` L0 | host GPU | as L0 | as L0 | 0 | 0; promotions 11 done / 10 deferred, GX high-water 5 |
+| `m2-promote0.cfg` L0 | host GPU | as L0 | as L0 | 0 | 0; 11 linear, 0 promoted |
+| `m2-vram512.cfg` L0 | host GPU | as L0 | as L0 | 0 | 0; 125 conversions, 122 promotions, 114 evictions |
+| `m2-load.cfg` + `15-load-test.txt` (45 checks) | host GPU | 99.51 % / 0.12 | **97.78 %** / 0.43 | 0 | 0; 3 generation changes, 31 deferred frees |
+
+All `--colour` runs exit 0 except `uv0` (by design) and the load test (floors: a recorded exception, design
+Review log "M2 acceptance, load test colour": one minified ceiling on level 1, 80.3 % exact, host-predicted 80.7 %
+at ≥ 2 texels per pixel). Every run: `sentinel` 0, `tex_restore_mismatch` 0, `prog_restore_mismatch` 0,
+`alloc-fail` 0, `discards tex` 0, `draw_words` max 268 (the first textured draw; flat 254), GX high-water ≤ 12.
+
+**Texture cache.** L0 converts 11 textures (704 KiB; first view frame 512 KiB = 8 textures), all promoted in
+the next two view frames (8 + 3, `promote_max 8`), sampled from VRAM afterwards with figures identical to the
+linear frame's. Most conversions in one view frame on these levels: 10 (640 KiB, script 13); **≥ 16 was not
+reached** (the acceptance item cannot be shown here; GX entries are ≤ 8 + 3 + 1 by construction).
+**Spans** (non-convex polygons): film 128 polygons / 4 190 quads (largest 143), L6 20 / 120, 0 ring refusals;
+the logged first one, `(200,158) (290,139) (399,142) (400,142) (400,154)`, confirms the session-1 sliver cause.
+
+**Regression:** `m2-present-diff.cfg` + script 13 / 08: `present_diff final` 23 / 68 checks, 0 with RGB
+differences; `m1-diff-walls.cfg` L0 (now `textures 0`): `--coverage walls` exit 0, 140 / 0 as M1;
+`m0-readback-cal.cfg` / `-resize.cfg`: 30/30 ok, both; P1 scripts 07 (`p1-diff.cfg`, every `present_diff` 0),
+14 (`present_diff final: 11 checks, 0`), 22 (`gate closed`, 3 skipped presents, `release done`, 17 692 KiB
+linear free). Azahar 2126.2 hung in its own teardown after the game's clean exit once (script 13); killed.

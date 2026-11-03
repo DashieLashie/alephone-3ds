@@ -23,9 +23,11 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   `port-stage10-M0`, `PATCHES.md` 45); **M1 done** (2026-10-27, tag `port-stage10-M1`, Azahar only, no engine edit:
   walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **M2 session 1 done** (2026-11-02, no tag:
   conversion, tiling, texture-cache logic, hooks 2a/2b = `PATCHES.md` 46, floors and texcoords, harness with
-  the user's neighbourhood colour gate; `PERF.md` "Stage 10 M2 session 1"). The **short M1 console check
-  passed** on 2026-11-02, so **next: M2 session 2** (the texture upload code, textured view frames, the
-  non-convex sliver fix, the acceptance; design section 7 "M2 specification"; kickoff `KICKOFF_M2.md`). Another session may run Azahar on the same emulated card: take
+  the user's neighbourhood colour gate; `PERF.md` "Stage 10 M2 session 1"); **M2 done** (2026-11-02, tag
+  `port-stage10-M2`, Azahar only: textured walls/floors on diff frames, texture cache v1, VRAM promotions,
+  non-convex polygons as SW spans; `PERF.md` "Stage 10 M2"; one recorded gate exception, design Review log
+  "M2 acceptance, load test colour"). **Next: the user's choice** — M3 (lighting) or the "M2 console check,
+  short version" (`NEXT-SPRINT.md`) first. Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
