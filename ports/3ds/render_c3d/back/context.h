@@ -108,6 +108,9 @@ unsigned program_binds();
 // once at init). `tex_binds()` counts the recorded binds of every unit.
 void* tex_recorded();
 unsigned tex_binds();
+// M3: C3D_TexBind calls for units 1-2 by anyone but back/ (which binds unit 1, the shade LUT, through the real
+// function): must stay 0 (design 7, M3 "Binding and the state the present relies on").
+unsigned tex1_foreign_binds();
 // The C3D_Init command-buffer size in words (cfg.cmdbuf_kib * 256).
 uint32_t cmdbuf_size_words();
 // Words of one C3D_DrawElements (state flush included) and of the readback sequence (flushing split +

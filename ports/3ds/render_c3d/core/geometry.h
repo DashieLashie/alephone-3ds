@@ -200,12 +200,12 @@ struct Rgb
 };
 Rgb shape_colour(uint16_t shape);
 
-// 2.4 / M1 / M2: the command-buffer reserves, 2x the worst case measured in the acceptance runs (Azahar;
-// command words are deterministic): 268 words for one C3D_DrawElements with citro3d's state flush (first
-// draw of a textured view frame: world program upload, AttrInfo, BufInfo, TEV, uniforms, texture unit 0;
-// M1's flat first draw was 254); 10 words for the end (the readback's flushing split + transfer, and
-// C3D_FrameEnd's own split on a discard path). docs/3ds/CITRO3D_DESIGN.md, M1 and M2 status.
-constexpr uint32_t kDrawReserveWords = 536;
+// 2.4 / M1 / M2 / M3: the command-buffer reserves, 2x the worst case measured in the acceptance runs (Azahar;
+// command words are deterministic): 282 words for one C3D_DrawElements with citro3d's state flush (first
+// draw of a lit view frame: world program upload, AttrInfo, BufInfo, TEV stages 0-1, uniforms, texture units
+// 0-1; M2's textured first draw was 268, M1's flat one 254); 10 words for the end (the readback's flushing
+// split + transfer, and C3D_FrameEnd's own split on a discard path). docs/3ds/CITRO3D_DESIGN.md, M1-M3 status.
+constexpr uint32_t kDrawReserveWords = 564;
 constexpr uint32_t kEndReserveWords = 20;
 
 struct CmdBufWords

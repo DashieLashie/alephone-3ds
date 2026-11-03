@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M3 test (docs/3ds/CITRO3D_DESIGN.md, section 7, M3 specification): keeps infravision on from
+     the level's start, so the citro3d renderer's diff frames compare the shadeless (tint table) walls and
+     floors. Installed by scripts/3ds/run-azahar.sh --infravision-test. -->
+<plugin name="Infravision Test" version="1.0" description="3DS test: infravision on for the whole level" solo_lua="infravision.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

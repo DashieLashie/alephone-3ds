@@ -1257,7 +1257,7 @@ static void test_colour_and_cmdbuf()
 
 	// The reserve test: size - offset >= draw + end + extra.
 	CHECK(reserve_ok(131072, 0, kDrawReserveWords, kEndReserveWords, 0));
-	CHECK(kDrawReserveWords == 536 && kEndReserveWords == 20);
+	CHECK(kDrawReserveWords == 564 && kEndReserveWords == 20);   // M3: 2 x 282
 	CHECK(reserve_ok(4096, 2048, 1024, 1024, 0) && !reserve_ok(4096, 2049, 1024, 1024, 0));
 	CHECK(reserve_ok(4096, 2048 - 5, 1024, 1024, 5) && !reserve_ok(4096, 2048 - 5, 1024, 1024, 6));
 	CHECK(!reserve_ok(131072, 0, 1024, 1024, 1000000));   // reserve_extra forces a refusal

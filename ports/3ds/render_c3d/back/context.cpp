@@ -19,6 +19,7 @@
 #include "../core/gx_queue.h"
 #include "../include/a1_c3d_port.h"
 #include "draw.h"
+#include "shade.h"
 #include "texcache.h"
 #include "view.h"
 #include "../core/geometry.h"
@@ -78,6 +79,7 @@ unsigned s_program_binds = 0;
 // M2: the texture record (-Wl,--wrap=C3D_TexBind), unit 0.
 C3D_Tex* s_last_tex0 = nullptr;
 unsigned s_tex_binds = 0;
+unsigned s_tex1_foreign_binds = 0;   // M3: units 1-2 bound by anyone but back/
 const uint32_t* s_p0 = nullptr;      // gpuCmdBuf + gpuCmdBufOffset right after frame_begin() returned Ok
 struct CmdBufMax
 {
@@ -115,7 +117,7 @@ void load_config()
 	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
 	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
 	       "ring_indices %u, reserve_extra %u, textures %d, uv_half %d, diff_tol %u, vram_cap %u, "
-	       "linear_cap %u, promote_max %u, film \"%s\"\n",
+	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, film \"%s\"\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
 	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.renderer_c3d ? "c3d" : "sw",
@@ -123,7 +125,7 @@ void load_config()
 	       s_cfg.diff, s_cfg.diff_frames, static_cast<unsigned long>(s_cfg.classes), s_cfg.fullbright,
 	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
 	       s_cfg.ring_vertices, s_cfg.ring_indices, s_cfg.reserve_extra, s_cfg.textures, s_cfg.uv_half,
-	       s_cfg.diff_tol, s_cfg.vram_cap, s_cfg.linear_cap, s_cfg.promote_max, s_cfg.film.c_str());
+	       s_cfg.diff_tol, s_cfg.vram_cap, s_cfg.linear_cap, s_cfg.promote_max, s_cfg.lit, s_cfg.alpha_x2, s_cfg.film.c_str());
 	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
 	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
 	// own atexit handlers, so it runs before close_outputs flushes the log.
@@ -321,6 +323,7 @@ void release_and_fini()
 	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
 	texcache_log("final");
 	texcache_release_all();   // every texture slot and its C3D_Tex (C3D_TexDelete only frees memory)
+	shade_free();   // the shade LUT (unit 1 keeps it until C3D_Fini, M3)
 	draw_free();   // the world program and the rings (not on the abandon path, which returns above)
 	s_off = true;
 	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",
@@ -562,6 +565,11 @@ unsigned tex_binds()
 	return s_tex_binds;
 }
 
+unsigned tex1_foreign_binds()
+{
+	return s_tex1_foreign_binds;
+}
+
 void* program_recorded()
 {
 	return s_last_program;
@@ -703,6 +711,8 @@ extern "C" void __wrap_C3D_TexBind(int unitId, C3D_Tex* tex)
 			       static_cast<void*>(tex));
 		b::s_last_tex0 = tex;
 	}
+	else if (b::s_tex1_foreign_binds++ == 0)
+		printf("[c3d] texture: C3D_TexBind(%d) from outside back/: unit 1 holds the shade LUT (M3)\n", unitId);
 	__real_C3D_TexBind(unitId, tex);
 }
 

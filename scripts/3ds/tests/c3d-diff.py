@@ -31,6 +31,11 @@
 #       line must show `fullbright 1` and not `textures 0` (colour is meaningless otherwise), and the DIFF
 #       lines' "(tol T)" must equal --tol. Per-check worst figures (lowest within_nb, highest mean_nb and max_nb) are
 #       printed. Needs the lines of a build with the neighbourhood fields (` within_nb=` ...).
+#       --shading full|lit|infra (M3, design 7 "M3 specification", "c3d-diff.py"; default full): full = the
+#       debug-line rule above (`fullbright 1`, not `textures 0`); lit = the debug line shows `fullbright 0`,
+#       `lit 1` and not `textures 0`, and the summary's c3d_lit_polys > 0; infra = lit's debug-line rule plus
+#       c3d_shadeless_polys > 0 and c3d_lit_polys == 0 (every compared polygon was shadeless). The summary's lit
+#       counters (c3d_lit_polys ... c3d_ambient_wrap) are printed whenever they are present.
 #
 #   python3 -I scripts/3ds/tests/c3d-diff.py bmp A.bmp B.bmp [--class C]
 #       Reads two 32-bit BMPs (c3d-diff-<frame>-<class>-{sw,c3d}.bmp) and recomputes the metric of
@@ -127,6 +132,9 @@ def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour
         for (cls, reason), frames in sorted(by.items()):
             print("%s: class %s (%s): %d" % (state, cls, reason, len(frames)))
     print(summary or "no DIFF summary line")
+    lc = lit_counters(summary)
+    if lc:
+        print("lit counters: " + " ".join("%s=%d" % (k[4:], lc[k]) for k in LIT_KEYS))
     for d in dropped:
         print(d)
     m = re.search(r"dropped=(\d+)", summary or "")
@@ -224,13 +232,29 @@ def colour_check(colour, o, rows, other, summary, n_dropped, dbg, min_checks):
         if r["tol"] != o["tol"]:
             problems.append("class %s frame %d: DIFF line has (tol %d), --tol is %d" % (r["class"], r["frame"], r["tol"], o["tol"]))
             break
+    shading = o.get("shading", "full")
+    lit = lit_counters(summary)
     if dbg is None:
-        problems.append("no [c3d] debug-c3d: line (cannot confirm fullbright 1 / textures)")
+        problems.append("no [c3d] debug-c3d: line (cannot confirm fullbright / lit / textures)")
     else:
-        if not re.search(r"\bfullbright 1\b", dbg):
-            problems.append("debug-c3d line lacks `fullbright 1`")
         if re.search(r"\btextures 0\b", dbg):
             problems.append("debug-c3d line has `textures 0` (flat colour: the colour figures mean nothing)")
+        if shading == "full":
+            if not re.search(r"\bfullbright 1\b", dbg):
+                problems.append("debug-c3d line lacks `fullbright 1`")
+        else:
+            if not re.search(r"\bfullbright 0\b", dbg):
+                problems.append("--shading %s: debug-c3d line lacks `fullbright 0`" % shading)
+            if not re.search(r"\blit 1\b", dbg):
+                problems.append("--shading %s: debug-c3d line lacks `lit 1`" % shading)
+    if shading in ("lit", "infra"):
+        if lit is None:
+            problems.append("--shading %s: the DIFF summary has no lit counters (a build before M3)" % shading)
+        elif shading == "lit" and lit["c3d_lit_polys"] <= 0:
+            problems.append("--shading lit: c3d_lit_polys is 0 (nothing was drawn lit)")
+        elif shading == "infra" and (lit["c3d_shadeless_polys"] <= 0 or lit["c3d_lit_polys"] != 0):
+            problems.append("--shading infra: c3d_shadeless_polys %d (must be > 0), c3d_lit_polys %d (must be 0)" % (
+                lit["c3d_shadeless_polys"], lit["c3d_lit_polys"]))
     if not summary:
         problems.append("no DIFF summary line")
     if n_dropped:
@@ -243,6 +267,23 @@ def colour_check(colour, o, rows, other, summary, n_dropped, dbg, min_checks):
     if problems:
         print("c3d-diff: FAIL (--colour)")
     return bool(problems)
+
+
+LIT_KEYS = ("c3d_lit_polys", "c3d_shadeless_polys", "c3d_neg_ambient_polys", "c3d_flash_checks", "c3d_m_max",
+            "c3d_flash_over", "c3d_ambient_wrap")
+
+
+def lit_counters(summary):
+    """The M3 counters of a DIFF summary line, or None (a build before M3)."""
+    if not summary:
+        return None
+    kv = dict(KV.findall(summary))
+    if not all(k in kv for k in LIT_KEYS):
+        return None
+    try:
+        return {k: int(kv[k]) for k in LIT_KEYS}
+    except ValueError:
+        return None
 
 
 class BmpError(Exception):
@@ -321,7 +362,7 @@ def main(argv):
     if len(argv) >= 3 and argv[1] == "log":
         rest = argv[3:]
         opts = {"--coverage": None, "--band-pct": "2", "--min-checks": "1", "--colour": None,
-                "--nonedge-pct": "0.1", "--within": "98", "--tol": "2", "--mean": "1.0"}
+                "--nonedge-pct": "0.1", "--within": "98", "--tol": "2", "--mean": "1.0", "--shading": "full"}
         flags = set()
         i = 0
         while i < len(rest):
@@ -337,10 +378,13 @@ def main(argv):
         try:
             band_pct, min_checks = float(opts["--band-pct"]), int(opts["--min-checks"])
             colour_opts = {"nonedge": float(opts["--nonedge-pct"]), "within": float(opts["--within"]),
-                           "tol": int(opts["--tol"]), "mean": float(opts["--mean"])}
+                           "tol": int(opts["--tol"]), "mean": float(opts["--mean"]), "shading": opts["--shading"]}
         except ValueError:
             print("c3d-diff: --band-pct, --nonedge-pct, --within, --mean need numbers; --min-checks, --tol integers",
                   file=sys.stderr)
+            return 2
+        if opts["--shading"] not in ("full", "lit", "infra"):
+            print("c3d-diff: --shading is full, lit or infra", file=sys.stderr)
             return 2
         colour = [c for c in opts["--colour"].split(",") if c] if opts["--colour"] else None
         coverage = [c for c in opts["--coverage"].split(",") if c] if opts["--coverage"] else None
@@ -356,7 +400,7 @@ def main(argv):
             print("c3d-diff: %s" % e, file=sys.stderr)
             return 2
     print("usage: c3d-diff.py log LOG [--expect-zero] [--coverage CLASS[,CLASS] --band-pct P --min-checks N]\n"
-          "                         [--colour CLASS[,CLASS] --nonedge-pct P --within P --tol T --mean M] "
+          "                         [--colour CLASS[,CLASS] --nonedge-pct P --within P --tol T --mean M --shading full|lit|infra] "
           "| bmp A.bmp B.bmp [--class C]")
     return 2
 

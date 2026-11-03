@@ -24,6 +24,7 @@
 #include "draw.h"
 
 #include "context.h"
+#include "shade.h"
 #include "view_shared.h"
 #include "../core/calibrate.h"
 #include "../core/ring.h"
@@ -89,6 +90,8 @@ struct Frame
 	shaderProgram_s* saved_prog = nullptr;
 	void* bound_tex = nullptr;         // what this frame bound to unit 0 (null: nothing, the present's stays)
 	unsigned tex_binds0 = 0;           // tex_binds() at the start: a change means someone else bound mid-frame
+	bool lit = false;                  // M3: the shade LUT on unit 1 and TEV stage 1 (saved, restored)
+	void* lut = nullptr;               // the LUT's C3D_Tex this frame (shade_frame_start)
 	uint32_t sentinel_argb = 0;
 	int w = 0, h = 0;
 	int half = 0;
@@ -96,6 +99,7 @@ struct Frame
 
 C3D_BufInfo s_saved_buf, s_buf;
 C3D_AttrInfo s_saved_attr;
+C3D_TexEnv s_saved_env1;       // M3: TEV stage 1 as it was before a lit frame (restore_state puts it back)
 C3D_Mtx s_proj;
 unsigned s_k = 0;              // view frame counter: the sentinel's tag
 
@@ -107,6 +111,7 @@ struct Counters
 	unsigned skips[static_cast<int>(SkipReason::kCount)] = {};
 	unsigned prog_restore_mismatch = 0;
 	unsigned tex_bind_calls = 0, tex_restore_mismatch = 0;
+	unsigned tex1_restore_mismatch = 0, tev1_not_init = 0;   // M3
 } s_n;
 
 // --- helpers ---
@@ -286,6 +291,20 @@ void restore_state()
 		if (!present_tex || tex_binds() != s_f.tex_binds0)
 			++s_n.tex_restore_mismatch;
 	}
+	// M3 "Binding and the state the present relies on": TEV stage 1 back (copy semantics: texenv.o
+	// C3D_SetTexEnv+0x14-0x58), checked against C3D_Init's pass-through (base.o C3D_Init+0x15c-0x178). Unit 1
+	// keeps the LUT (C3D_TexBind(1, NULL) would dereference NULL + 12); no one but back/ may bind it.
+	if (s_f.lit)
+	{
+		C3D_SetTexEnv(1, &s_saved_env1);
+		C3D_TexEnv init;
+		C3D_TexEnvInit(&init);
+		if (memcmp(&init, &s_saved_env1, sizeof init) != 0)
+			++s_n.tev1_not_init;
+		if (tex1_foreign_binds() != 0)
+			++s_n.tex1_restore_mismatch;
+		s_f.lit = false;
+	}
 }
 
 // The end of a frame that is given up (or never drew): ranged flush of what was written, normal end.
@@ -388,8 +407,22 @@ ViewBegin view_begin(int w, int h)
 	s_f.open = true;
 	s_f.tex_binds0 = tex_binds();
 
-	// The texture cache's frame: what retired frames left is freed now (frame_begin returned), then this
-	// frame's VRAM promotions, before the clear (both cost 1 GX entry with an empty command buffer, 2.4).
+	// M3: the shade LUT first (built once; its one promotion, before the cache's, with the command buffer
+	// still empty), then the texture cache's frame: what retired frames left is freed now (frame_begin
+	// returned), then this frame's VRAM promotions, before the clear (both cost 1 GX entry with an empty
+	// command buffer, 2.4).
+	const bool lit = config().textures && config().lit;
+	if (lit)
+	{
+		s_f.lut = shade_frame_start();
+		if (!s_f.lut)
+		{
+			frame_end(0, false, FrameKind::View);
+			note_view_frame();
+			s_f.open = false;
+			return discarded_at_begin(DiscardReason::Tex);
+		}
+	}
 	texcache_frame_start(s_k);
 
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
@@ -427,12 +460,44 @@ ViewBegin view_begin(int w, int h)
 
 	// TEV stage 0, RGB and alpha (texenv.h:49-88): texture 0 with `textures 1` (M2 "View frame with
 	// textures"; the bind comes with the first draw), else the vertex colour (M1; C3D_TexBind(0) is then not
-	// touched). Stages 1-5 are not touched; the present sets its own stage 0 before each draw.
+	// touched). The present sets its own stage 0 in full before each draw.
 	C3D_TexEnv* env = C3D_GetTexEnv(0);
 	C3D_TexEnvInit(env);
-	const GPU_TEVSRC src = config().textures ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR;
-	C3D_TexEnvSrc(env, C3D_Both, src, src, src);
-	C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	if (lit)
+	{
+		// M3 "TEV" (design 4.2; enums.h:331-383). Stage 0: x = A0 * (1 - L) (the texel's alpha, 128 for
+		// self-luminous, times one minus the LUT's level), alpha = the texel's (x2 only with alpha_x2: the
+		// UNVERIFIED clamp). Stage 1: c * (1 - x): c * L for A 255, c * (1/2 + L/2) for A 128.
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+		C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_ONE_MINUS_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+		C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+		C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+		if (config().alpha_x2)
+			C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+		// Stage 1, after the SAVE above (so the early returns leave nothing to restore): saved by copy, built
+		// from C3D_TexEnvInit (scale 1), put back by restore_state.
+		s_saved_env1 = *C3D_GetTexEnv(1);
+		C3D_TexEnv* env1 = C3D_GetTexEnv(1);
+		C3D_TexEnvInit(env1);
+		C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE0, GPU_PREVIOUS, GPU_PRIMARY_COLOR);
+		C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
+		C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+		C3D_TexEnvFunc(env1, C3D_Alpha, GPU_REPLACE);
+		// Unit 1 = the LUT (texture unit 1 samples texcoord1: normal_mapping example, design 0.3); it stays bound
+		// after the frame.
+		__real_C3D_TexBind(1, static_cast<C3D_Tex*>(s_f.lut));
+		s_f.lit = true;
+	}
+	else
+	{
+		const GPU_TEVSRC src = config().textures ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR;
+		C3D_TexEnvSrc(env, C3D_Both, src, src, src);
+		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	}
 
 	// Pixels, x right, y down (M0's calibrated value); after the bind, which reloads the constants.
 	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 0.0f, 1.0f, true);
@@ -591,12 +656,13 @@ int draw_stats_text(char* buf, size_t size)
 	return snprintf(buf, size,
 	                " views=%u draws=%u polys=%u verts=%u idx=%u ring_hw_v=%u,%u ring_hw_i=%u,%u "
 	                "discards=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) skips=%u/%u/%u/%u(down/gate/size/pref) "
-	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u",
+	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u lut=%s lut_builds=%u "
+	                "tex1_restore_mismatch=%u tev1_not_init=%u",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
 	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.discards[5],
 	                n.skips[0], n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch, n.tex_bind_calls,
-	                n.tex_restore_mismatch);
+	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init);
 }
 
 } // namespace back
