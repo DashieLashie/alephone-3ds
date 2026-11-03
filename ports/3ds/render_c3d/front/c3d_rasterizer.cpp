@@ -142,6 +142,9 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			if (sp.kind == ShadeKind::FlashOver && flash_over_++ == 0)
 				printf("[c3d] front: maximum_depth_intensity %ld above %ld: view frame discarded (unsupported); first of "
 				       "its kind\n", static_cast<long>(M), static_cast<long>(kFlashMax));
+			if (sp.kind == ShadeKind::Excluded && excluded_reached_++ == 0)
+				printf("[c3d] front: ambient %ld wraps SW's index but reached the C3D side (filter mismatch): view frame "
+				       "discarded (unsupported); first of its kind\n", static_cast<long>(p.ambient_shade));
 			back::view_discard(back::DiscardReason::Unsupported);
 			return;
 		}
@@ -230,23 +233,23 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		}
 		for (int k = 0; k < nr; ++k)
 		{
-			const Span& sp = rects[k];
-			const int l0 = sp.line, l1 = sp.line + span_len_[k];
+			const Span& rc = rects[k];
+			const int l0 = rc.line, l1 = rc.line + span_len_[k];
 			// [a0, a1) x [l0, l1) (or its transpose): every edge on a pixel boundary, no tie.
 			Point2 q[4];
 			if (horizontal)
 			{
-				q[0] = Point2{sp.a0, l0};
-				q[1] = Point2{sp.a1, l0};
-				q[2] = Point2{sp.a1, l1};
-				q[3] = Point2{sp.a0, l1};
+				q[0] = Point2{rc.a0, l0};
+				q[1] = Point2{rc.a1, l0};
+				q[2] = Point2{rc.a1, l1};
+				q[3] = Point2{rc.a0, l1};
 			}
 			else
 			{
-				q[0] = Point2{l0, sp.a0};
-				q[1] = Point2{l1, sp.a0};
-				q[2] = Point2{l1, sp.a1};
-				q[3] = Point2{l0, sp.a1};
+				q[0] = Point2{l0, rc.a0};
+				q[1] = Point2{l1, rc.a0};
+				q[2] = Point2{l1, rc.a1};
+				q[3] = Point2{l0, rc.a1};
 			}
 			TexAttr qa[4];
 			const TexResult qr = attrs(horizontal, p, q, 4, qa);

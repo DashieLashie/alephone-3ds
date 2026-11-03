@@ -106,6 +106,7 @@ private:
 	bool lit_ = true;
 	bool m_noted_ = false;   // this target's M was looked at (reset by set_target)
 	unsigned lit_polys_ = 0, shadeless_polys_ = 0, neg_ambient_polys_ = 0, flash_over_ = 0, flash_checks_ = 0;
+	unsigned excluded_reached_ = 0;   // an Excluded ambient past the filter (a bug; logged once)
 	long m_max_ = 0;
 	unsigned drawn_ = 0;
 	unsigned nonfinite_ = 0;   // not reset by set_target

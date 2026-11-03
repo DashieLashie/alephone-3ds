@@ -1270,7 +1270,7 @@ static void test_colour_and_cmdbuf()
 static void test_config_m1()
 {
 	Config d;
-	CHECK(d.cmdbuf_kib == 512 && d.gxq_budget == 24 && d.ring_vertices == 1024 && d.ring_indices == 2048);
+	CHECK(d.cmdbuf_kib == 512 && d.gxq_budget == 24 && d.ring_vertices == 2048 && d.ring_indices == 4096);
 	CHECK(d.reserve_extra == 0 && d.film.empty());
 
 	Config c;
@@ -3355,6 +3355,7 @@ static void test_shade_lut()
 	for (int32_t a : {100000, 131072, 1 << 20, kAmbientWrapMin - 1})
 		as.push_back(a);
 	unsigned long long n = 0, exact = 0, worse = 0, pinned_bad = 0, full_bad = 0;
+	double u_err = 0;
 	int worst = 0;
 	for (int32_t M : {32768, 65536, 98304, 131072, kFlashMax})
 	{
@@ -3377,7 +3378,10 @@ static void test_shade_lut()
 					static const double dd[5] = {-0.5, 0.0, 0.5, 0.0, 0.0};
 					static const double nudge[5] = {0.0, 0.0, 0.0, -1.0 / 65536, 1.0 / 65536};
 					const double w = std::max(16.0, d + dd[k]);   // the vertex weight's clamp (M2)
-					const double u = static_cast<double>(M) / 65536.0 - w / 8192.0 + nudge[k];
+					// The shipped float formula (shade_u, p.m_u), cross-checked against the exact double one.
+					const double u = shade_u(p, static_cast<float>(w)) + nudge[k];
+					const double ud = static_cast<double>(M) / 65536.0 - w / 8192.0;
+					u_err = std::max(u_err, std::abs(u - nudge[k] - ud));
 					const int g = lut_sample(u, p.v);
 					const int e = std::abs(g - sw);
 					++n;
@@ -3393,9 +3397,10 @@ static void test_shade_lut()
 		}
 	}
 	CHECK(worse == 0 && pinned_bad == 0 && full_bad == 0);
+	CHECK(u_err < 1.0 / 65536);   // float u within 1/256 of a texel of the exact value
 	std::printf("shade LUT vs SW: %llu samples, exact %.3f%%, worst |dL| %d (gate <= 1); negative ambient %u cases "
-	            "exact; s-pinned and full-bright cases exact: %s\n",
-	            n, 100.0 * exact / n, worst, neg_n, pinned_bad == 0 && full_bad == 0 ? "yes" : "NO");
+	            "exact; s-pinned and full-bright cases exact: %s; float u error max %.2e\n",
+	            n, 100.0 * exact / n, worst, neg_n, pinned_bad == 0 && full_bad == 0 ? "yes" : "NO", u_err);
 
 	// tiling: the built LUT is tile_l8 of the plain image.
 	std::vector<uint8_t> plain(kLutBytes), a(kLutBytes), b(kLutBytes);

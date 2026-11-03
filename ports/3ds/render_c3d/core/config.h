@@ -66,8 +66,8 @@
 	  cmdbuf_kib N      16..4096, default 512: the C3D_Init command-buffer size (below 16 KiB the
 	                    present's own frames, which check no reserve, are not guaranteed)
 	  gxq_budget N      1..24, default 24: the GX queue budget per C3D frame (GxQueue)
-	  ring_vertices N   64..32768, default 1024: vertices per half of the vertex ring
-	  ring_indices N    64..65536, default 2048: indices per half of the index ring
+	  ring_vertices N   64..32768, default 2048 (M3: the L08 film's span quads overflowed 1024): vertices per half
+	  ring_indices N    64..65536, default 4096: indices per half of the index ring
 	  reserve_extra N   0..1000000 words, default 0: added to the command-buffer reserve test, to
 	                    force a "cmdbuf" discard
 	  film PATH         the rest of the line, trimmed; a '#' still starts a comment, so a path with a
@@ -138,8 +138,8 @@ struct Config
 	// M1
 	unsigned cmdbuf_kib = 512;
 	unsigned gxq_budget = 24;
-	unsigned ring_vertices = 1024;
-	unsigned ring_indices = 2048;
+	unsigned ring_vertices = 2048;
+	unsigned ring_indices = 4096;
 	unsigned reserve_extra = 0;
 	// M2
 	bool textures = true;
