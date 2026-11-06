@@ -44,7 +44,7 @@
 #       classes frame and play have no band (Coverage::All); their `empty` pixels are printed. The summary's
 #       rectangle counters (c3d_rects ...) are printed whenever they are present.
 #
-#   python3 -I scripts/3ds/tests/c3d-diff.py play LOG [--min-play-checks N] [--expect-offs N] [--within P --tol T]
+#   python3 -I scripts/3ds/tests/c3d-diff.py play LOG [--min-play-checks N] [--min-c3d N] [--expect-offs N] [--within P --tol T]
 #       M4 play mode (design 7 "M4 specification", "c3d-diff.py"): prints the "[c3d] play final" line and the
 #       "DIFF ... class=play" checks; exit 1 if the final line is missing, c3d=0 (no C3D play frame), sentinel > 0,
 #       fewer than N play checks (default 0), any play check's neighbourhood within (A's covered or B's drawn pixels,
@@ -388,12 +388,14 @@ def cmd_bmp(pa, pb, cls):
     return 0
 
 
-def cmd_play(path, min_checks, expect_offs, within, tol):
-    final, rows, lines = None, [], []
+def cmd_play(path, min_checks, expect_offs, within, tol, min_c3d):
+    final, last, rows, lines = None, None, [], []
     with open(path, "r", errors="replace") as f:
         for line in f:
             if "[c3d] play final " in line:
                 final = line.strip()
+            elif "[c3d] play frames=" in line:
+                last = line.strip()
             elif "[c3d] play: " in line:
                 lines.append(line.strip())
             else:
@@ -402,8 +404,13 @@ def cmd_play(path, min_checks, expect_offs, within, tol):
                     rows.append(r)
     for l in lines:
         print(l)
-    print(final or "no [c3d] play final line")
     problems = []
+    if not final and last:
+        # A run ended by the timeout kill (a film's end, a HOME script) prints no final line; the per-second
+        # line carries the same cumulative counters, up to the last second.
+        print("no [c3d] play final line (run killed); last per-second line:")
+        final = last
+    print(final or "no [c3d] play final line")
     if not final:
         problems.append("no [c3d] play final line")
         kv = {}
@@ -415,8 +422,8 @@ def cmd_play(path, min_checks, expect_offs, within, tol):
         except ValueError:
             return 0
     if expect_offs is None:
-        if final and num("c3d") <= 0:
-            problems.append("no C3D play frame (c3d=%d)" % num("c3d"))
+        if final and num("c3d") < min_c3d:
+            problems.append("%d C3D play frame(s), fewer than --min-c3d %d" % (num("c3d"), min_c3d))
     else:
         # m4-off.cfg: every C3D frame discards on cmdbuf, so none completes (critic M4 code review, minor 2).
         m = re.search(r"discard=(\d+)/(\d+)/(\d+)/", final or "")
@@ -454,7 +461,7 @@ def cmd_play(path, min_checks, expect_offs, within, tol):
 
 def main(argv):
     if len(argv) >= 3 and argv[1] == "play":
-        o = {"--min-play-checks": "0", "--expect-offs": None, "--within": "97", "--tol": "4"}
+        o = {"--min-play-checks": "0", "--expect-offs": None, "--within": "97", "--tol": "4", "--min-c3d": "1"}
         rest = argv[3:]
         i = 0
         while i < len(rest):
@@ -467,7 +474,7 @@ def main(argv):
         try:
             return cmd_play(argv[2], int(o["--min-play-checks"]),
                             int(o["--expect-offs"]) if o["--expect-offs"] is not None else None,
-                            float(o["--within"]), int(o["--tol"]))
+                            float(o["--within"]), int(o["--tol"]), int(o["--min-c3d"]))
         except ValueError:
             print("c3d-diff: play options need numbers", file=sys.stderr)
             return 2

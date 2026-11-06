@@ -1644,3 +1644,81 @@ differences, the five restore counters 0; P1 scripts 07 (`p1-diff.cfg`: 3 presen
 (`present_diff final: 11 checks, 0`), 22 (`gate closed at present 920`, `release done`); `m1-diff-walls.cfg` L0
 `--coverage walls` exit 0 (140 / 0, as M1); `m0-readback-cal.cfg` 30/30 ok. An earlier series lost runs to a
 full disk (from outside the session); every figure above is from the final series.
+
+## Stage 10 M4: sprites, weapons, invisibility; play mode on (Azahar — non-authoritative)
+
+Recorded 2026-11-06 on `stage10-c3d` (`f389f85a5` code, `2de08146a` review fixes; the record commit adds
+comment-only fixes and the play gate's killed-run fallback). Design section 7 "M4 specification"; the final
+series ran on `2de08146a` (`build-3ds-c3d-prof`, `build/m4/tools/series.sh`). Builds 0 warnings; no engine edit;
+OFF builds' `objdump -d` identical to the session start, `nm` 0. Host tests **2 617 932 checks, 0 failures**:
+`rect_setup` = a literal SW transliteration on 25 600 rectangles; texel agreement of the corner-evaluated quad
+(`rect_bias` 1/131072 texel) 100 % in double and float32, 99.85 % in a float24 model (**UNVERIFIED** on PICA);
+RLE conversion and non-square tiling = `tex3ds` (A8, RGBA8 with A=0 texels' RGB ignored); the LUT's column 0 is
+the identity (texcoord1 of a rectangle exact); the tinted blend factor vs SW worst 1; `Coverage::All`.
+
+**Gates** (user decisions, design Review log "M4 pre-implementation, gates" and "M4 acceptance, sprite gate"),
+each class a separate invocation of `python3 -I scripts/3ds/tests/c3d-diff.py log LOG`:
+sprites/weapons `--colour sprites,weapons --shading lit --nonedge-pct 0.5 --within 98 --tol 4 --mean 1.5
+--min-checks 20 --min-covered 2000 --min-covered-checks 10` (L6 and L20: `--colour weapons`: no sprite at those
+bench spots; films `--min-checks 200 --min-covered 20000 --min-covered-checks 100`); full frame `--colour frame
+--shading lit --within 97 --tol 4 --mean 255`; tinted `--colour tinted --shading lit --strict tinted
+--nonedge-pct 0.5 --within 98 --tol 3 --mean 255` (+ its frame at `--tol 3`); play `c3d-diff.py play LOG
+--min-play-checks 1` (each check ≥ 97 % within Δ ≤ 4 on its own; `--min-c3d 0` for script 14, `--expect-offs 2`
+for the off test). "within" is the neighbourhood figure, "strict" Δ to A's own pixel.
+
+| Run (checks) | Backend | Sprites within / non-edge | Weapons within | Frame within (strict) | Gate |
+| --- | --- | --- | --- | --- | --- |
+| `m4-diff.cfg` L0 (20) | host GPU / software | 99.95 % / 79 (0.159 %); sw 99.83 % / 78 | 100 %, both | 99.70 % (99.16); sw 99.69 % | pass, both |
+| L6 (20) | host GPU / software | (none on screen) | 100 %, both | 99.52 % (98.75); sw 99.49 % | pass, both |
+| L20 (20) | host GPU / software | (none on screen) | 100 %, both | 99.52 % (98.81); sw 99.52 % | pass, both |
+| film L01 `m4-film(-swbe).cfg` (200) | host GPU / software | 99.96 % / 496 (0.096 %); sw 99.89 % / 245 | 100 %, both | 99.74 %; sw 99.79 % | pass, both |
+| film L08 `m4-film-l08(-swbe).cfg` (200) | host GPU / software | 99.95 % / 117 (0.016 %); sw 99.73 % / 159 | 100 %, both | 99.55 %; sw 99.52 % | pass, both |
+| tinted `m4-tinted(-swbe).cfg` + `--invisibility-test` L0 (20) | host GPU / software | tinted **100 % exact** (59 040 px, 40 rectangles), both | — | 99.64 %; sw 99.52 % | pass, both |
+
+Software-backend runs use the `-swbe` configs (`gxq_budget 3`, M3's Azahar fault). Worst single checks: sprites
+98.58 % (L01, host GPU); under the software backend single sprite checks fall to 71 % (L01) and 62.5 % (L08) on
+checks of a few dozen pixels (a sprite at the screen edge), pooled 99.89 / 99.73 %. Weapons differ by at most 1
+everywhere (exact through the LUT's column 0).
+
+**Play mode** (`m4-play(-swbe).cfg`: `play 1`, `play_check 30`; every 30th C3D play frame compared with SW's
+replay over the same previous frame):
+
+| Run | C3D / SW frames (SW reasons) | Play checks: pooled / worst | Notes |
+| --- | --- | --- | --- |
+| script 12 (sprite check), host GPU / software | 2 845 / 0; sw 2 855 / 0 | 94: 99.69 % / 99.27 %; sw 95: 99.69 % / 99.26 % | 20 909 rectangles, 8 478 clipped away |
+| L01 film `m4-play-film(-swbe).cfg`, host GPU / software | 12 030 / 2 915 (2 646 landscape, 269 static); sw 10 167 / 2 836 | 401: 99.73 % / 98.68 %; sw 338: 99.64 % / 98.52 % | run killed at the film's end (no final line: the gate reads the last per-second line) |
+| script 06 (gameplay) | 67 / 940 (landscape) | 2: 99.68 % / 99.65 % | |
+| script 07 (HOME, sleep, menus) | 2 746 / 0 | 91: 99.68 % / 99.26 % | killed by its script's end; no hang, no fault |
+| script 13 (bottom screen) | 298 / 805 (landscape) | 9: 99.70 % / 99.70 % | |
+| script 14 (terminal, `--terminal-test`) | 0 / 226 (landscape) | 0 | L0's start is all landscape: gated `--min-c3d 0` |
+| Classic L20 (`bottom_screen=2`, perf-bench) | 840 / 0 | 28: 99.70 % / 99.70 % | 640 × 320 world view |
+| off test `m4-off.cfg` (`reserve_extra 1000000`) + `--level-hop-test`, L20 | 0 / 1 612 (1 567 off) | — | 10 cmdbuf discards → off; level hop → on; 10 more → off: **offs 2, ons 1** |
+
+Every play run: `sentinel` 0, 0 discards (except the off test's 20 cmdbuf ones), 0 skips, `overflow` 0. **Present
+diff** with play on (`m4-present-diff.cfg`): L20 + `--invisibility-test` 49 checks, script 08 116 checks, **0 with
+RGB differences**. **Regression:** M3 lit gate L0 unchanged on both backends (walls 99.69 %, floors 99.87 %,
+`view_frame_words=1304`: M4 adds no word to a frame without rectangles), M2's full-bright gate unchanged (walls
+99.68 / 99.69 %, floors 99.85 %), `m1-diff-walls.cfg` `--coverage walls` exit 0 (140 / 0), `m0-readback-cal.cfg`
+30/30, P1 script 22 (`release #1 … gate closed`, `real gfxExit returned`).
+
+**Command buffer, rings, cache.** Command words: `view_frame_words` 3 432 on the L0 diff (both backends, the same
+scene), 3 376 tinted, up to 3 356 in play frames, 1 172 in Classic; `draw_words=282`, `readback_words=10`: the
+draw reserve **564** holds; `usage_max` ≤ 0.0262. Tinted: `blend_sets=40 blend_restores=40`; every other run 0 /
+0; `prog_restore_mismatch`, `tex_restore_mismatch`, `tex1_restore_mismatch`, `tev1_not_init`, `unit1_left_bound` 0
+everywhere. Ring high-water (of 2 048 / 4 096 per half): **1 440 / 2 154** (L01 film in play mode), 915 / 1 371
+(script 12). Texture cache (512 slots): L01 play film 1 463 conversions (102 MiB converted, ≤ 1 190 KiB per
+frame), 1 295 evictions, 3 allocation failures absorbed by eviction, 0 texture discards; script 12 595
+conversions, 547 evictions, 0 failures.
+
+**C3D vs SW bench** (`perf-bench.sh`, HUD + Map @30, `m4-bench-c3d.cfg` = play on vs `m4-bench-sw.cfg`):
+
+| Level | SW busy / render | C3D busy / render + c3d_draw + c3d_readback | C3D play frames | Busy |
+| --- | --- | --- | --- | --- |
+| L0 | 17.74 / 11.21 | 17.88 / 0.80 + 10.59 + 0.00 | 0 of 866 (all landscape → SW replay inside `c3d_draw`) | +0.8 % |
+| L6 | 15.97 / 8.98 | 15.67 / 1.06 + 8.12 + 0.00 | 0 of 867 (all landscape) | −1.9 % |
+| L20 | 15.62 / 8.64 | 19.11 / 1.08 + 8.37 + 2.18 | 868 of 868 | **+22.3 %** |
+
+fps 30.3 everywhere, `gaps` 0. As designed (0.5), readback mode is no speedup: on L20 the GPU draw + wait +
+readback + copy cost more than SW's span loop in Azahar (which understates copies; the console decides). The
+end-of-run captures: L0 and L6 identical to SW (SW frames), L20 925 of 96 000 pixels differ by more than 4.
+Classic L20 with play on: 29.03 fps, `max` 366 ms (one hitch; no SW Classic run in this series).

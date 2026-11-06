@@ -169,16 +169,17 @@ bool view_size_supported(int w, int h, int min_side)
 	       w >= min_side && h >= min_side;
 }
 
-// The target and buffers for a w x h view, (re)created here OUT of frame (no frame_begin() open): an
-// earlier target of another size is deleted first. C3D_RenderTargetDelete svcBreaks (USERBREAK_PANIC)
-// when called inside a frame (libcitro3d.a renderqueue.o: it tests the in-frame flag first); outside
-// one, for an unlinked target, it waits for the queue itself (gxCmdQueueWait) and then destroys.
-// False: out of memory (logged once; the size is not retried).
+// True when view_ensure failed for this size (it is not retried).
 bool view_size_failed(int w, int h)
 {
 	return w == s_fail_w && h == s_fail_h;
 }
 
+// The target and buffers for a w x h view, (re)created here OUT of frame (no frame_begin() open): an
+// earlier target of another size is deleted first. C3D_RenderTargetDelete svcBreaks (USERBREAK_PANIC)
+// when called inside a frame (libcitro3d.a renderqueue.o: it tests the in-frame flag first); outside
+// one, for an unlinked target, it waits for the queue itself (gxCmdQueueWait) and then destroys.
+// False: out of memory (logged once; the size is not retried).
 bool view_ensure(int w, int h)
 {
 	if (w == s_fail_w && h == s_fail_h)

@@ -1177,6 +1177,15 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    (`Negative Light Test`, `run-azahar.sh --negative-light-test`) puts every light state at −0.5; one lit L0
    diff per backend (`m3-neglight.cfg`): 604 negatively lit polygons drawn, 0 wraps, M3's lit gate passes on
    both (`PERF.md` "Stage 10 M3", "Negative ambient").
+   **M4 done (2026-11-06**, kickoff `KICKOFF_M4.md`; `PERF.md` "Stage 10 M4", Azahar — non-authoritative):
+   rectangles (RLE, flip, clip; one quad each, SW's fixed-point steps at the corners), mask textures (A8), the
+   tinted constant-colour blend, and **play mode on** in readback mode (frames recorded once and replayed into
+   C3D, or into SW for landscapes/static/discards; ten resource discards in a row turn it off until the next
+   level). Sprites, weapons, tinted and the full frame pass on both Azahar backends (sprites gated on L0 and the
+   films: user decision); play mode passes scripts 06, 07, 12, 13, the L01 film, Classic L20 and the off test;
+   L20 bench +22 % busy (no speedup expected before M6). **Next: the user's choice** — M5 (landscapes, static,
+   eviction hardening), or the M3/M4 short console checks first ("M4 console check, short version" at the end
+   of this file).
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1641,3 +1650,53 @@ command with `--min-checks 200`. **Pass:** exit 0; the summary's `c3d_flash_chec
 coverage, the `[c3d] cmdbuf final` line and the lit counters; then the design's M3 status, section 10 item 6
 ("M3:") and the Review log. Note any hang at a present or at the exit after a lit frame (none expected:
 unit 1 is disabled again before the present).
+
+## M4 console check, short version (20-30 min; when the user is at the console)
+
+**Not run yet.** Written 2026-11-06 for `port-stage10-M4`. Azahar cannot answer M4's hardware questions (design
+section 10 item 6, "M4:"): **PICA's float24 texcoords on rectangles** (the host model gives 99.85 % texel agreement
+at `rect_bias` 1, UNVERIFIED), **the constant-colour blend** of tinted rectangles (exact in Azahar), and **play mode
+on hardware**: the readback and copy cost per frame and HOME > Close / suspend with play frames in flight. It can
+follow the "M3 console check, short version" in the same session (same setup). Setup, driving and the `$H/m1/run.sh`
+helper as in "M1 console check, short version" (HUD + Map; `cmake --build build-3ds-c3d-prof` at
+`port-stage10-M4`). **Press A at once at the menu** (the demo otherwise takes the first frames).
+
+**1. Sprites and weapons diff on L0** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as
+`/3ds/alephone/debug-perf` and `scripts/3ds/tests/c3d/m4-diff.cfg` as `/3ds/alephone/debug-c3d`;
+`$H/m1/run.sh build-3ds-c3d-prof m4s-l0`; A twice; the game quits after the BENCH line. Then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m4s-l0.txt --colour sprites,weapons --shading lit --nonedge-pct 0.5 --within 98 --tol 4 --mean 1.5 --min-checks 20 --min-covered 2000 --min-covered-checks 10`
+and `… --colour frame --shading lit --within 97 --tol 4 --mean 255 --min-checks 20`. **Pass:** both exit 0,
+`sentinel=0`, 0 discards, the five restore counters 0. Azahar (host GPU), pooled over 20 checks: sprites 99.95 %
+within, 79 non-edge (0.159 %), `mean_nb` 0.61; weapons 100 %, max 1; frame 99.70 %; `view_frame_words=3432
+draw_words=282 readback_words=10`. **Reading it:** sprite coverage holes or a one-texel shift along the sprites'
+columns (non-edge well above 0.5 %, `max_nb` large) = PICA's texcoord precision differs from the float24 model:
+record, then retry with `rect_bias 2` (and 0) added to the config; the default changes only on the user's word.
+
+**2. Tinted (the invisible compilers)** (~5 min). ftpd: put the folder `scripts/3ds/tests/plugins/Invisibility
+Test` into the scenario's `Plugins/` folder (Azahar: `/3ds/alephone/Marathon2/Plugins/`; check the name with
+`scripts/3ds/sd-ftp.sh IP ls /3ds/alephone`), `m4-tinted.cfg` as `debug-c3d` (`debug-perf` L0 stays);
+`$H/m1/run.sh build-3ds-c3d-prof m4s-tinted`; then `c3d-diff.py log $H/m1/m4s-tinted.txt --colour tinted --shading
+lit --strict tinted --nonedge-pct 0.5 --within 98 --tol 3 --mean 255 --min-checks 20 --min-covered 2000
+--min-covered-checks 10`. **Pass:** exit 0; `blend_sets` = `blend_restores` (Azahar 40 / 40). Azahar: 100 % exact
+(`max 0`) on 59 040 pixels. A uniform small offset (max 1-2) = PICA's blend rounding: record; holes = the A8 mask.
+
+**3. Play mode on L20, with play checks** (~5 min). ftpd: remove the plugin folder; `$H/sprint8/debug-perf-L20` as
+`debug-perf`, `m4-play.cfg` as `debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m4s-play20`; then
+`python3 -I scripts/3ds/tests/c3d-diff.py play $H/m1/m4s-play20.txt --min-play-checks 1`. **Pass:** exit 0;
+`[c3d] play final` with `c3d` = `frames`, `sw=0`, all discards and skips 0, `sentinel=0`. Azahar: 868 C3D frames,
+28 checks at 99.70 %. **Record** the BENCH line: `c3d_draw` + `c3d_readback` against the software renderer's
+`render` on the same spot (put `m4-bench-sw.cfg` as `debug-c3d` and rerun as `m4s-sw20`). Azahar: 8.37 + 2.18 ms
+vs 8.64 ms (+22 % busy); the console's copy cost is what M6 removes.
+
+**4. HOME, sleep and Close in play mode** (~5 min). ftpd: delete `debug-perf` (`m4-play.cfg` stays);
+`$H/m1/run.sh build-3ds-c3d-prof m4s-home`; start a new game (A), walk a few seconds; HOME, back to the game; close
+the lid 5 s, open; then HOME > Close. **Pass:** the game resumes each time with the picture right, the close takes
+under ~2 s, the log ends with `[c3d] play final …` and `real gfxExit returned`; no Luma dump.
+
+**Optional: Classic.** `m4-play.cfg`, Settings > Bottom Screen > Classic, `debug-perf-L20`; the same play gate
+(Azahar: 840 C3D frames, 28 checks at 99.70 %, 29.03 fps with one 366 ms hitch: compare the console's `max`).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d` and the plugin folder. **Record** in
+`PERF.md` ("Stage 10 M4 — console, short check") per launch the class table, the `[c3d] cmdbuf final` and
+`[c3d] play final` lines and the BENCH lines; then the design's M4 status, section 10 item 6 ("M4:") and the
+Review log.

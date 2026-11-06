@@ -3205,6 +3205,20 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     films' cache and ring high-water marks; command words.
   - *Not in M4:* landscapes, static (rectangles and polygons), eviction hardening (M5); direct mode (M6).
 
+- **Status (2026-11-06): M4 implemented and accepted** (`PERF.md` "Stage 10 M4", Azahar — non-authoritative;
+  commits `f389f85a5` code, `2de08146a` review fixes, then the record; critic: spec REVISE then APPROVE round 2,
+  code REVISE then APPROVE round 2). Host tests 2 617 932 checks, 0 failures (`rect_setup` = SW; texel agreement
+  100 % in double/float32, 99.85 % in the float24 model, **UNVERIFIED** on PICA). On both Azahar backends: sprites
+  pass on L0 and both films (L6/L20 show none: Review log "M4 acceptance, sprite gate"), weapons 100 % within
+  everywhere, the full frame ≥ 99.5 %, tinted **exact**; play mode passes scripts 06, 07, 12, 13, the L01 film and
+  Classic L20, each play check on its own (worst 98.52 %); script 14 runs all landscape (0 C3D frames); the off
+  test turns off twice and on once (`offs 2 ons 1`); present diff 0; M1-M3 gates unchanged (`view_frame_words`
+  1304 on M3's diff: no word added without rectangles). Command words up to 3 432 per view frame, draw reserve
+  564 holds, rings' high-water 1 440 / 2 154 of 2 048 / 4 096. Bench: L0/L6's bench spots are all landscape (SW
+  frames); L20 busy **+22 %** in play mode (readback mode is no speedup, 0.5). Console: `NEXT-SPRINT.md` "M4
+  console check, short version" (PICA's float24 texcoords on rectangles, the constant-colour blend, play mode
+  across HOME/suspend, the readback cost).
+
 ### M5 — landscapes, static, eviction, fallback hardening
 - Accept: diff `landscape` ≥ 98% Δ ≤ 2 (L6); `static` written-pixel density
   within ±2 points of SW; `vram_cap 512` and `fail_every 50` runs pass,
@@ -4102,3 +4116,24 @@ film; (7) the "M4 console check, short version" is written with the record; (8) 
 deaf. The first acceptance series was stopped (four runs in) and re-run in full on the fixed binary; its L6/L20
 sprite gates had failed on `--min-covered` (no sprite on those bench spots), which the tooling is meant to catch.
 
+### M4 commit review, round 2 (critic: APPROVE, 3 minor)
+
+All round-1 findings fixed (4 and 7 deferred as recorded). Minors: (1) narrowing the sprite gate to L0 and the
+films is a gate change: taken to the user (next entry); (2) `m4-play-film-swbe.cfg`'s header named the non-swbe file;
+(3) a comment block in `back/view.cpp` headed the wrong function. (2) and (3) are folded after the acceptance series
+(comment lines only: no code change, so the accepted binary's code is unchanged).
+
+### M4 acceptance, sprite gate (coordinator, 2026-11-06; user decision; a recorded exception)
+
+The L6 and L20 bench spots show no sprite (0 sprite pixels in all 20 checks of the stopped first series), so
+`--min-covered` fails their sprite class by design. The user accepted: **sprites are gated on L0's bench spot and
+the two films** (L01 combat, L08); L6 and L20 gate weapons and the full frame.
+
+### M4 acceptance, play gate on killed runs (coordinator, 2026-11-06)
+
+Three play gates of the final series failed with "no [c3d] play final line": the L01 film in play mode (both
+backends) and script 07 end on the timeout kill, and `[c3d] play final` is printed only at a clean exit
+(`frame_final_stats`). Their per-second `[c3d] play frames=…` lines carry the same cumulative counters; `c3d-diff.py
+play` now falls back to the last one when the final line is missing (it says so). Script 14 opens its terminal at
+L0's start, which is all landscape: 0 C3D frames by construction, gated with the new `--min-c3d 0`. A tooling fix:
+the renderer and the accepted binary are unchanged; re-gated from the same logs, all four pass.

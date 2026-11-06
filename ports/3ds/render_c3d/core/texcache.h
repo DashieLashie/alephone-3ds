@@ -5,7 +5,7 @@
 	Plain C++, no 3DS or engine headers; the GPU side is the small TexAllocator interface
 	(a fake on the host, citro3d's C3D_TexInit / C3D_TexInitVRAM / C3D_TexDelete in part 6).
 
-	  slots        a fixed array of kTexSlots (256) entries inside the object, so a slot's address
+	  slots        a fixed array of kTexSlots (512) entries inside the object, so a slot's address
 	               never changes (citro3d keeps the C3D_Tex* it was given until the next draw).
 	  key          (bitmap pointer, shading-tables pointer, kind) + the generation; lookup() matches
 	               only the current generation. bump_generation() (collections_changed()) turns every
