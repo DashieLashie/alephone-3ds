@@ -2953,7 +2953,7 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   coverage outside band ≤ 0.5%, colour as M3; full-frame ≥ 97% Δ ≤ 4;
   `12-sprite-check.txt`, `06-gameplay.txt`, 07, 13, 14 pass in play mode;
   bench C3D vs SW recorded.
-- **M4 specification (revision of 2026-11-06, before code; Review log "M4 pre-implementation").**
+- **M4 specification (revision 1 of 2026-11-06, before code; Review log "M4 pre-implementation", round 1).**
   Where the lines above, 1.5, 2.2, 3.2-3.3, 4.3, 8.1 and 8.3 and the code disagree, this block rules. Citations are
   the code as of `198eb38e3`. **No engine edit.** Kickoff `KICKOFF_M4.md`. Two sessions: (1) the spec, rectangles,
   mask and tinted on diff frames; (2) play mode, the configs, the plugin, the films and the acceptance.
@@ -2977,13 +2977,18 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (every rectangle bitmap is read as column-ordered RLE: 4 header bytes, `first`, `last` big-endian, then the
     bytes of rows `[first, last)` — `last` is exclusive, `shapes.cpp`:705-717 and `OGL_Textures.cpp`:1082-1085).
     Per screen column: texel column `texture_x >> 16`; per screen row `j` (from the clip top) texel row
-    `(texture_y0 + j·dy) >> 16`; index 0 is not written (`texture_vertical_polygon_lines<…, true>`, :864; the tinted
+    `(texture_y0 + j·dy) >> 16`; index 0 is not written (`texture_vertical_polygon_lines<…, true>`, :858; the tinted
     loop's `if (read[…])`, `low_level_textures.h`:567). **SW's per-column trim** (:763-783): rows before
     `delta = (first·65536 − ty0)/dy + 1` and after `y1 − ((ty1 − last·65536)/dy + 1)` are not drawn. It equals "the
-    texel lies in `[first, last)`" except (i) a row whose texel position is exactly `first` (skipped by SW) and (ii)
-    **the last row whose texel lies in `[last − dy, last)`**, which SW always drops at the bottom of a run that ends
-    above the bitmap's bottom. Both are 1 pixel at the end of a column's run, i.e. inside A's edge band; the host
-    test counts them (below). Shading (:738-758): `_textured` without `_SHADELESS_BIT` → `calculate_shading_table(…,
+    texel lies in `[first, last)`" except (i) a row whose position is exactly `first` (skipped by SW); (ii) when the
+    bottom trim runs (`ty1 >> 16 > last`), **a row is kept only if the next row's position is still below `last`**
+    (`v + dy < last`): SW drops the last row of the run; (iii) when `ty1 >> 16 == last` (no bottom trim; round 1
+    finding 3) rows whose position lies in `[last, ty1)` read `data[last − first]`, i.e. the next column's header
+    (`shapes.cpp`:715-719: the high byte of its `first`, 0 for any `first` < 256, so normally transparent) or memory
+    past the bitmap for the last column, where the GPU samples transparent. (i)-(iii) are 1 pixel at the end of a
+    column's run, inside A's edge band, **except** where a run covers only 1-2 screen rows (minified sprites,
+    projectiles): (i)+(ii) can then remove the whole run in SW while the GPU draws a pixel, outside the band. The
+    host test transliterates SW's column loop with (iii)'s read and bounds the non-band share (below). Shading (:738-758): `_textured` without `_SHADELESS_BIT` → `calculate_shading_table(…,
     (short)MIN(depth, SHRT_MAX), ambient_shade)`, one table for the whole rectangle; shadeless, `_tinted`, `_static`
     → `shading_tables` itself (table 0).
   - *Rectangles on the GPU* (new `core/rect.*`, plain C++, host-tested; the front end calls it). `rect_setup(r, w,
@@ -2994,13 +2999,16 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (x − cl − ½)·DX) / 65536` (the bitmap column) and `s(y) = (TY0 + (y − ct − ½)·DY) / 65536` (the row in the
     column), evaluated in double at the four corners; at a pixel centre `X + ½` the interpolation gives SW's own
     `texture_x + (X − cl)·dx` exactly in real arithmetic. GPU coordinates `u0 = (s + ε)/S`, `v0 = (t + ε)/T` (S, T
-    the POT sizes below; texel `(s, t)` = byte `s` of column `t`, as walls). **ε** (`rect_bias`, in 1/4096 texel,
-    default chosen by the host test from {0, 4, 16, 64}, recorded): SW's positions are multiples of 1/65536 texel
-    and are often exact integers (rows start at 0; 1:1 weapons have `dy = 65536`), where a GPU value a hair below
-    the integer samples the texel before; a small positive bias moves those to SW's side and costs only positions
-    whose fraction is above `1 − ε`. The host test models PICA's interpolation (attributes rounded to float24's
-    16-bit mantissa, interpolated, floored) and prints texel agreement for each ε over a grid of sizes (W, H ∈
-    {8, 31, 64, 100, 128, 200, 256}), screen sizes 1..400, clips, both flips; the default is the best. The
+    the POT sizes below; texel `(s, t)` = byte `s` of column `t`, as walls). **ε** (`rect_bias`, in **1/131072**
+    texel, **default 1**, measured): SW's positions are multiples of 1/65536 texel; they are often exact integers
+    (rows start at 0; 1:1 weapons have `dy = 65536`), where a value a hair below samples the texel before, and,
+    because `dx = (W << 16)/w` truncates, often **a few 1/65536 below** an integer (e.g. 3.99998), so any bias of
+    1/65536 or more flips those. Host test (W ∈ {8, 31, 64, 128, 200}, H ∈ {8, 81, 128, 200}, screen sizes 1..400,
+    centred, clipped and flipped; 9.8 M pixels): ε = 0, 1, 2, 8 /131072 give 99.68 / **100.000** / 99.92 / 99.83 %
+    of SW's texels in exact arithmetic, 99.59 / **99.85** / 99.83 / 99.78 % in a float24 model (vertex attributes
+    rounded to a 17-bit significand, interpolated, floored). **UNVERIFIED** (round 1 finding 5): the float24 model is
+    not PICA's documented behaviour and Azahar's host-GPU backend interpolates in float32, so only the console tells
+    how close PICA comes (section 10); the neighbourhood gate absorbs the residual off-by-one texel. The
     clamp-to-edge sampler (`GPU_CLAMP_TO_EDGE`, `enums.h`:37) plus a transparent border (below) make texels
     outside the bitmap invisible, as SW never reads them.
   - *texcoord1 of a rectangle* (constant per rectangle: one table, as SW). `L = sw_shade_index(M, (int16)min(depth,
@@ -3009,7 +3017,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (`shade_lut_value(0, j) = j`, host-asserted), so the level is **exact**. Weapons: `depth` 0 and their ambient
     (`render.cpp`:1094-1097) take the same path. Shadeless → `(255.5/256, 255.5/256)` (M3's constant). `L < 0` (SW's
     short index wraps: SW reads before the tables) → excluded on both sides of a check (`c3d_ambient_wrap`, M3's
-    rule) and a scan reason in play (below). `M > kFlashMax` → `flash_over` as M3. Tinted: `(0.5/256, 0.5/256)`
+    rule) and a scan reason in play (below). No `flash_over` for rectangles: `L` comes from the pinned shade, so it is
+    exact for any `M` (round 1 minor 11). Tinted: `(0.5/256, 0.5/256)`
     (a defined coordinate for unit 1 in a lit frame; the blend ignores the source colour).
   - *Conversion of rectangle bitmaps* (`core/tex_convert.*`). New predicate `rect_tex_supported(W, H, rle)`: RLE
     (`bytes_per_row == NONE`), `1 ≤ W, H ≤ 1024`; anything else → the rectangle is unsupported (a non-RLE rectangle
@@ -3020,12 +3029,14 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     **`NormalKeyed`** (RGBA8, 3.2's normal with A 0 for index 0 and for every texel outside the run), **`ShadelessKeyed`**
     (infravision's tint table), **`Mask`** (A8 = `GPU_A8`, `enums.h`:73: 0 transparent, 255 else; tinted). A
     malformed column (`first > last`, or the bytes beyond the bitmap's storage) cannot be detected from a
-    `bitmap_definition` and is trusted as SW trusts it. The texture's wrap is chosen at creation: `GPU_REPEAT` for
-    walls/floors (M2), **`GPU_CLAMP_TO_EDGE`** for RLE (`texture.h`:169).
+    `bitmap_definition` and is trusted as SW trusts it. The wrap is **part of the cache key** (`TexKey::clamp`, true
+    for RLE rectangles) and passed to `TexAllocator::alloc` for **both** pools, so a promotion's VRAM copy keeps it
+    (round 1 finding 4: `NormalKeyed` serves transparent walls, `GPU_REPEAT`, and sprites, **`GPU_CLAMP_TO_EDGE`**,
+    `texture.h`:169).
   - *Cache* (`core/texcache.*`, `back/texcache.*`). `create(key, S, T)` and `TexSlot::{S, T}`; bytes `S·T·texel_bytes`;
     the allocator takes `(pool, S, T, kind, bytes)` and the GPU format from the kind (`GPU_RGBA8` / `GPU_A8`); the
     promotion copies `bytes` (RAW copy, any size: M2's form). `TexSource` gains `rect` (the RLE path and the clamp).
-    The key is unchanged `(bitmap, tables, kind)`: a tinted rectangle's key holds the global table pointer and
+    The key is `(bitmap, tables, kind, clamp)`: a tinted rectangle's key holds the global table pointer and
     `Mask`, so mask and colour copies of one sprite frame coexist. Slots `kTexSlots` 256 → **512** (sprite frames
     are many and small; L0's bench spot already has 26 (texture, table) pairs, M0's null table) — 512 slots of 64 B
     of bookkeeping. Pool caps unchanged (VRAM 3 584 KiB, linear 4 096 KiB): a 128×64 sprite frame is 32 KiB RGBA8,
@@ -3033,10 +3044,12 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     `discards_tex` and the defaults are revised only if a film discards on `tex` (recorded).
   - *Tinted* (4.3; `low_level_textures.h`:543-579, `scottish_textures.h`:90-95, `shapes.cpp`:2006-2021). SW: index
     `k = transfer_data & 0xff`, tables `(tint_table32*)shading_tables + (k << 3)`, each channel `v ↦ (v·8k)/255`
-    (integer; `number_of_shading_tables` 256 at 32 bits) for every pixel whose texel index is not 0; **the written
+    (integer; `number_of_shading_tables` 256 at 32 bits; `render.cpp`:808-814 gives k 15 or 24) for every pixel whose
+    texel index is not 0; **the written
     pixel has alpha byte 0** (`get_pixel_tint<pixel32>` ORs only the three channel tables). GPU: the `Mask` texture on
     unit 0, the alpha test `GEQUAL 128` keeps the masked texels, and the blend `C3D_AlphaBlend(ADD, ADD, ZERO,
-    CONSTANT_COLOR, ZERO, ONE)` with `C3D_BlendingColor(0xFF000000 | c·0x010101)`, `c = min(8k, 255)` (`effect.h`:8,
+    CONSTANT_COLOR, ZERO, ONE)` with `C3D_BlendingColor(0xFF000000 | c·0x010101)`, `c = 8k`; `k ≥ 32` (SW would read past the 256 tables; never in
+    Marathon 2) is unsupported (`effect.h`:8,
     :12; `enums.h`:247-257): RGB = dst·c/255, alpha kept. The three channels get the same factor, so the register's
     byte order does not matter (`effect.o` `C3D_BlendingColor`: the raw u32 into the context at +0x100, dirty bit 4).
     **TEV does not change**: stage 0's alpha is `REPLACE(TEXTURE0 alpha)` in every textured frame (lit: `draw.cpp`
@@ -3048,10 +3061,11 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     blend. `view_polygon` sets it **between draws** when the class kind changes (`s_f.blend` = Normal | Tinted(c)),
     after `issue_pending()`. `restore_state` re-issues the world blend `C3D_AlphaBlend(ADD, ADD, ONE, ZERO, ONE, ZERO)`
     and `C3D_BlendingColor(0)` (C3D_Init's value: `base.o` `C3D_Init` never stores +0x100, the context is zeroed)
-    whenever the frame set the tinted blend (counted `blend_restores`); the present sets its own alpha test and blend
-    before every draw anyway (`present.cpp`:339-340) and never reads the blend colour. Unit 0 holds an A8 texture
-    during the frame; `restore_state` puts the present's texture back (M2). New counter in `[c3d] cmdbuf final`:
-    `blend_left_tinted` (the blend found tinted after the restore: must be 0). Proof: `m4-present-diff.cfg`
+    whenever the frame set the tinted blend (counted `blend_restores`; `blend_sets` counts the switches); the present
+    sets its own alpha test and blend before every draw anyway (`present.cpp`:339-340) and never reads the blend
+    colour. citro3d has no getter for the blend state, so there is no "left tinted" counter: the proof is the
+    present diff. Unit 0 holds an A8 texture during the frame; `restore_state` puts the present's texture back (M2).
+    Proof: `m4-present-diff.cfg`
     (play mode on, the Invisibility Test plugin, so play frames end with tinted draws) → `present_diff` 0 and the
     restore counters 0.
   - *Front end* (`front/c3d_rasterizer.cpp` `texture_rectangle`). Class from `classify(Rectangle, transfer,
@@ -3067,12 +3081,17 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     pixels are `0x00RRGGBB`, B's `0xFFRRGGBB`: both differ from the clear; the colour delta reads RGB only,
     `core/diff.h`). **`frame`**: every class through the filter with landscapes and static **excluded on both sides**
     (`c3d_only`, counted `excluded`: M5's classes; otherwise a sky in view would discard every frame check) and the new
-    **`Coverage::All`**: every pixel is compared, there is no band and no coverage mismatch (A's tinted pixels have
-    alpha 0, so `TopByte` would call them uncovered; a hole both sides leave is 0 = 0). The neighbourhood fields are
-    computed as for the other classes (all 8 neighbours count).
+    **`Coverage::All`**: there is no band and no coverage mismatch (A's tinted pixels have alpha 0, so `TopByte` would
+    call them uncovered); the compared (`common`) pixels are those where A **or** B differs from the clear in RGB, and
+    the pixels both leave at the clear are counted apart (`empty`, printed; round 1 finding 2: otherwise an excluded
+    sky would pass as Δ 0). The neighbourhood minimum runs over A's 8 neighbours.
   - *Play mode* (1.5's row "milestone < M4 → `false` in play" goes; `front/frame.cpp` `render_frame`, after the
     diff-frame branch). A **play frame** is a world frame with `renderer c3d`, `mode readback`, `play 1` (new key,
-    default 1) and the renderer not "off until the next level". In order:
+    default 1), `textures 1` and `lit 1` (round 1 minor 7: no flat or unlit picture for the player) and the renderer
+    not "off until the next level". In order:
+    (0) *Cheap refusals first* (round 1 minor 8): `software_alpha_blending` not off (`pref`), citro3d not up or a
+    release pending (`down`), the gate closed (`gate`), a view size `view_size_supported` refuses (`size`, e.g.
+    Classic's 640 × 480) → SW draws the frame directly (`draw(ctx, sw)`, no recording), counted `skip:<reason>`.
     (1) *Record*: `s_recorder.clear()`, `forward = nullptr`, `draw(ctx, &s_recorder)` — the one traversal. On
     overflow (8 192 events; M0's null maxima are 387 vertices, 89 polygons, 18 rectangles) the frame is drawn by a
     second traversal `draw(ctx, sw)`, counted `overflow`: the only side effect of a traversal is the weapon
@@ -3080,28 +3099,33 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     state reads.
     (2) *Scan*: the recording is replayed into a counting `PlayScan` rasterizer (no drawing) that finds the first
     reason C3D cannot draw the frame: `landscape`, `static` (polygon or rectangle), `other` (a polygon class C3D does
-    not draw: `_solid`, tinted polygon), `bitmap` (`c3d_supports` / `rect_tex_supported` false), `wrap` (M3's
-    `shade_ambient_wraps` on a polygon, `L < 0` on a rectangle), `flash` (`M > kFlashMax`), and `pref`
-    (`software_alpha_blending` not off, checked first). A reason → the recording is replayed into SW (`dest`), counted
+    not draw: `_solid`, tinted polygon; a tinted `k ≥ 32`), `bitmap` (`c3d_supports` / `rect_tex_size` false), `wrap`
+    (M3's `shade_ambient_wraps` on a polygon, `L < 0` on a rectangle), `flash` (`M > kFlashMax` on a polygon). A
+    reason → the recording is replayed into SW (`dest`), counted
     `scan:<reason>`; **no C3D frame is opened** (a sky in view costs the scan, not a GPU frame).
     (3) *Draw*: `view_begin(w, h, 0)` (skip → SW replay, counted `skip:<reason>`); the recording replayed into the
-    `C3dRasterizer` (unfiltered); `view_end_play(dest)`: M1's readback, then a copy into `dest`'s rows
-    (`row_addresses`, its own pitch) of **only the pixels C3D covered** (alpha ≠ 0) as `(rgba >> 8) | 0xFF000000`
-    (5.2): a pixel no primitive writes keeps the previous frame, as SW leaves it (SW never clears `world_pixels`).
-    A sentinel pixel (none expected, M0) counts `sentinel` and is not copied.
+    `C3dRasterizer` (unfiltered); `view_end_play(rows)`: M1's readback (`view_readback(true)`: the staging converted
+    to ARGB keeping the target's alpha, `back/view.cpp`), then one pass into `dest`'s rows (`row_addresses`, its own
+    pitch): the sentinel first (its alpha 0x01 would pass the next test: counted `sentinel`, not copied), then
+    **only the pixels C3D covered** (alpha ≠ 0) are written, with alpha forced to 0xFF (5.2's form): a pixel no
+    primitive writes keeps the previous frame, as SW leaves it (SW never clears `world_pixels`). Known difference,
+    holes only (round 1 minor 10): a tinted pixel over a C3D hole keeps alpha 0 (the blend keeps dst alpha) and is
+    not copied, where SW would tint the previous frame's pixel.
     (4) *Discard* (any `DiscardReason`, 2.4) → the recording is replayed into SW (`dest`, `texture_random_seed()`
     restored as the diff harness does), counted `discard:<reason>`. **Ten resource discards in a row** (`ring`,
-    `cmdbuf`, `gx`, `begin`, `tex`; not `unsupported`, not scan reasons, which are content, not trouble) → play is
+    `cmdbuf`, `gx`, `begin`, `tex`; not `unsupported`, not scan reasons, which are content, not trouble; scan, skip
+    and `unsupported` frames leave the run unchanged, a C3D frame resets it: round 1 minor 9) → play is
     **off until the next level**: logged `[c3d] play: off until the next level (10 discards in a row, last <reason>)`;
     `collections_changed()` (hook 2a at the end of `load_collections`, which `entering_map` calls for every level,
-    `marathon2.cpp`:689) turns it on again, logged `[c3d] play: on again (collections changed)`. A C3D frame resets
-    the run of discards.
+    `marathon2.cpp`:689) turns it on again, logged `[c3d] play: on again (collections changed)`, and resets the run.
     Diff frames keep M0's form (the real frame is SW's replay) and come first. Counters: `[c3d] play` once a second
     beside `[c3d] frame stats` and a final `[c3d] play final` line (`frames c3d sw overflow scan=landscape/static/other/
-    bitmap/wrap/flash/pref discard=unsup/ring/cmdbuf/gx/begin/tex skip=down/gate/size/pref offs ons max_run sentinel
-    play_checks play_check_fail`). **`play_check N`** (new key, default 0): every N-th C3D play frame, `dest` is copied
-    to scratch A before the readback, the recording is replayed in SW over it afterwards, and A vs `dest` is logged as a
-    `DIFF … class=play` line (`Coverage::All`): the play path's own pixels, copy and pitch included.
+    bitmap/wrap/flash discard=unsup/ring/cmdbuf/gx/begin/tex skip=down/gate/size/pref/config offs ons max_run sentinel
+    play_checks`). **`play_check N`** (new key, default 0): every N-th C3D play frame, `dest` is copied to scratch A
+    before the readback, the recording is replayed in SW over it afterwards, and A vs `dest` is logged as a `DIFF …
+    class=play` line (`Coverage::All` with clear 0; both start from the previous frame, so `empty` is only black): the
+    play path's own pixels, copy and pitch included. The engine judges nothing: `c3d-diff.py` gates the `play` lines
+    (round 1 finding 2).
   - *GX queue and command buffer.* A play frame is a view frame (promotions ≤ 8 + LUT 1 + clear 1 + split 1 + readback
     1 = 12, + `C3D_FrameEnd` 1 ≤ 24: unchanged). More draws per frame; the reserve is per draw. A tinted draw adds the
     blend words; `view_frame_words`, `draw_words` and the draw reserve are re-measured over the acceptance
@@ -3109,8 +3133,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     4 096 kept unless a film refuses, then doubled and recorded).
   - *Zones.* Play frames: the record + scan + replay + readback run in **`c3d_draw`**; a SW redraw after a discard or a
     scan reason runs where SW always runs (`render`, the caller's zone). No new zone.
-  - *Colour gates* (**pending the user's decision**, Review log "M4 pre-implementation"). 8.3's rows predate M2's
-    neighbourhood rule. Proposed: **sprites, weapons**: non-edge coverage mismatches ≤ **0.5 %** of A's covered
+  - *Colour gates* (**user decision 2026-11-06**, Review log "M4 pre-implementation, gates"). 8.3's rows predate
+    M2's neighbourhood rule. **sprites, weapons**: non-edge coverage mismatches ≤ **0.5 %** of A's covered
     pixels; M2's neighbourhood rule with M3's lit numbers (≥ 98 % within Δ ≤ 4, `mean_nb` ≤ 1.5). A rectangle's texel
     choice is SW's affine step reproduced to float precision (host test above), so the neighbourhood rule absorbs
     the residual off-by-one texel as for walls. **tinted**: 8.3 as written, strict (≥ 98 % Δ ≤ 3, coverage ≤ 0.5 %
@@ -3119,39 +3143,51 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     is carried by the per-class checks (a frame check has no coverage notion once tinted pixels carry alpha 0).
     **play** (`play_check`): as frame.
   - *The Invisibility Test plugin* (4.3; `scripts/3ds/tests/plugins/Invisibility Test/`, `run-azahar.sh
-    --invisibility-test`). `Triggers.init`: `Players[0].invisibility_duration` kept > 0 by `Triggers.idle`
-    (`lua_player.cpp`:2293) — the weapon then takes the player's transfer mode (`render.cpp`:1104-1105,
-    `player.cpp`:1985-2000: subtle above `kINVISIBILITY_DURATION`, else invisibility), so **every frame has tinted
-    weapons** (the gate's coverage); plus, best effort, one `"minor invisible compiler"` and one `"major invisible
+    `--invisibility-test`). `Triggers.init` and `Triggers.idle` keep `Players[0].invisibility_duration` in **[1 500,
+    2 000] ticks** (`lua_player.cpp`:2293): at most `kINVISIBILITY_DURATION` (70 s = 2 100, `player.cpp`:191-198),
+    so the transfer mode is `_xfer_invisibility` (k 15), and never under 10 s, where the weapon flickers to `NONE`
+    (`player.cpp`:1993-2000; round 1 minor 6). The weapon takes the player's transfer mode (`render.cpp`:1104-1105,
+    `player.cpp`:1985-1991), so **every frame has a tinted weapon** (the gate's content); plus, best effort, one `"minor invisible compiler"` and one `"major invisible
     compiler"` (`_monster_is_invisible` / `_subtly_invisible`, `monster_definitions.h`:572-630) created 2 WU ahead of
     the player (`Polygon:find_polygon`, `Monsters.new`, `lua_monsters.cpp`:1092) for tinted **sprites** (recorded,
     not gated: `c3d_tinted_rects` by class in the log). Why: the player's own invisibility is deterministic and puts a
     tinted rectangle on every frame; no bench spot has an invisible monster.
   - *Keys* (`core/config.*` + host test): `play 0|1` (default 1), `play_check N` (0..100000, default 0), `rect_bias
-    N` (0..4096, 1/4096 texel; default from the host test). Printed in the `[c3d] debug-c3d:` line.
+    N` (0..65536, 1/131072 texel; default 1). Printed in the `[c3d] debug-c3d:` line. **The M1-M3 configs get `play
+    0`** (round 1 minor 7), so their re-runs on the M4 binary are the regressions they were; play is exercised by the
+    `m4-*` configs.
   - *Configs* (every software-backend run with VRAM promotions needs `gxq_budget 3`, the Azahar fault of M3; each
     `m4-*.cfg` says so): `m4-diff.cfg` (`diff 1`, 20 checks, `classes sprites,weapons,frame`, lit, `diff_tol 4`),
-    `m4-tinted.cfg` (`diff 15`, `classes tinted,weapons,frame`, `diff_tol 3`), `m4-film.cfg` / `m4-film-l08.cfg`
+    `m4-tinted.cfg` (`diff 15`, `classes tinted,frame`, `diff_tol 3`: with the player invisible every weapon is
+    `kTinted`, so `weapons` would be empty), `m4-film.cfg` / `m4-film-l08.cfg`
     (`diff 2`, 200 checks, `classes sprites,weapons,tinted,frame`), `m4-play.cfg` (`diff 0`, `play 1`,
     `play_check 30`), `m4-present-diff.cfg`, `m4-off.cfg` (`reserve_extra 1000000`: every play frame discards
     `cmdbuf`; with `--load-test`, which changes level at 10 s, the off/on lines must appear).
   - *`c3d-diff.py`.* `--colour` accepts `sprites,weapons,tinted,frame,play`; `--strict CLASS[,CLASS]` gates those
-    classes on the strict figures (tinted); `--nonedge-pct` per run as today; frame/play lines have no band. New
-    `play LOG` command: tabulates the `[c3d] play final` line; exit 1 on `sentinel` > 0, `play_check_fail` > 0, no
-    C3D play frame, or (with `--expect-offs N`) a different number of offs/ons.
+    classes on the strict figures (tinted); `--nonedge-pct` per run as today; frame/play lines have no band.
+    **`--min-covered N`** (round 1 finding 1): per gated class, A's covered pixels summed over the run ≥ N **and** at
+    least `--min-checks` checks with `covered_A > 0`, so a run without sprites on screen fails instead of passing on
+    `common == 0` (used for sprites, weapons, tinted: N = 2 000 on a bench spot, 20 000 on a film). New `play LOG`
+    command: tabulates the `[c3d] play final` line; exit 1 on `sentinel` > 0, no C3D play frame, `--min-play-checks
+    N` not met (so `play_check 30` producing no check fails), a gated `class=play` line failing the frame gate, or
+    (with `--expect-offs N`) a different number of offs/ons.
   - *Host tests* (8.4): RLE conversion (every kind, padding, `first`/`last` at 0 and `H`, an empty column, tiling of
     a non-square image vs tex3ds byte for byte when present); `rect_setup` vs the transliterated SW clip on a grid
     (screen sizes, clips on each side, both flips, `dx`/`dy` of 0); the texel agreement at pixel centres vs SW per ε
-    (printed; the default asserted ≥ 99.9 % with the float24 model); SW's per-column trim vs the mask's coverage:
-    every difference lies in A's edge band (asserted) and their count is printed; `shade_lut_value(0, j) == j`; the
+    (printed; asserted for the default: 100 % in exact arithmetic, ≥ 99.8 % in the float24 model over the grid);
+    SW's column loop transliterated (trim (i)-(iii), (iii)'s read modelled as the next header's high byte, 0 past the
+    last column) vs the mask's coverage: band and non-band differences printed, non-band ≤ 0.1 % of the common
+    pixels asserted (measured 0.057 %, all from runs of a few rows); `shade_lut_value(0, j) == j`; the
     tinted factor `(v·8k)/255` vs `round(v·c/255)` (Δ ≤ 1 asserted); the new keys; the cache with `S ≠ T` and A8.
   - *Accept* (Azahar, non-authoritative; both backends, the software one at `gxq_budget 3`). `m4-diff.cfg` on
     L0/L6/L20 and `m4-film*.cfg` pass the sprite/weapon/frame gates (`--min-checks` 20 / 200, `sentinel` 0);
-    `m4-tinted.cfg` (L0, plugin) passes the tinted gate with `c3d_tinted_rects` > 0; in play mode (`m4-play.cfg`) the
+    with `--min-covered` for sprites and weapons; `m4-tinted.cfg` (L0, plugin) passes the tinted gate with
+    `--min-covered`; in play mode (`m4-play.cfg`) the
     scripts `12-sprite-check.txt`, `06-gameplay.txt`, `07-suspend-menus.txt`, `13-bottom-screen.txt`,
-    `14-terminal.txt` run to the end with C3D play frames > 0, `play_check_fail` 0, `sentinel` 0; `m4-off.cfg`
-    shows the off and on lines; `m4-present-diff.cfg` `present_diff` 0 and the restore counters 0 (incl.
-    `blend_left_tinted`); M3's lit gate (`m3-diff.cfg` L0), M2's full-bright gate (`m2-diff.cfg` L0), M1's walls
+    `14-terminal.txt` run to the end with C3D play frames > 0, every `class=play` check within the frame gate,
+    `sentinel` 0; `m4-off.cfg`
+    shows the off and on lines; `m4-present-diff.cfg` `present_diff` 0, the restore counters 0 and `blend_restores`
+    > 0; M3's lit gate (`m3-diff.cfg` L0), M2's full-bright gate (`m2-diff.cfg` L0), M1's walls
     coverage, M0's calibration and P1 scripts 08, 22 unharmed; the OFF builds' `objdump -d` unchanged and `nm` clean.
     **Recorded, not gated:** a C3D-vs-SW bench (`perf-bench.sh` L0/L6/L20 @30, `m4-play.cfg` vs `renderer sw`):
     readback mode is not meant to be faster (0.5); the play counters (frames C3D / SW by reason) per level; the
@@ -3331,6 +3367,10 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    alpha ×2 clamp (`m3-alpha2.cfg`: self-luminous coverage intact = clamps); texcoord1 precision at LUT bin
    edges and float24 at `u ≈ −2 048`; the unbinding of unit 1 after a lit frame on hardware (`[c3d] shade:
    citro3d context layout confirmed`, `unit1_left_bound=0`, no hang at the next present).
+   **M4:** PICA's texcoord interpolation and texel choice on rectangles (the float24 model and `rect_bias`, design 7
+   M4 "Rectangles on the GPU"); the `CONSTANT_COLOR` blend's rounding (predicted Δ ≤ 1); A8 sampling into the alpha
+   test and `GPU_CLAMP_TO_EDGE`; non-square POT textures (`C3D_TexInit(S, T)`) on hardware; play-mode readback cost
+   and HOME/suspend in play mode (`NEXT-SPRINT.md` "M4 console check, short version").
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -4000,4 +4040,30 @@ once and replayed (into C3D, or into SW after a discard or a scan reason, never 
 recorder overflow, whose only side effect is the weapon flutter's C `rand()`); the copy of a play frame keeps the
 pixels C3D did not cover, as SW does; only resource discards count toward "10 in a row". Pending: the colour
 gates for sprites, weapons and the full frame (a tolerance change: the user's decision) and the critic's review.
+
+### M4 pre-implementation, gates (coordinator, 2026-11-06; user decision; a tolerance change)
+
+8.3's sprite/weapon and full-frame rows predate M2's neighbourhood rule. Asked with the numbers, the user chose:
+**sprites, weapons**: M2's neighbourhood rule at M3's lit numbers (≥ 98 % within Δ ≤ 4, `mean_nb` ≤ 1.5),
+non-edge coverage mismatches ≤ 0.5 % of A's covered pixels; **full frame** (and the play check): every pixel
+compared (`Coverage::All`, no coverage clause: coverage is gated per class), neighbourhood ≥ 97 % within Δ ≤ 4, no
+mean gate, landscapes and static excluded on both sides (M5's classes). **tinted** stays 8.3's row as written
+(strict ≥ 98 % Δ ≤ 3, coverage ≤ 0.5 %).
+
+### M4 pre-implementation, round 1 (critic: REVISE, 3 major, 8 minor; applied)
+
+(1) The sprite/weapon gates could pass with no sprite on screen (`c3d-diff.py` gives 100 % on `common == 0`):
+`--min-covered N` added; `weapons` dropped from `m4-tinted.cfg` (an invisible player's weapon is `kTinted`).
+(2) `Coverage::All` counted pixels both sides leave empty as passing: `common` is now "A or B differs from the
+clear", `empty` printed apart; the play check is judged by `c3d-diff.py`, which also fails on zero play checks.
+(3) The trim analysis missed case (iii) (no bottom trim when `ty1 >> 16 == last`: SW reads the next column's
+header byte) and "every difference in the band" is false for runs of 1-2 rows: both corrected; the host test
+transliterates the column loop with (iii)'s read and bounds the non-band share (0.057 % measured). Minors: the wrap
+is part of the cache key and reaches the VRAM copy (4); the float24 model is UNVERIFIED and in section 10 (5); the
+plugin holds invisibility in [1 500, 2 000] ticks (no flicker, k 15) (6); play needs `textures 1 && lit 1` and the
+M1-M3 configs get `play 0` (7); cheap refusals before recording (8); the "ten in a row" run is defined for every
+frame kind (9); the copy pass tests the sentinel before alpha, and the tinted-over-hole difference is named (10);
+`:858`, no `flash_over` for rectangles, tinted `k ≥ 32` unsupported (11). Also from the host tests (main session):
+`rect_bias` is in 1/131072 texel with default 1 (a bias ≥ 1/65536 flips SW's truncated positions just below
+integers), and `blend_left_tinted` is dropped (citro3d has no blend getter; the present diff is the proof).
 
