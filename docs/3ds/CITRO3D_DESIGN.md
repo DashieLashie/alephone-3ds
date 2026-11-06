@@ -2703,6 +2703,16 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   ambient, weapon flash.
 - Accept: host LUT ≤ 1 level everywhere; diff `walls,floors` lit ≥ 98% Δ ≤ 4,
   mean ≤ 1.5 on L0/L6/L20 + 2 films; infravision via the Lua plugin.
+- **Status (2026-11-05): M3 implemented and accepted on the host-GPU backend** (`PERF.md` "Stage 10 M3", Azahar —
+  non-authoritative; commits `c3b4349c4`..`dd955459a`; critic: spec APPROVE round 2, code APPROVE, post-review
+  change APPROVE). Host LUT worst 1 level (90.6 % exact); L0/L6/L20, both films (200 checks each), infravision
+  and M2's full-bright gate pass on the host GPU, and L0/L6/L20, infravision and M2's gate pass on the software
+  backend too; command words 1304 / 282 / 10, draw reserve **564**, rings **2 048 / 4 096**; unit 1 is
+  **unbound after each lit frame** (Review log "M3 acceptance, unit 1 after the frame"); `alpha_x2` clamps on
+  both Azahar backends. **Open:** the software-backend films kill Azahar mid-run (an emulator fault with two
+  texture units; Review log "M3 acceptance, software-backend films"), negative ambient not reached in either
+  film. Console: `NEXT-SPRINT.md` "M3 console check, short version" (TEV rounding, the ×2 clamp, the unit-1
+  unbinding on PICA).
 - **M3 specification (revision of 2026-11-03, before code; Review log "M3 pre-implementation").**
   Where the lines above, 2.1-2.2, 4.1-4.3 and the code disagree, this block rules. Citations are the code
   as of `6533f8b01`. M3 runs **only on diff frames** (side B of a C3D check), as M1/M2; play frames stay SW
@@ -3052,11 +3062,11 @@ hold in every mode with the default caps.
 | command buffer (one buffer, 0.3; 512 default, up to 1 024 by M1) | 512-1 024 |
 | present staging 512x256 RGBA8 (P1 calibration, 5.1) | 512 |
 | zero-copy `main_surface` 512x256 (plan B, 5.7.8; from the first HUD + Map game) | 512 |
-| vertex ring 2 × 1 024 × 32 B (M0: 2 × max 387, rounded up to 1 024; M1 re-measured over the menu demo and a film: unchanged) | 64 |
-| index ring 2 × 2 048 × 2 B (M0: 2 × max 597) | 8 |
+| vertex ring 2 × 2 048 × 32 B (M0: 2 × max 387, rounded up to 1 024; M1 re-measured over the menu demo and a film: unchanged; **M3: 2 048**, the L08 film's span quads overflowed 1 024) | 128 |
+| index ring 2 × 4 096 × 2 B (M0: 2 × max 597; M3: 4 096) | 16 |
 | readback staging 480x240 | 450 |
 | linear texture pool (cap; holds promotions pending) | 4 096 |
-| **total** | ≤ 6 666 |
+| **total** | ≤ 6 738 |
 
 No change to `__ctru_linear_heap_size` needed on the New 3DS
 (`a1_3ds_platform.cpp`:43-50 "revisit then": revisited). Azahar's split is
@@ -3753,4 +3763,18 @@ race (main thread only; the unit-0 re-bind's bit 23 and the unbind's bit 24 both
 Copying → Vram re-bind only in the fallback (two early-discard paths of `view_begin` could otherwise leave
 unit 1 bound into the present); (2) `unit1_left_bound` and the layout line join the acceptance, re-run in
 full. Note added: the context access needs no LTO.
+
+### M3 acceptance, software-backend films (coordinator, 2026-11-05; the user's decision)
+
+With unit 1 unbound after each lit frame, every acceptance item passes except the two films under Azahar's
+**software** backend: Azahar dies mid-film (L01 after 96 of 200 checks, L08 after 36), at the same frame in
+repeated runs, with no crash report. Bisection on the L08 film: `lit 0` (one TEV stage, unit 1 unused) runs to
+the end; a constant texcoord1 still dies (earlier); `u` clamped to [−1, 2] dies at the same frame. Azahar's
+software sampler clamps coordinates before the lookup (`GetWrappedTexCoord`), so out-of-range texcoords cannot
+explain it; the fault is in the emulator with a second texture unit in use, cause not found. The checks run
+before the fault pass the colour and coverage rules (non-edge ≤ 0.004 %, a few pixels the host GPU never
+shows). The host-GPU backend passes both films; the 20-check runs pass on both backends. Proposed: accept M3
+with this recorded as an Azahar software-backend limitation (8.2's "both backends" rule then holds for the
+20-check runs and infravision only); the console check decides the hardware behaviour. **Pending the user's
+decision.**
 

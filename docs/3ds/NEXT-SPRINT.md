@@ -1165,6 +1165,13 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    console 2026-11-03** (`PERF.md` "Stage 10 M2 — console, short check": the conversion flush and the
    TextureCopy promotion verified). **Next: the user's choice** — M3 (lighting, kickoff to be written),
    or the full "M1 console check" in a longer session.
+   **M3 (2026-11-05**, kickoff `KICKOFF_M3.md`; `PERF.md` "Stage 10 M3", Azahar — non-authoritative): the
+   shade LUT (256x256 L8, worst 1 level vs SW on the host), texcoord1, two TEV stages, infravision, weapon
+   flash, negative ambient (SW's short-index wrap excluded); passes on L0/L6/L20, both films (L01, L08) and
+   infravision on the host GPU, and on the 20-check runs under the software backend; unit 1 unbound after each
+   lit frame (Azahar's software backend crashed otherwise). **Open: the software-backend films kill Azahar
+   mid-run** (design Review log "M3 acceptance, software-backend films"; the user decides whether M3 is
+   accepted with it recorded). Console: "M3 console check, short version" at the end of this file.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.

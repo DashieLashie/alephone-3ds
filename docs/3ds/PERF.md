@@ -1565,3 +1565,66 @@ are not benchmark frames); BENCH runs 59.52 / 59.81 fps, `gaps=0`.
 
 Settles design section 7 "Upload model" on hardware: the ranged `GSPGPU_FlushDataCache` after each
 conversion, and the `C3D_SyncTextureCopy` RAW promotion queued after `frame_begin()` and before the clear.
+
+## Stage 10 M3: lighting — shade LUT, two TEV stages, infravision (Azahar — non-authoritative)
+
+Recorded 2026-11-05 on `stage10-c3d` (`c3b4349c4`, `d9ca37b76`, `cc4f6ea78` parts 1-5; `eff8931b5` review
+fixes and the ring sizing; `087ab93cb` + `dd955459a` unit 1 unbound after each lit frame). Design section 7
+"M3 specification"; the final series ran on `dd955459a` (`build-3ds-c3d-prof`). Builds 0 warnings; no engine
+edit; OFF builds' `objdump -d` hashes identical to the session start (`6578c05eebb0feb3` / `8f9ad3a55fc0ce08`),
+`nm` 0. Host tests 102 674 checks, 0 failures: **shade LUT vs `calculate_shading_table` on 476 930 000
+samples, worst 1 level, 90.6 % exact** (s pinned to 0, negative ambient, full bright and shadeless exact);
+L8 tiling byte-identical to `tex3ds -f l8` (W 16 and the LUT itself); lit colour prediction ≤ 2 per channel,
+mean ≤ 0.47. Gate: `c3d-diff.py log … --colour walls,floors --shading lit --nonedge-pct 0.1 --within 98 --tol 4
+--mean 1.5` (M2's neighbourhood rule, 8.3's lit numbers; "within" and "mean" are neighbourhood figures,
+"strict" is Δ to A's own pixel); infravision `--shading infra --tol 2 --mean 1.0`; M2's gate unchanged.
+
+| Run | Backend | Walls within / mean | Floors within / mean | Non-edge | Gate |
+| --- | --- | --- | --- | --- | --- |
+| `m3-diff.cfg` L0 (20) | host GPU / software | 99.69 % / 0.21; sw 99.69 % / 0.11 | 99.87 % / 0.71; sw 99.87 % / 0.15 | 0 | pass, both |
+| L6 (20) | host GPU / software | 99.45 % / 0.51; sw 99.42 % / 0.21 | 99.69 % / 0.60; sw 99.67 % / 0.20 | 0 | pass, both |
+| L20 (20) | host GPU / software | 99.73 % / 0.79; sw 99.72 % / 0.10 | 99.31 % / 0.30; sw 99.31 % / 0.14 | 0 | pass, both |
+| film L01 `m3-film.cfg` (200) | host GPU | 99.86 % / 0.40 | 99.46 % / 0.57 | 0 | pass |
+| film L08 `m3-film-l08.cfg` (200) | host GPU | 99.69 % / 0.60 | 99.49 % / 0.81 | 0 | pass; flash checks 10, `M` max 57 344 |
+| film L01 / L08 | software | 99.85 % / 0.17 (96 checks); 99.83 % / 0.20 (36) | 99.71 % / 0.19; 98.78 % / 0.49 | 19+28 / 12+63 (≤ 0.004 %) | **Azahar dies** mid-film (below) |
+| infravision `m3-infra.cfg` + plugin (20) | host GPU / software | 99.73 % / 0.04, both | 99.89 % / 0.01; sw 99.88 % | 0 | pass, both; 1 320 polygons, all shadeless |
+| `m2-diff.cfg` (`fullbright 1`) L0 | host GPU / software | 99.68 % / 0.05; sw 99.69 % | 99.85 % / 0.02 | 0 | pass, both: **M2's figures exactly** |
+| `m3-alpha2.cfg` (`alpha_x2 1`) L0 | host GPU / software | as `m3-diff` L0 | as `m3-diff` L0 | 0 | recorded: **both backends clamp** |
+
+Every gated run: `sentinel` 0, 0 discards, `[c3d] shade: LUT built` / `promoted to VRAM` once, `citro3d
+context layout confirmed`, and `tex_restore_mismatch`, `tex1_restore_mismatch`, `tev1_not_init`,
+`unit1_left_bound`, `prog_restore_mismatch` all 0. **Command words** (deterministic): `view_frame_words=1304
+draw_words=282 readback_words=10` (M2: 1288 / 268 / 8); the draw reserve becomes 2 × 282 = **564**; GX
+high-water 13 (M2 12 + the LUT promotion). Lighting's own error on L0 (same view, M2 full bright → M3 lit):
+`mean_nb` walls 0.05 → 0.21, floors 0.02 → 0.71 on the host GPU (0.11 / 0.15 on Azahar's software backend,
+whose integer TEV rounds differently; the host prediction allows ≤ 0.47 average from the TEV alone, more on
+dim floors). **Not reached:** negative ambient (`c3d_neg_ambient_polys` and `c3d_ambient_wrap` 0 on both films:
+the L08 light never went negative while in view); flash checks 0 on the L01 film in this run (2 in an earlier
+one: film timing differs between runs).
+
+**Ring sizing.** The L08 film's non-convex floors (M2's span quads, up to 140 per polygon) overflowed the
+1 024-vertex ring half in 2 checks (`discarded (ring)`; high-water of the accepted checks 973 / 1 467): the
+defaults are now **2 048 vertices / 4 096 indices** per half (+72 KiB linear); with them 0 refusals, high-water
+780 / 1 170 in the final run.
+
+**Azahar's software backend and texture unit 1.** (1) The first series ran with the LUT left bound on unit 1
+after each frame (the design's answer to `C3D_TexBind(1, NULL)` dereferencing NULL + 12): every
+software-backend run died at the present after the first lit check (macOS crash report: `EXC_BAD_ACCESS` in
+`Pica::Texture::LookupTexelInTile`, a `SwRenderer` worker), because unit 1 stayed enabled while the present's
+shader outputs no texcoord1. Fixed by unbinding unit 1 after each lit frame (design "M3 acceptance, unit 1
+after the frame"); the host-GPU backend never showed it. (2) With that fix the 20-check runs pass under the
+software backend, but **the two films still kill Azahar's software backend mid-run** (L01 after 96 checks, L08
+after 36; deterministic: the same frame in two runs; no crash report written). `lit 0` (one TEV stage, no
+unit 1) runs the same L08 film to the end, so it is the second texture unit in view frames; it is **not** the
+texcoord1 values (a constant texcoord1 crashes too, earlier; `u` clamped to [−1, 2] crashes at the same
+frame). Azahar's software sampler clamps coordinates before the texel lookup (`GetWrappedTexCoord`,
+`ClampToEdge`; read from the Azahar sources), so the cause is inside the emulator and not found. The checks
+before the crash pass the gate's colour and coverage rules, with a few non-edge mismatches (≤ 0.004 %, never
+seen on the host GPU). **The software-backend film item is therefore not met** (design Review log "M3
+acceptance, software-backend films").
+
+**Regression:** `m3-present-diff.cfg` + script 13 / 08: `present_diff final` 23 / 68 checks, 0 with RGB
+differences, the five restore counters 0; P1 scripts 07 (`p1-diff.cfg`: 3 present checks, 0 differ), 14
+(`present_diff final: 11 checks, 0`), 22 (`gate closed at present 920`, `release done`); `m1-diff-walls.cfg` L0
+`--coverage walls` exit 0 (140 / 0, as M1); `m0-readback-cal.cfg` 30/30 ok. An earlier series lost runs to a
+full disk (from outside the session); every figure above is from the final series.
