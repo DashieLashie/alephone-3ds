@@ -2703,15 +2703,16 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   ambient, weapon flash.
 - Accept: host LUT ≤ 1 level everywhere; diff `walls,floors` lit ≥ 98% Δ ≤ 4,
   mean ≤ 1.5 on L0/L6/L20 + 2 films; infravision via the Lua plugin.
-- **Status (2026-11-05): M3 implemented and accepted on the host-GPU backend** (`PERF.md` "Stage 10 M3", Azahar —
+- **Status (2026-11-05): M3 implemented and accepted** (`PERF.md` "Stage 10 M3", Azahar —
   non-authoritative; commits `c3b4349c4`..`dd955459a`; critic: spec APPROVE round 2, code APPROVE, post-review
   change APPROVE). Host LUT worst 1 level (90.6 % exact); L0/L6/L20, both films (200 checks each), infravision
   and M2's full-bright gate pass on the host GPU, and L0/L6/L20, infravision and M2's gate pass on the software
   backend too; command words 1304 / 282 / 10, draw reserve **564**, rings **2 048 / 4 096**; unit 1 is
   **unbound after each lit frame** (Review log "M3 acceptance, unit 1 after the frame"); `alpha_x2` clamps on
-  both Azahar backends. **Open:** the software-backend films kill Azahar mid-run (an emulator fault with two
-  texture units; Review log "M3 acceptance, software-backend films"), negative ambient not reached in either
-  film. Console: `NEXT-SPRINT.md` "M3 console check, short version" (TEV rounding, the ×2 clamp, the unit-1
+  both Azahar backends. Under Azahar's **software** backend the films need `gxq_budget 3` (all linear): that
+  rasteriser faults when one draw samples textures from FCRAM and VRAM together (an emulator bug, bisected;
+  Review log "M3 acceptance, software-backend films"); so run, both films pass. Negative ambient not reached in
+  either film. Console: `NEXT-SPRINT.md` "M3 console check, short version" (TEV rounding, the ×2 clamp, the unit-1
   unbinding on PICA).
 - **M3 specification (revision of 2026-11-03, before code; Review log "M3 pre-implementation").**
   Where the lines above, 2.1-2.2, 4.1-4.3 and the code disagree, this block rules. Citations are the code
@@ -3764,17 +3765,18 @@ Copying → Vram re-bind only in the fallback (two early-discard paths of `view_
 unit 1 bound into the present); (2) `unit1_left_bound` and the layout line join the acceptance, re-run in
 full. Note added: the context access needs no LTO.
 
-### M3 acceptance, software-backend films (coordinator, 2026-11-05; the user's decision)
+### M3 acceptance, software-backend films (coordinator, 2026-11-05; investigated at the user's request)
 
-With unit 1 unbound after each lit frame, every acceptance item passes except the two films under Azahar's
-**software** backend: Azahar dies mid-film (L01 after 96 of 200 checks, L08 after 36), at the same frame in
-repeated runs, with no crash report. Bisection on the L08 film: `lit 0` (one TEV stage, unit 1 unused) runs to
-the end; a constant texcoord1 still dies (earlier); `u` clamped to [−1, 2] dies at the same frame. Azahar's
-software sampler clamps coordinates before the lookup (`GetWrappedTexCoord`), so out-of-range texcoords cannot
-explain it; the fault is in the emulator with a second texture unit in use, cause not found. The checks run
-before the fault pass the colour and coverage rules (non-edge ≤ 0.004 %, a few pixels the host GPU never
-shows). The host-GPU backend passes both films; the 20-check runs pass on both backends. Proposed: accept M3
-with this recorded as an Azahar software-backend limitation (8.2's "both backends" rule then holds for the
-20-check runs and infravision only); the console check decides the hardware behaviour. **Pending the user's
-decision.**
-
+With unit 1 unbound after each lit frame, every acceptance item passed except the two films under Azahar's
+**software** backend: Azahar died mid-film (L01 after 96 of 200 checks, L08 after 36), at the same frame in
+repeated runs, with no crash report. The user chose to investigate before accepting. Bisection on the L08 film
+(`PERF.md` "Stage 10 M3"): `lit 0` runs to the end; texcoord1 values are not it (constant, or clamped to
+[−1, 2]: still dies); the LUT's format is not it (RGBA8: still dies); keeping the LUT's linear copy alive
+changes nothing. **What decides is the memory region**: textures and LUT both in linear memory → the whole
+film passes; one in VRAM and the other in linear memory (either way round) → dies at the first such frame; both
+in VRAM → fine until a newly converted texture is sampled from linear memory. **Azahar's software rasteriser
+faults when one draw samples textures from FCRAM and VRAM together**; PICA reads physical addresses and the
+host-GPU backend is unaffected, so the port's design is unchanged. Under the software backend the films are
+run all-linear (`gxq_budget 3`, so nothing is promoted) and **pass** (L01 walls 99.87 %, floors 99.80 %; L08
+99.69 % / 99.47 %; 0 non-edge); the configs' notes say so. 8.2's "both backends" rule is met that way for the
+films. The console check (two texture units, mixed regions as in the default) is the hardware answer.

@@ -1586,7 +1586,8 @@ mean ≤ 0.47. Gate: `c3d-diff.py log … --colour walls,floors --shading lit --
 | L20 (20) | host GPU / software | 99.73 % / 0.79; sw 99.72 % / 0.10 | 99.31 % / 0.30; sw 99.31 % / 0.14 | 0 | pass, both |
 | film L01 `m3-film.cfg` (200) | host GPU | 99.86 % / 0.40 | 99.46 % / 0.57 | 0 | pass |
 | film L08 `m3-film-l08.cfg` (200) | host GPU | 99.69 % / 0.60 | 99.49 % / 0.81 | 0 | pass; flash checks 10, `M` max 57 344 |
-| film L01 / L08 | software | 99.85 % / 0.17 (96 checks); 99.83 % / 0.20 (36) | 99.71 % / 0.19; 98.78 % / 0.49 | 19+28 / 12+63 (≤ 0.004 %) | **Azahar dies** mid-film (below) |
+| film L01 / L08, default config | software | 99.85 % / 0.17 (96 checks); 99.83 % / 0.20 (36) | 99.71 % / 0.19; 98.78 % / 0.49 | 19+28 / 12+63 (≤ 0.004 %) | **Azahar dies** mid-film (below) |
+| film L01 / L08 + `gxq_budget 3` (all textures and the LUT in linear memory) | software | 99.87 % / 0.16; 99.69 % / 0.28 | 99.80 % / 0.17; 99.47 % / 0.25 | 0 | **pass**, both; flash checks 4 / 8 |
 | infravision `m3-infra.cfg` + plugin (20) | host GPU / software | 99.73 % / 0.04, both | 99.89 % / 0.01; sw 99.88 % | 0 | pass, both; 1 320 polygons, all shadeless |
 | `m2-diff.cfg` (`fullbright 1`) L0 | host GPU / software | 99.68 % / 0.05; sw 99.69 % | 99.85 % / 0.02 | 0 | pass, both: **M2's figures exactly** |
 | `m3-alpha2.cfg` (`alpha_x2 1`) L0 | host GPU / software | as `m3-diff` L0 | as `m3-diff` L0 | 0 | recorded: **both backends clamp** |
@@ -1618,10 +1619,16 @@ after 36; deterministic: the same frame in two runs; no crash report written). `
 unit 1) runs the same L08 film to the end, so it is the second texture unit in view frames; it is **not** the
 texcoord1 values (a constant texcoord1 crashes too, earlier; `u` clamped to [−1, 2] crashes at the same
 frame). Azahar's software sampler clamps coordinates before the texel lookup (`GetWrappedTexCoord`,
-`ClampToEdge`; read from the Azahar sources), so the cause is inside the emulator and not found. The checks
-before the crash pass the gate's colour and coverage rules, with a few non-edge mismatches (≤ 0.004 %, never
-seen on the host GPU). **The software-backend film item is therefore not met** (design Review log "M3
-acceptance, software-backend films").
+`ClampToEdge`; read from the Azahar sources). **Bisection by memory region** (L08 film, software backend):
+textures and LUT both linear (`gxq_budget 3`) → the whole film runs and passes; textures linear, LUT in VRAM
+(`promote_max 0`) → dies at frame 4, the first frame sampling the VRAM LUT; LUT never promoted (test build),
+textures in VRAM → dies at frame 4, the first frame sampling VRAM textures; the default (both in VRAM) runs
+until a newly converted texture is sampled from linear memory in its first frame. An RGBA8 LUT (test build)
+dies the same way, and keeping the LUT's linear copy alive changes nothing (not a use-after-free). **Cause:
+Azahar's software rasteriser faults when one draw samples textures from FCRAM and from VRAM** (PICA reads
+physical addresses, so this is the emulator's; the host-GPU backend is unaffected). Under the software backend
+the films are therefore run all-linear (`gxq_budget 3`) and pass; the default-config crash is recorded (design
+Review log "M3 acceptance, software-backend films").
 
 **Regression:** `m3-present-diff.cfg` + script 13 / 08: `present_diff final` 23 / 68 checks, 0 with RGB
 differences, the five restore counters 0; P1 scripts 07 (`p1-diff.cfg`: 3 present checks, 0 differ), 14

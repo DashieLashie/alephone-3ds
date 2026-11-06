@@ -1169,9 +1169,10 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    shade LUT (256x256 L8, worst 1 level vs SW on the host), texcoord1, two TEV stages, infravision, weapon
    flash, negative ambient (SW's short-index wrap excluded); passes on L0/L6/L20, both films (L01, L08) and
    infravision on the host GPU, and on the 20-check runs under the software backend; unit 1 unbound after each
-   lit frame (Azahar's software backend crashed otherwise). **Open: the software-backend films kill Azahar
-   mid-run** (design Review log "M3 acceptance, software-backend films"; the user decides whether M3 is
-   accepted with it recorded). Console: "M3 console check, short version" at the end of this file.
+   lit frame (Azahar's software backend crashed otherwise). Azahar's software rasteriser also faults when a draw
+   samples FCRAM and VRAM textures together (bisected; design Review log "M3 acceptance, software-backend
+   films"): under it the films run all-linear (`gxq_budget 3`) and pass. **Next (user decision 2026-11-05):
+   M4.** Console: "M3 console check, short version" at the end of this file.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
