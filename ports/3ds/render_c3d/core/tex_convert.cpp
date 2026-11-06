@@ -26,6 +26,29 @@ bool is_pot(unsigned v) { return v != 0 && (v & (v - 1)) == 0; }
 
 bool kind_keyed(TexKind k) { return k == TexKind::NormalKeyed || k == TexKind::ShadelessKeyed || k == TexKind::Mask; }
 
+unsigned pot_at_least(unsigned v)
+{
+	unsigned p = kRectTexMin;
+	while (p < v)
+		p <<= 1;
+	return p;
+}
+
+// Writes palette[index] (RGBA8 little-endian, or the A8 byte) at texel t of the tiled image.
+inline void put_texel(uint8_t* dst, size_t t, uint32_t w, bool a8)
+{
+	if (a8)
+	{
+		dst[t] = static_cast<uint8_t>(w);
+		return;
+	}
+	uint8_t* p = dst + t * 4;   // little-endian u32: A, B, G, R
+	p[0] = static_cast<uint8_t>(w);
+	p[1] = static_cast<uint8_t>(w >> 8);
+	p[2] = static_cast<uint8_t>(w >> 16);
+	p[3] = static_cast<uint8_t>(w >> 24);
+}
+
 } // namespace
 
 bool tex_supported(int width, int height, bool rle)
@@ -92,6 +115,55 @@ bool tex_convert(const TexBitmap& bitmap, const uint32_t* tables, TexKind kind, 
 			p[1] = static_cast<uint8_t>(w >> 8);
 			p[2] = static_cast<uint8_t>(w >> 16);
 			p[3] = static_cast<uint8_t>(w >> 24);
+		}
+	}
+	return true;
+}
+
+bool rect_tex_size(int width, int height, bool rle, unsigned& S, unsigned& T)
+{
+	if (!rle || width < 1 || height < 1 || width > static_cast<int>(kRectTexMax) || height > static_cast<int>(kRectTexMax))
+		return false;
+	S = pot_at_least(static_cast<unsigned>(height));
+	T = pot_at_least(static_cast<unsigned>(width));
+	return true;
+}
+
+bool tex_convert_rle(const TexBitmap& bitmap, const uint32_t* tables, TexKind kind, unsigned S, unsigned T, void* out)
+{
+	unsigned s_want = 0, t_want = 0;
+	if (!rect_tex_size(bitmap.width, bitmap.height, bitmap.rle, s_want, t_want) || S != s_want || T != t_want ||
+	    !bitmap.rows || !out)
+		return false;
+	if (kind != TexKind::NormalKeyed && kind != TexKind::ShadelessKeyed && kind != TexKind::Mask)
+		return false;
+	const bool a8 = kind == TexKind::Mask;
+	if (!a8 && !tables)
+		return false;
+	uint32_t palette[256];
+	for (unsigned i = 0; i < 256; ++i)
+		palette[i] = tex_palette_word(tables, kind, i);   // index 0: A 0 (keyed kinds)
+	const unsigned W = static_cast<unsigned>(bitmap.width), H = static_cast<unsigned>(bitmap.height);
+	uint8_t* dst = static_cast<uint8_t*>(out);
+	for (unsigned c = 0; c < T; ++c)
+	{
+		const unsigned m = tile_memory_row(T, c);
+		unsigned first = 0, last = 0;
+		const uint8_t* data = nullptr;
+		if (c < W)
+		{
+			// The column's header (scottish_textures.cpp:763-767; last exclusive, shapes.cpp:705-717).
+			const uint8_t* p = bitmap.rows[c];
+			first = (static_cast<unsigned>(p[0]) << 8) | p[1];
+			last = (static_cast<unsigned>(p[2]) << 8) | p[3];
+			data = p + 4;
+			if (last > H)
+				last = H;   // SW never samples a row >= H (texture_y < H << 16)
+		}
+		for (unsigned s = 0; s < S; ++s)
+		{
+			const unsigned i = (data && s >= first && s < last) ? data[s - first] : 0u;
+			put_texel(dst, tile_index(S, m, s), palette[i], a8);
 		}
 	}
 	return true;

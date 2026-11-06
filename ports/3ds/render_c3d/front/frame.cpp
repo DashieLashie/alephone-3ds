@@ -6,6 +6,8 @@
 	  - the diff frame: one traversal recorded while SW draws it into scratch A, every comparison a
 	    replay of the recording, the real frame the last replay (into dest)
 	  - null mode: a counting rasteriser sees the traversal; the caller then draws in SW
+	  - M4 play frames (section 7, M4 specification "Play mode"): the traversal recorded once, scanned, drawn by
+	    citro3d and read back into dest; anything C3D cannot draw (or a discard) is the recording replayed in SW
 	  - the once-a-second "[c3d] frame stats" line and the final null / DIFF summaries
 
 	Engine headers and the plain headers of back/ and core/ only: no <3ds.h>, no <citro3d.h>.
@@ -37,6 +39,7 @@
 #include "../core/classify.h"
 #include "../core/config.h"
 #include "../core/diff.h"
+#include "../core/shade_lut.h"
 #include "../core/stats.h"
 
 #include "a1_3ds_platform.h"
@@ -45,6 +48,7 @@
 #endif
 
 #include <stdio.h>
+#include <string.h>
 
 #include <fstream>
 #include <memory>
@@ -212,13 +216,15 @@ void diff_summary()
 	       "c3d_skipped=%u c3d_drawn=%u c3d_accept_skips=degenerate:%u,bounds:%u,walk:%u,area:%u c3d_ties=%llu c3d_tie_mismatch=%llu "
 	       "c3d_span_polygons=%u c3d_span_quads=%u c3d_span_quads_max=%d c3d_span_ring_refused=%u "
 	       "c3d_lit_polys=%u c3d_shadeless_polys=%u c3d_neg_ambient_polys=%u c3d_flash_checks=%u c3d_m_max=%ld "
-	       "c3d_flash_over=%u c3d_ambient_wrap=%u\n", s_diff_done,
+	       "c3d_flash_over=%u c3d_ambient_wrap=%u c3d_rects=%u c3d_tinted_rects=%u c3d_rect_skipped=%u "
+	       "c3d_rect_unsupported=%u\n", s_diff_done,
 	       s_diff_checks, static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped, s_c3d_compared,
 	       s_c3d_discarded, s_c3d_skipped, s_c3d_drawn, s_c3d_accept_skips[1], s_c3d_accept_skips[2],
 	       s_c3d_accept_skips[3], s_c3d_accept_skips[4], s_c3d_ties, s_c3d_tie_mismatch, s_c3d_rast.span_polygons(),
 	       s_c3d_rast.span_quads(), s_c3d_rast.span_quads_max(), s_c3d_rast.span_ring_refused(),
 	       s_c3d_rast.lit_polys(), s_c3d_rast.shadeless_polys(), s_c3d_rast.neg_ambient_polys(),
-	       s_c3d_rast.flash_checks(), s_c3d_rast.m_max(), s_c3d_rast.flash_over(), s_c3d_ambient_wrap);
+	       s_c3d_rast.flash_checks(), s_c3d_rast.m_max(), s_c3d_rast.flash_over(), s_c3d_ambient_wrap,
+	       s_c3d_rast.rects(), s_c3d_rast.tinted_rects(), s_c3d_rast.rect_skipped(), s_c3d_rast.rect_unsupported());
 	fflush(stdout);
 }
 
@@ -240,8 +246,14 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 		return;
 	}
 
+	// M4 (8.1, design 7 "M4 specification", "Diff checks"): tinted draws over a grey clear and compares "pixel !=
+	// clear"; the frame compares every pixel either side drew (Coverage::All); the other classes clear to 0 and use
+	// the alpha byte.
+	const bool tinted = c == kTinted;
+	const uint32_t clear_argb = tinted ? 0xFF808080u : 0u;
+	const Coverage cov = tinted ? Coverage::NotClear : (c == kFrame ? Coverage::All : Coverage::TopByte);
 	texture_random_seed() = s0;
-	s_a.clear(0);
+	s_a.clear(clear_argb);
 	swr->screen = s_a.get();
 	FilterRasterizer fa(sw, c, cfg.fullbright, true, cfg.textures);
 	s_recorder.replay(&fa);
@@ -257,13 +269,13 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 #ifdef A1_PROFILE
 		A1_PROF_SCOPE(C3dDraw);
 #endif
-		vb = back::view_begin(w, h);
+		vb = back::view_begin(w, h, tinted ? 0x808080FFu : 0u);
 		if (vb.kind == back::ViewBegin::Kind::Ok)
 		{
 			texture_random_seed() = s0;
 			s_b.clear(0);
 			s_c3d_rast.set_target(w, h);
-			s_c3d_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit);
+			s_c3d_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit, cfg.rect_bias);
 			FilterRasterizer fb(&s_c3d_rast, c, cfg.fullbright, true, cfg.textures);
 			s_recorder.replay(&fb);
 			ve = back::view_end(s_b.pixels.data(), s_b.w, &sentinel);
@@ -292,7 +304,7 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 		printf("[c3d] DIFF frame=%u class=%s discarded (%s)\n", s_frame, cls, back::discard_name(ve.discard));
 		return;
 	}
-	const DiffResult r = diff_images(s_a.image(), s_b.image(), Coverage::TopByte, 0, static_cast<int>(cfg.diff_tol),
+	const DiffResult r = diff_images(s_a.image(), s_b.image(), cov, clear_argb, static_cast<int>(cfg.diff_tol),
 	                                s_c3d_rast.tie_mask());
 	printf("%s\n", diff_line_c3d(s_frame, cls, r, static_cast<int>(cfg.diff_tol), fa.excluded(), sentinel).c_str());
 	++s_c3d_compared;
@@ -378,6 +390,268 @@ bool run_diff_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	return true;
 }
 
+// --- play mode (design 7, M4 specification "Play mode") ---
+
+enum class ScanReason : int { None = -1, Landscape, Static, Other, Bitmap, Wrap, Flash, kCount };
+const char* const kScanNames[] = {"landscape", "static", "other", "bitmap", "wrap", "flash"};
+constexpr int kSkipCount = static_cast<int>(back::SkipReason::kCount) + 1;   // + config
+constexpr int kSkipConfig = static_cast<int>(back::SkipReason::kCount);
+constexpr int kDiscardCount = static_cast<int>(back::DiscardReason::kCount);
+constexpr unsigned kOffAfter = 10;
+
+// Replays nothing: finds the first reason C3D cannot draw a recorded frame (step 2), with the same predicates the
+// C3D rasterizer applies (c3d_supports, M3's ambient wrap and flash limit, rect_support).
+class PlayScan : public RasterizerClass
+{
+public:
+	ScanReason reason = ScanReason::None;
+
+	void SetView(view_data& View) override { view_ = &View; }
+	void texture_horizontal_polygon(polygon_definition& p) override { polygon(Entry::Horizontal, p); }
+	void texture_vertical_polygon(polygon_definition& p) override { polygon(Entry::Vertical, p); }
+	void texture_rectangle(rectangle_definition& r) override
+	{
+		if (reason != ScanReason::None)
+			return;
+		const int32_t M = view_ ? static_cast<int32_t>(view_->maximum_depth_intensity) : 0;
+		switch (rect_support(r, M, true))
+		{
+		case RectSupport::Ok: break;
+		case RectSupport::Static: reason = ScanReason::Static; break;
+		case RectSupport::Other: reason = ScanReason::Other; break;
+		case RectSupport::Bitmap: reason = ScanReason::Bitmap; break;
+		case RectSupport::Wrap: reason = ScanReason::Wrap; break;
+		}
+	}
+
+private:
+	void polygon(Entry e, const polygon_definition& p)
+	{
+		if (reason != ScanReason::None)
+			return;
+		const Transfer t = to_transfer(p.transfer_mode);
+		if (t == Transfer::BigLandscaped)
+		{
+			reason = ScanReason::Landscape;
+			return;
+		}
+		if (t == Transfer::Static)
+		{
+			reason = ScanReason::Static;
+			return;
+		}
+		if (t != Transfer::Textured || p.vertex_count > MAXIMUM_VERTICES_PER_SCREEN_POLYGON)
+		{
+			reason = ScanReason::Other;
+			return;
+		}
+		const bitmap_definition* tex = p.texture;
+		const bool shadeless = (p.flags & _SHADELESS_BIT) != 0;
+		if (!tex || !c3d_supports(e, t, tex->width, tex->height, tex->bytes_per_row == NONE, shadeless,
+		                          (tex->flags & _TRANSPARENT_BIT) != 0, true))
+		{
+			reason = ScanReason::Bitmap;
+			return;
+		}
+		if (shadeless)
+			return;
+		if (shade_ambient_wraps(static_cast<int32_t>(p.ambient_shade)))
+			reason = ScanReason::Wrap;
+		else if (view_ && static_cast<int32_t>(view_->maximum_depth_intensity) > kFlashMax)
+			reason = ScanReason::Flash;
+	}
+	view_data* view_ = nullptr;
+};
+
+struct PlayState
+{
+	unsigned frames = 0, c3d = 0, sw = 0, overflow = 0, off_frames = 0;
+	unsigned scan[static_cast<int>(ScanReason::kCount)] = {};
+	unsigned discard[kDiscardCount] = {};
+	unsigned skip[kSkipCount] = {};
+	unsigned run = 0, max_run = 0, offs = 0, ons = 0;
+	unsigned long long sentinel = 0;
+	unsigned checks = 0;
+	bool off = false;
+	uint32_t off_gen = 0;
+	bool logged_first = false;
+} s_play;
+C3dRasterizer s_play_rast;   // its own counters: the DIFF summary's stay the diff checks'
+
+bool resource_discard(back::DiscardReason r)
+{
+	return r != back::DiscardReason::Unsupported;
+}
+
+void play_discard(back::DiscardReason r)
+{
+	++s_play.discard[static_cast<int>(r)];
+	if (!resource_discard(r))
+		return;   // content, not trouble: the run is unchanged
+	++s_play.run;
+	if (s_play.run > s_play.max_run)
+		s_play.max_run = s_play.run;
+	if (s_play.run >= kOffAfter && !s_play.off)
+	{
+		s_play.off = true;
+		s_play.off_gen = back::texcache().generation();
+		++s_play.offs;
+		printf("[c3d] play: off until the next level (%u discards in a row, last %s)\n", s_play.run,
+		       back::discard_name(r));
+		fflush(stdout);
+	}
+}
+
+int play_counts_text(char* buf, size_t size)
+{
+	const PlayState& p = s_play;
+	return snprintf(buf, size,
+	                "frames=%u c3d=%u sw=%u overflow=%u off_frames=%u scan=%u/%u/%u/%u/%u/%u"
+	                "(landscape/static/other/bitmap/wrap/flash) discard=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) "
+	                "skip=%u/%u/%u/%u/%u(down/gate/size/pref/config) offs=%u ons=%u max_run=%u sentinel=%llu play_checks=%u",
+	                p.frames, p.c3d, p.sw, p.overflow, p.off_frames, p.scan[0], p.scan[1], p.scan[2], p.scan[3], p.scan[4],
+	                p.scan[5], p.discard[0], p.discard[1], p.discard[2], p.discard[3], p.discard[4], p.discard[5],
+	                p.skip[0], p.skip[1], p.skip[2], p.skip[3], p.skip[4], p.offs, p.ons, p.max_run, p.sentinel, p.checks);
+}
+
+// Design 7, M4 "Play mode". True: the frame is in dest (C3D or the SW replay). False: the caller draws it in SW
+// (no recording was made).
+bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition* dest, RasterizerClass* sw)
+{
+	PlayState& P = s_play;
+	++P.frames;
+	if (!P.logged_first)
+	{
+		P.logged_first = true;
+		printf("[c3d] renderer c3d: play frames drawn by citro3d (readback mode, M4)\n");
+	}
+	if (P.off)
+	{
+		// collections_changed() (hook 2a: every level load) bumps the texture cache's generation.
+		if (back::texcache().generation() == P.off_gen)
+		{
+			++P.off_frames;
+			++P.sw;
+			return false;
+		}
+		P.off = false;
+		P.run = 0;
+		++P.ons;
+		printf("[c3d] play: on again (collections changed)\n");
+		fflush(stdout);
+	}
+	// (0) the cheap refusals: SW draws the frame directly.
+	const int w = dest->width, h = dest->height;
+	back::SkipReason why = back::SkipReason::Down;
+	int skip = -1;
+	if (!cfg.textures || !cfg.lit)
+		skip = kSkipConfig;
+	else if (graphics_preferences->software_alpha_blending != _sw_alpha_off)
+		skip = static_cast<int>(back::SkipReason::Pref);
+	else if (!back::view_play_ready(w, h, &why))
+		skip = static_cast<int>(why);
+	if (skip >= 0)
+	{
+		++P.skip[skip];
+		++P.sw;
+		return false;
+	}
+
+	Rasterizer_SW_Class* swr = static_cast<Rasterizer_SW_Class*>(sw);
+	const uint16 s0 = texture_random_seed();
+	auto sw_replay = [&]() {
+		texture_random_seed() = s0;
+		swr->screen = dest;
+		s_recorder.replay(sw);
+		++P.sw;
+	};
+	back::ViewBegin vb{back::ViewBegin::Kind::Skipped, back::SkipReason::Down, back::DiscardReason::Unsupported};
+	back::ViewEnd ve{false, back::DiscardReason::Begin};
+	unsigned sentinel = 0, copied = 0;
+	const bool check = cfg.play_check && (P.c3d + 1) % cfg.play_check == 0;
+	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dDraw);
+#endif
+		// (1) the one traversal, recorded (C rand() of the weapon flutter is its only side effect, weapons.cpp:2922).
+		s_recorder.clear();
+		s_recorder.forward = nullptr;
+		draw(ctx, &s_recorder);
+		if (s_recorder.overflowed())
+		{
+			++P.overflow;
+			texture_random_seed() = s0;
+			swr->screen = dest;
+			draw(ctx, sw);
+			++P.sw;
+			return true;
+		}
+		// (2) the scan.
+		PlayScan scan;
+		s_recorder.replay(&scan);
+		if (scan.reason != ScanReason::None)
+		{
+			++P.scan[static_cast<int>(scan.reason)];
+			sw_replay();
+			return true;
+		}
+		// play_check: A starts as dest's previous frame, as dest does.
+		if (check)
+		{
+			s_a.make(w, h);
+			const int pitch = dest->bytes_per_row / 4;
+			for (int y = 0; y < h; ++y)
+				memcpy(&s_a.pixels[static_cast<size_t>(y) * w], reinterpret_cast<const uint32_t*>(dest->row_addresses[0]) + static_cast<size_t>(y) * pitch,
+				       static_cast<size_t>(w) * 4);
+		}
+		// (3) the C3D frame, read back into dest.
+		vb = back::view_begin(w, h, 0);
+		if (vb.kind == back::ViewBegin::Kind::Ok)
+		{
+			s_play_rast.set_target(w, h);
+			s_play_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit, cfg.rect_bias);
+			s_recorder.replay(&s_play_rast);
+			ve = back::view_end_play(reinterpret_cast<uint8_t* const*>(dest->row_addresses), &sentinel, &copied);
+		}
+	}
+	if (vb.kind == back::ViewBegin::Kind::Skipped)
+	{
+		++P.skip[static_cast<int>(vb.skip)];
+		sw_replay();
+		return true;
+	}
+	if (vb.kind == back::ViewBegin::Kind::Discarded)
+	{
+		play_discard(vb.discard);
+		sw_replay();
+		return true;
+	}
+	if (!ve.ok)
+	{
+		// (4) a discard: nothing was copied into dest.
+		play_discard(ve.discard);
+		sw_replay();
+		return true;
+	}
+	++P.c3d;
+	P.run = 0;
+	P.sentinel += sentinel;
+	if (check)
+	{
+		// SW's replay over the same previous frame, against what the play path left in dest.
+		texture_random_seed() = s0;
+		swr->screen = s_a.get();
+		s_recorder.replay(sw);
+		swr->screen = dest;
+		texture_random_seed() = s0;   // as after SW's own traversal: the replay above consumed what it did
+		const Image32 d{reinterpret_cast<const uint32_t*>(dest->row_addresses[0]), w, h, dest->bytes_per_row / 4};
+		const DiffResult r = diff_images(s_a.image(), d, Coverage::All, 0, static_cast<int>(cfg.diff_tol));
+		printf("%s\n", diff_line_c3d(s_frame, "play", r, static_cast<int>(cfg.diff_tol), 0, sentinel).c_str());
+		++P.checks;
+	}
+	return true;
+}
+
 // --- null mode ---
 
 // Only from frame_final_stats(): Samples::percentile() sorts a copy of its values, which does not
@@ -431,6 +705,12 @@ void stats_tick()
 	s_stats_ms = now;
 	printf("[c3d] frame stats frames=%u diff=%u dropped=%u null=%u cal=%u cal_skipped=%u\n", s_frame, s_diff_done,
 	       s_diff_dropped, s_null_frames, s_cal_done, s_cal_skipped);
+	if (s_play.frames)
+	{
+		char buf[512];
+		play_counts_text(buf, sizeof buf);
+		printf("[c3d] play %s\n", buf);
+	}
 	fflush(stdout);
 }
 
@@ -481,11 +761,13 @@ bool render_frame(view_data& view, bitmap_definition* dest, RasterizerClass* sw,
 			run_null(draw, ctx);
 			return false;
 		}
+		if (cfg.mode == Mode::Readback && cfg.play)
+			return run_play_frame(cfg, draw, ctx, dest, sw);
 		if (!s_logged_mode)
 		{
 			s_logged_mode = true;
-			printf("[c3d] renderer c3d: play frames are software before %s\n",
-			       cfg.mode == Mode::Direct ? "M6 (mode direct)" : "M4 (mode readback)");
+			printf("[c3d] renderer c3d: play frames are software (%s)\n",
+			       cfg.mode == Mode::Direct ? "mode direct: M6" : "play 0");
 		}
 	}
 	return false;
@@ -496,6 +778,16 @@ namespace back {
 void frame_final_stats()
 {
 	log_null_summary();
+	static bool play_final = false;
+	if (s_play.frames && !play_final)
+	{
+		play_final = true;
+		char buf[512];
+		play_counts_text(buf, sizeof buf);
+		printf("[c3d] play final %s rects=%u tinted_rects=%u rect_skipped=%u rect_unsupported=%u\n", buf,
+		       s_play_rast.rects(), s_play_rast.tinted_rects(), s_play_rast.rect_skipped(), s_play_rast.rect_unsupported());
+		fflush(stdout);
+	}
 	if ((s_diff_done || s_diff_dropped || s_diff_checks) && !s_diff_summary_printed)
 		diff_summary();
 }

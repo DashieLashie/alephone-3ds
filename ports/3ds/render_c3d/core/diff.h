@@ -4,7 +4,10 @@
 	Plain C++, host-testable.
 
 	Coverage of a pixel: TopByte: the alpha byte is not 0; NotClear: the pixel is not the
-	clear value. An edge pixel has, inside the image, an 8-neighbour whose coverage in A is
+	clear value. All (M4: the frame and play checks, design 7 "M4 specification", "Diff checks"): no coverage
+	and no band; the common pixels are those where A or B differs from the clear in RGB, the others count as
+	`empty`; the neighbourhood minimum runs over A's 8 in-image neighbours (when only one side drew the pixel,
+	over A's neighbours that are not empty). An edge pixel has, inside the image, an 8-neighbour whose coverage in A is
 	different. Over the common pixels (covered in both, not edge) the delta of a pixel is the
 	largest |a-b| over its R, G and B channels.
 
@@ -21,7 +24,7 @@
 
 namespace a1_c3d {
 
-enum class Coverage { TopByte, NotClear };
+enum class Coverage { TopByte, NotClear, All };
 
 struct Image32
 {
@@ -46,6 +49,7 @@ struct DiffResult
 	uint64_t sum_nb = 0;
 	unsigned max_nb = 0;
 	unsigned band = 0;     // A's edge-band pixels: those with an 8-neighbour whose coverage in A differs
+	unsigned empty = 0;    // Coverage::All: pixels where both A and B hold the clear's RGB (not compared)
 
 	double mean() const { return common ? static_cast<double>(sum_delta) / common : 0.0; }
 	double mean_nb() const { return common ? static_cast<double>(sum_nb) / common : 0.0; }
@@ -64,7 +68,7 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 // differ=D band=N", no newline.
 std::string diff_line(unsigned frame, const char* cls, const DiffResult& r, int tol);
 
-// The same with M1's C3D fields appended: " b=c3d excluded=X sentinel=S ties=T tie_mismatch=M within_nb=P% mean_nb=M max_nb=X" (X: primitives the C3D side
+// The same with M1's C3D fields appended: " b=c3d excluded=X sentinel=S ties=T tie_mismatch=M within_nb=P% mean_nb=M max_nb=X empty=E" (X: primitives the C3D side
 // dropped, section 7 M1 "What C3D draws"; S: readback pixels still holding the staging sentinel).
 std::string diff_line_c3d(unsigned frame, const char* cls, const DiffResult& r, int tol, unsigned excluded,
                           unsigned sentinel);

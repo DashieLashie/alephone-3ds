@@ -54,18 +54,19 @@ namespace a1_c3d {
 
 enum class TexPool : uint8_t { Linear = 0, Vram = 1 };
 
-// The GPU side. alloc returns an opaque handle (nullptr: failed) for a W x W texture of `kind`
-// (`bytes` = tex_bytes(W, kind), what the caps count) in the pool; release frees one. Handles are never
-// interpreted by the cache.
+// The GPU side. alloc returns an opaque handle (nullptr: failed) for an S x T texture of `kind` (S texels per
+// memory row, T rows; `bytes` = tex_bytes(S, T, kind), what the caps count) in the pool, sampled with
+// clamp-to-edge if `clamp` (M4: RLE rectangles) else repeat; release frees one. Handles are never interpreted
+// by the cache.
 class TexAllocator
 {
 public:
 	virtual ~TexAllocator() {}
-	virtual void* alloc(TexPool pool, unsigned W, TexKind kind, uint32_t bytes) = 0;
+	virtual void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, bool clamp, uint32_t bytes) = 0;
 	virtual void release(TexPool pool, void* handle) = 0;
 };
 
-constexpr unsigned kTexSlots = 256;
+constexpr unsigned kTexSlots = 512;   // M4: sprite frames are many and small (256 before)
 constexpr int kViewReserveEntries = 3;          // clear, flushing split, readback transfer (M1 "GX queue")
 constexpr uint32_t kTexSoftBudgetBytes = 512u * 1024;   // converted per view frame: counted, not enforced
 constexpr unsigned kTexGenWindow = 10;          // view frames after a generation change that are recorded
@@ -77,6 +78,7 @@ struct TexKey
 	const void* bitmap = nullptr;
 	const void* tables = nullptr;
 	TexKind kind = TexKind::Normal;
+	bool clamp = false;   // M4: an RLE rectangle's texture (GPU_CLAMP_TO_EDGE, POT-padded); else repeat
 };
 
 enum class TexSlotState : uint8_t { Free, Live, Retiring };
@@ -86,7 +88,7 @@ struct TexSlot
 	TexSlotState state = TexSlotState::Free;
 	TexKey key;
 	uint32_t generation = 0;
-	unsigned W = 0;
+	unsigned S = 0, T = 0;                // texels per memory row, memory rows (M4: S != T for rectangles)
 	uint32_t bytes = 0;
 	TexPool pool = TexPool::Linear;       // the pool of `handle`
 	void* handle = nullptr;               // what to sample now (the back end's C3D_Tex)
@@ -149,10 +151,11 @@ public:
 
 	// A hit (current generation only) sets last_used_frame to the current frame. nullptr: miss.
 	TexSlot* lookup(const TexKey& key);
-	// A miss: a slot with a new Linear texture of tex_bytes(W, key.kind) (evicting as above), or
-	// nullptr (discard `tex`). The caller converts into the texture and flushes it. W is a
-	// supported size (tex_supported); the cache only needs W * W.
-	TexSlot* create(const TexKey& key, unsigned W);
+	// A miss: a slot with a new Linear texture of tex_bytes(S, T, key.kind) (evicting as above), or
+	// nullptr (discard `tex`). The caller converts into the texture and flushes it. S x T is a
+	// supported size (tex_supported, rect_tex_size); the cache only needs S * T.
+	TexSlot* create(const TexKey& key, unsigned S, unsigned T);
+	TexSlot* create(const TexKey& key, unsigned W) { return create(key, W, W); }
 
 	// Undoes a create() of this frame whose texture could not be filled (the GPU never saw it): frees the
 	// slot and its texture at once; the conversion stays counted.
@@ -193,7 +196,7 @@ private:
 	void evict(TexSlot& s);
 	void free_slot_memory(TexSlot& s);
 	TexSlot* take_free_slot();
-	void* alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint32_t bytes, uint32_t victims_used_below);
+	void* alloc_with_eviction(TexPool pool, const TexSlot& shape, uint32_t victims_used_below);
 
 	TexAllocator& alloc_;
 	TexCacheConfig cfg_;

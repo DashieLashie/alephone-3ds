@@ -19,6 +19,7 @@
 #include "gate.h"
 #include "geometry.h"
 #include "gx_queue.h"
+#include "rect.h"
 #include "ring.h"
 #include "shade_lut.h"
 #include "stats.h"
@@ -353,7 +354,7 @@ static void test_diff()
 	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0) ==
 	      "[c3d] DIFF frame=12 class=walls covered=100/98 cov_mismatch=4/1 common=80 within_tol=75.00% (tol 4) "
 	      "mean=1.50 max=9 differ=17 band=64 b=c3d excluded=3 sentinel=0 ties=0 tie_mismatch=0 "
-	      "within_nb=95.00% mean_nb=0.50 max_nb=3");
+	      "within_nb=95.00% mean_nb=0.50 max_nb=3 empty=0");
 	l.ties = 5; l.tie_mismatch = 2;
 	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0).find(" sentinel=0 ties=5 tie_mismatch=2") != std::string::npos);
 	CHECK(diff_line_c3d(1, "walls", DiffResult(), 0, 0, 7).find(" band=0 b=c3d excluded=0 sentinel=7 ties=0 tie_mismatch=0") !=
@@ -2173,10 +2174,12 @@ static void png_chunk(std::vector<uint8_t>& png, const char* type, const std::ve
 }
 
 // rgba: W rows of W pixels, bytes R, G, B, A per pixel, row 0 first.
-static std::vector<uint8_t> make_png(unsigned W, const std::vector<uint8_t>& rgba)
+static std::vector<uint8_t> make_png(unsigned W, const std::vector<uint8_t>& rgba, unsigned H = 0)
 {
+	if (!H)
+		H = W;
 	std::vector<uint8_t> raw;
-	for (unsigned r = 0; r < W; ++r)
+	for (unsigned r = 0; r < H; ++r)
 	{
 		raw.push_back(0);   // filter: none
 		raw.insert(raw.end(), rgba.begin() + r * W * 4, rgba.begin() + (r + 1) * W * 4);
@@ -2197,7 +2200,7 @@ static std::vector<uint8_t> make_png(unsigned W, const std::vector<uint8_t>& rgb
 	put_be32(z, adler32_of(raw.data(), raw.size()));
 	std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
 	std::vector<uint8_t> ihdr;
-	put_be32(ihdr, W); put_be32(ihdr, W);
+	put_be32(ihdr, W); put_be32(ihdr, H);
 	ihdr.push_back(8); ihdr.push_back(6); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
 	png_chunk(png, "IHDR", ihdr);
 	png_chunk(png, "IDAT", z);
@@ -2232,19 +2235,21 @@ static bool read_file(const std::string& path, std::vector<uint8_t>& d)
 // 4-byte compression header (checked here). False: tex3ds failed or the header is wrong. fmt rgba8 (4 bytes
 // per texel) or, for M3's LUT, l8 (1 byte).
 static bool run_tex3ds(const std::string& dir, unsigned W, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& texels,
-                       const char* fmt = "rgba8", unsigned texel_bytes = 4)
+                       const char* fmt = "rgba8", unsigned texel_bytes = 4, unsigned H = 0)
 {
+	if (!H)
+		H = W;
 	const std::string in = dir + "/in.png", out = dir + "/out.bin";
-	if (!write_file(in, make_png(W, rgba)))
+	if (!write_file(in, make_png(W, rgba, H)))
 		return false;
 	const std::string cmd = std::string("'/opt/devkitpro/tools/bin/tex3ds' -f ") + fmt + " -z none -r -o '" + out + "' '" + in + "' > '" + dir + "/log.txt' 2>&1";
 	if (std::system(cmd.c_str()) != 0)
 		return false;
 	std::vector<uint8_t> raw;
-	if (!read_file(out, raw) || raw.size() != 4 + static_cast<size_t>(W) * W * texel_bytes)
+	if (!read_file(out, raw) || raw.size() != 4 + static_cast<size_t>(W) * H * texel_bytes)
 		return false;
 	const uint32_t size = raw[1] | (raw[2] << 8) | (raw[3] << 16);
-	if (raw[0] != 0x00 || size != W * W * texel_bytes)   // compression type 0 (none), 24-bit little-endian size
+	if (raw[0] != 0x00 || size != W * H * texel_bytes)   // compression type 0 (none), 24-bit little-endian size
 		return false;
 	texels.assign(raw.begin() + 4, raw.end());
 	return true;
@@ -2346,9 +2351,9 @@ public:
 	uintptr_t next = 0x1000;
 	int fail_next = 0;            // fail the next N allocations
 	unsigned bad_release = 0, allocs = 0, releases = 0;
-	void* alloc(TexPool pool, unsigned W, TexKind kind, uint32_t bytes) override
+	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, bool, uint32_t bytes) override
 	{
-		if (bytes != tex_bytes(W, kind))
+		if (bytes != tex_bytes(S, T, kind))
 			++bad_release;   // the size the caps count must be the texture's
 		if (fail_next > 0)
 		{
@@ -2420,7 +2425,7 @@ static void test_cache_keys_generations()
 	TexSlot* sd = c.create(d, 128);   // normal vs normal_keyed coexist
 	CHECK(sa && sb && sd && sa != sb && sa != sd && sb != sd);
 	CHECK(c.lookup(a) == sa && c.lookup(b) == sb && c.lookup(d) == sd && c.lookup(K(2)) == nullptr);
-	CHECK(sa->bytes == 65536 && sa->W == 128 && sa->pool == TexPool::Linear && sa->handle);
+	CHECK(sa->bytes == 65536 && sa->S == 128 && sa->T == 128 && sa->pool == TexPool::Linear && sa->handle);
 	CHECK(c.used_bytes(TexPool::Linear) == 3 * 65536 && fa.total(TexPool::Linear) == 3 * 65536);
 	CHECK(c.live_count(TexPool::Linear) == 3 && c.stats().conversions == 3);
 	TexSlot* sm = c.create(K(3, nullptr, TexKind::Mask), 128);
@@ -3506,6 +3511,451 @@ static void test_m3_core()
 	test_tiling_tex3ds_l8();
 }
 
+// --- M4 (design 7, "M4 specification"): RLE rectangle bitmaps, SW's rectangle vs the GPU model, the LUT's
+// column 0, the tinted factor, the cache with S != T.
+
+// A column-ordered RLE bitmap as shapes.cpp stores it: per column 4 header bytes (first, last big-endian, last
+// exclusive) and the bytes of rows [first, last).
+struct RleBitmap
+{
+	int W, H;
+	std::vector<std::vector<uint8_t>> cols;
+	std::vector<const uint8_t*> rows;
+	std::vector<unsigned> first, last;
+	RleBitmap(int w, int h, unsigned seed) : W(w), H(h), cols(w), rows(w), first(w), last(w)
+	{
+		for (int c = 0; c < w; ++c)
+		{
+			unsigned f = (c * 7u + seed) % static_cast<unsigned>(h / 3 + 1);
+			unsigned l = static_cast<unsigned>(h) - (c * 5u + seed) % static_cast<unsigned>(h / 4 + 1);
+			if (c == 0)
+			{
+				f = 0;
+				l = static_cast<unsigned>(h);    // a full column
+			}
+			if (c == 1 && w > 2)
+				f = l = static_cast<unsigned>(h / 2);   // an empty run
+			if (c == 2 && w > 3)
+				l = static_cast<unsigned>(h) + 5;      // last beyond the bitmap (clamped)
+			first[c] = f;
+			last[c] = l;
+			std::vector<uint8_t>& d = cols[c];
+			d = {static_cast<uint8_t>(f >> 8), static_cast<uint8_t>(f), static_cast<uint8_t>(l >> 8), static_cast<uint8_t>(l)};
+			for (unsigned y = f; y < l; ++y)
+				d.push_back(static_cast<uint8_t>((y * 37u + c * 101u + seed) % 13u == 0 ? 0 : 1 + (c * 31u + y * 17u + seed) % 255u));
+			rows[c] = d.data();
+		}
+	}
+	TexBitmap view() const { return TexBitmap{W, H, rows.data(), true}; }
+	// The index of texel (column c, row y), 0 outside the run.
+	unsigned index(int c, int y) const
+	{
+		if (c < 0 || c >= W || y < 0)
+			return 0;
+		const unsigned l = std::min<unsigned>(last[c], static_cast<unsigned>(H));
+		if (static_cast<unsigned>(y) < first[c] || static_cast<unsigned>(y) >= l)
+			return 0;
+		return cols[c][4 + (y - first[c])];
+	}
+};
+
+static void test_rect_tex_convert()
+{
+	unsigned S = 0, T = 0;
+	CHECK(rect_tex_size(37, 81, true, S, T) && S == 128 && T == 64);
+	CHECK(rect_tex_size(1, 1, true, S, T) && S == 8 && T == 8);
+	CHECK(rect_tex_size(1024, 3, true, S, T) && S == 8 && T == 1024);
+	CHECK(!rect_tex_size(1025, 3, true, S, T) && !rect_tex_size(3, 0, true, S, T) && !rect_tex_size(64, 64, false, S, T));
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+	for (unsigned seed = 0; seed < 3; ++seed)
+	{
+		const int W = seed == 2 ? 5 : 37, H = seed == 1 ? 8 : 81;
+		const RleBitmap b(W, H, seed);
+		CHECK(rect_tex_size(W, H, true, S, T));
+		for (TexKind kind : {TexKind::NormalKeyed, TexKind::ShadelessKeyed, TexKind::Mask})
+		{
+			std::vector<uint8_t> out(tex_bytes(S, T, kind), 0xEE);
+			CHECK(tex_convert_rle(b.view(), tables.data(), kind, S, T, out.data()));
+			unsigned bad = 0;
+			for (unsigned c = 0; c < T; ++c)
+				for (unsigned y = 0; y < S; ++y)
+				{
+					const unsigned i = b.index(static_cast<int>(c), static_cast<int>(y));
+					const size_t t = tile_index(S, tile_memory_row(T, c), y);
+					if (kind == TexKind::Mask)
+						bad += out[t] != (i ? 255u : 0u);
+					else
+					{
+						const uint8_t* p = &out[t * 4];
+						const uint32_t w = p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
+						bad += w != tex_palette_word(tables.data(), kind, i);
+					}
+				}
+			CHECK(bad == 0);
+		}
+	}
+	// Refusals: wrong size, a non-keyed kind, no tables for a colour kind.
+	const RleBitmap b(37, 81, 0);
+	std::vector<uint8_t> out(tex_bytes(128, 64, TexKind::NormalKeyed));
+	CHECK(!tex_convert_rle(b.view(), tables.data(), TexKind::NormalKeyed, 64, 64, out.data()));
+	CHECK(!tex_convert_rle(b.view(), tables.data(), TexKind::Normal, 128, 64, out.data()));
+	CHECK(!tex_convert_rle(b.view(), nullptr, TexKind::NormalKeyed, 128, 64, out.data()));
+	CHECK(tex_convert_rle(b.view(), nullptr, TexKind::Mask, 128, 64, out.data()));
+	CHECK(!tex_supported(b.view()));   // the M2 predicate still refuses RLE
+}
+
+// The non-square tiling against tex3ds (A8 and RGBA8 of one RLE bitmap): PNG row r is memory row r.
+static void test_rect_tiling_tex3ds()
+{
+	const char* tex3ds = "/opt/devkitpro/tools/bin/tex3ds";
+	if (access(tex3ds, X_OK) != 0)
+	{
+		std::printf("SKIPPED tex3ds rectangle test: %s not found\n", tex3ds);
+		return;
+	}
+	const char* tmp = std::getenv("TMPDIR");
+	std::string tmpl = std::string(tmp && *tmp ? tmp : "/tmp") + "/c3d-tex3ds-rect.XXXXXX";
+	std::vector<char> dirbuf(tmpl.begin(), tmpl.end());
+	dirbuf.push_back(0);
+	if (!mkdtemp(dirbuf.data()))
+	{
+		CHECK(false);
+		return;
+	}
+	const std::string dir = dirbuf.data();
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+	const RleBitmap b(37, 81, 1);
+	unsigned S = 0, T = 0;
+	CHECK(rect_tex_size(37, 81, true, S, T));
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		const TexKind kind = pass ? TexKind::NormalKeyed : TexKind::Mask;
+		const unsigned tb = tex_texel_bytes(kind);
+		std::vector<uint8_t> ours(tex_bytes(S, T, kind));
+		CHECK(tex_convert_rle(b.view(), tables.data(), kind, S, T, ours.data()));
+		std::vector<uint8_t> rgba(static_cast<size_t>(S) * T * 4);
+		for (unsigned m = 0; m < T; ++m)
+			for (unsigned x = 0; x < S; ++x)
+			{
+				const unsigned c = T - 1 - m;   // memory row m holds column T - 1 - m
+				const unsigned i = b.index(static_cast<int>(c), static_cast<int>(x));
+				uint8_t* p = &rgba[(static_cast<size_t>(m) * S + x) * 4];
+				const uint32_t w = kind == TexKind::Mask ? (i ? 255u : 0u) : tex_palette_word(tables.data(), kind, i);
+				if (kind == TexKind::Mask)
+				{
+					p[0] = p[1] = p[2] = 0;
+					p[3] = static_cast<uint8_t>(w);
+				}
+				else
+				{
+					p[0] = static_cast<uint8_t>(w >> 24);
+					p[1] = static_cast<uint8_t>(w >> 16);
+					p[2] = static_cast<uint8_t>(w >> 8);
+					p[3] = static_cast<uint8_t>(w);
+				}
+			}
+		std::vector<uint8_t> t3x;
+		const bool ran = run_tex3ds(dir, S, rgba, t3x, pass ? "rgba8" : "a8", tb, T);
+		CHECK(ran);
+		if (ran && pass && t3x.size() == ours.size())
+			for (size_t t = 0; t < ours.size(); t += 4)
+				if (ours[t] == 0)   // A == 0: tex3ds does not keep the colour of a fully transparent pixel
+					std::memset(&ours[t + 1], 0, 3), std::memset(&t3x[t + 1], 0, 3);
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds %s tiling %ux%u (RLE 37x81%s): %s\n", pass ? "RGBA8" : "A8", S, T, pass ? ", RGB of A 0 ignored" : "",
+		            same ? "byte-identical" : "MISMATCH");
+	}
+	std::string cmd = "rm -rf '" + dir + "'";
+	if (std::system(cmd.c_str()) != 0)
+		std::printf("note: could not remove %s\n", dir.c_str());
+}
+
+// scottish_textures.cpp:656-723, a second, literal transliteration (the test's own), for rect_setup.
+static bool sw_rect_ref(RectIn r, int sw, int sh, RectBox& o)
+{
+	short x0 = r.x0, x1 = r.x1, y0 = r.y0, y1 = r.y1;
+	short clip_left = r.clip_left, clip_right = r.clip_right, clip_top = r.clip_top, clip_bottom = r.clip_bottom;
+	if (!(x0 < x1 && y0 < y1))
+		return false;
+	if (clip_left < 0) clip_left = 0;
+	if (clip_right > sw) clip_right = sw;
+	if (clip_top < 0) clip_top = 0;
+	if (clip_bottom > sh) clip_bottom = sh;
+	if (clip_left < x0) clip_left = x0;
+	if (clip_right > x1) clip_right = x1;
+	if (clip_top < y0) clip_top = y0;
+	if (clip_bottom > y1) clip_bottom = y1;
+	if (!(clip_left < clip_right && clip_top < clip_bottom && clip_right > 0 && clip_left < sw && clip_bottom > 0 && clip_top < sh))
+		return false;
+	short delta;
+	short screen_width = x1 - x0, screen_height = y1 - y0, screen_x = x0;
+	int32_t texture_dx = (r.W << 16) / screen_width;
+	int32_t texture_x = texture_dx >> 1;
+	int32_t texture_dy = (r.H << 16) / screen_height;
+	int32_t texture_y0 = 0;
+	if (!(texture_dx && texture_dy))
+		return false;
+	if (r.flip_h)
+	{
+		texture_dx = -texture_dx;
+		texture_x = (r.W << 16) + (texture_dx >> 1);
+	}
+	if ((delta = clip_left - x0) > 0)
+	{
+		texture_x += delta * texture_dx;
+		screen_width -= delta;
+		screen_x = clip_left;
+	}
+	if ((delta = x1 - clip_right) > 0)
+		screen_width -= delta;
+	if ((delta = clip_top - y0) > 0)
+	{
+		texture_y0 += delta * texture_dy;
+		screen_height -= delta;
+	}
+	if ((delta = y1 - clip_bottom) > 0)
+		screen_height -= delta;
+	o = RectBox{screen_x, screen_x + screen_width, clip_top, clip_top + screen_height, texture_x, texture_dx, texture_y0, texture_dy};
+	return true;
+}
+
+// float24 (1.7.16): the vertex attribute rounded to a 17-bit significand.
+static double f24(double v)
+{
+	if (v == 0.0 || !std::isfinite(v))
+		return v;
+	int e = 0;
+	const double m = std::frexp(v, &e);   // [0.5, 1)
+	return std::ldexp(std::nearbyint(m * 131072.0) / 131072.0, e);
+}
+
+struct RectStats
+{
+	uint64_t common = 0, texel_same = 0, cov_mismatch = 0, cov_nonband = 0, cov_nonband_tall = 0, case3_reads = 0;
+};
+
+// SW draws the rectangle (the test's transliteration of :759-800 with the textured loop's index-0 skip) into
+// `a` (index, 0 = not written) and the GPU model into `b`: one quad, texcoords from rect_t/rect_s at the
+// corners (+ bias, / S or T), float32 then float24, interpolated at pixel centres, floored, clamped.
+static void rect_compare(const RleBitmap& bm, const RectBox& bx, int sw, int sh, double bias, int model,
+                         std::vector<int>& a, std::vector<int>& b, RectStats& st)
+{
+	a.assign(static_cast<size_t>(sw) * sh, 0);
+	b.assign(static_cast<size_t>(sw) * sh, 0);
+	for (int k = 0; k < bx.cr - bx.cl; ++k)
+	{
+		const int32_t texture_x = bx.tx0 + k * bx.dx;
+		const int c = texture_x >> 16;
+		const unsigned first = bm.first[c], last = bm.last[c];
+		int32_t texture_y = bx.ty0;
+		short y0 = bx.ct, y1 = bx.cb;
+		const int32_t texture_y1 = bx.ty0 + (bx.cb - bx.ct) * bx.dy;
+		if ((bx.ty0 >> 16) < static_cast<int32_t>(first))
+		{
+			const short delta = (static_cast<int32_t>(first << 16) - bx.ty0) / bx.dy + 1;
+			y0 = std::min<short>(y1, y0 + delta);
+			texture_y += delta * bx.dy;
+		}
+		if ((texture_y1 >> 16) > static_cast<int32_t>(last))
+		{
+			const short delta = (texture_y1 - static_cast<int32_t>(last << 16)) / bx.dy + 1;
+			y1 = std::max<short>(y0, y1 - delta);
+		}
+		int ry0 = 0, ry1 = 0;
+		rect_sw_column_rows(bx, first, last, &ry0, &ry1);
+		CHECK(ry0 == y0 && ry1 == y1);
+		uint32_t ty = static_cast<uint32_t>(texture_y);
+		for (int y = y0; y < y1; ++y, ty += static_cast<uint32_t>(bx.dy))
+		{
+			// data[(ty >> 16) - first]; past the run (case (iii): ty1 >> 16 == last, no bottom trim) SW reads on into
+			// the next column's header (its first, big-endian: the high byte) or past the bitmap after the last column (0).
+			const size_t i = 4 + ((ty >> 16) - first);
+			const std::vector<uint8_t>& col = bm.cols[c];
+			const int v = i < col.size() ? col[i] : (i == col.size() && c + 1 < bm.W ? bm.cols[c + 1][0] : 0);
+			if (i >= col.size())
+				++st.case3_reads;
+			a[static_cast<size_t>(y) * sw + bx.cl + k] = v;
+		}
+	}
+	unsigned S = 0, T = 0;
+	rect_tex_size(bm.W, bm.H, true, S, T);
+	// model 0: double end to end; 1: float32 vertex storage (Azahar's host-GPU backend); 2: float32 then float24.
+	auto corner = [&](double v) { return model == 2 ? f24(static_cast<float>(v)) : model == 1 ? static_cast<double>(static_cast<float>(v)) : v; };
+	const double vl = corner((rect_t(bx, bx.cl) + bias) / T), vr = corner((rect_t(bx, bx.cr) + bias) / T);
+	const double ut = corner((rect_s(bx, bx.ct) + bias) / S), ub = corner((rect_s(bx, bx.cb) + bias) / S);
+	for (int y = bx.ct; y < bx.cb; ++y)
+		for (int x = bx.cl; x < bx.cr; ++x)
+		{
+			const double fx = (x + 0.5 - bx.cl) / (bx.cr - bx.cl), fy = (y + 0.5 - bx.ct) / (bx.cb - bx.ct);
+			const double v = vl + (vr - vl) * fx, u = ut + (ub - ut) * fy;
+			const int c = std::min(std::max(static_cast<int>(std::floor(v * T)), 0), static_cast<int>(T) - 1);
+			const int r = std::min(std::max(static_cast<int>(std::floor(u * S)), 0), static_cast<int>(S) - 1);
+			b[static_cast<size_t>(y) * sw + x] = static_cast<int>(bm.index(c, r));
+		}
+	auto in_band = [&](int x, int y) {
+		const bool cov = a[static_cast<size_t>(y) * sw + x] != 0;
+		for (int dy = -1; dy <= 1; ++dy)
+			for (int dx = -1; dx <= 1; ++dx)
+			{
+				const int nx = x + dx, ny = y + dy;
+				if ((dx || dy) && nx >= 0 && ny >= 0 && nx < sw && ny < sh && (a[static_cast<size_t>(ny) * sw + nx] != 0) != cov)
+					return true;
+			}
+		return false;
+	};
+	for (int y = 0; y < sh; ++y)
+		for (int x = 0; x < sw; ++x)
+		{
+			const int ia = a[static_cast<size_t>(y) * sw + x], ib = b[static_cast<size_t>(y) * sw + x];
+			if ((ia != 0) != (ib != 0))
+			{
+				++st.cov_mismatch;
+				if (!in_band(x, y))
+				{
+					++st.cov_nonband;
+					if (bx.cb - bx.ct > 2)
+						++st.cov_nonband_tall;
+				}
+			}
+			else if (ia)
+			{
+				++st.common;
+				st.texel_same += ia == ib;
+			}
+		}
+}
+
+static void test_rect_setup_and_model()
+{
+	// rect_setup vs the literal transliteration, on a grid with clips and flips.
+	unsigned setups = 0, same = 0;
+	for (int W : {1, 8, 31, 64, 200})
+		for (int H : {1, 8, 81, 200})
+			for (int x0 : {-50, 0, 13, 390})
+				for (int wd : {1, 2, 37, 100, 600})
+					for (int y0 : {-30, 0, 7, 235})
+						for (int ht : {1, 3, 64, 300})
+							for (int clip = 0; clip < 2; ++clip)
+								for (int flip = 0; flip < 2; ++flip)
+								{
+									const RectIn r{x0, y0, x0 + wd, y0 + ht, clip ? 20 : 0, clip ? 300 : 400, clip ? 10 : 0,
+									               clip ? 200 : 240, W, H, flip != 0};
+									RectBox p{}, q{};
+									const bool a = rect_setup(r, 400, 240, p), b = sw_rect_ref(r, 400, 240, q);
+									++setups;
+									same += a == b && (!a || (p.cl == q.cl && p.cr == q.cr && p.ct == q.ct && p.cb == q.cb &&
+									                          p.tx0 == q.tx0 && p.dx == q.dx && p.ty0 == q.ty0 && p.dy == q.dy));
+								}
+	CHECK(same == setups);
+	std::printf("rect_setup vs SW: %u / %u set-ups identical\n", same, setups);
+
+	// The GPU model vs SW per bias (1/4096 texel), on a grid of bitmap and screen sizes, clips and flips.
+	const int biases[] = {0, 1, 2, 8};   // 1/131072 texel
+	for (int model = 0; model < 3; ++model)
+		for (int bias : biases)
+		{
+			RectStats st;
+			std::vector<int> a, b;
+			for (int W : {8, 31, 64, 128, 200})
+				for (int H : {8, 81, 128, 200})
+					for (int wd : {1, 3, 16, 37, 100, 199, 400})
+						for (int ht : {1, 3, 16, 64, 128, 239})
+							for (int v = 0; v < 3; ++v)
+							{
+								const RleBitmap bm(W, H, static_cast<unsigned>(W + H + v));
+								const int x0 = v == 2 ? -wd / 3 : (400 - wd) / 2, y0 = v == 2 ? 240 - ht * 2 / 3 : (240 - ht) / 2;
+								const RectIn r{x0, y0, x0 + wd, y0 + ht, v == 1 ? x0 + wd / 4 : 0, 400, 0, 240, W, H, v == 1};
+								RectBox bx{};
+								if (!rect_setup(r, 400, 240, bx))
+									continue;
+								rect_compare(bm, bx, 400, 240, bias / 131072.0, model, a, b, st);
+							}
+			const double agree = st.common ? 100.0 * st.texel_same / st.common : 100.0;
+			const double nonband = st.common ? 100.0 * st.cov_nonband / st.common : 0.0;
+			if (bias == 1)
+			{
+				// The default rect_bias (1/131072 texel): SW's own texels in exact arithmetic; the float24 model close;
+				// SW's per-column trim outside A's edge band (minified runs of 1-2 rows) far below the 0.5 % gate.
+				CHECK(model ? agree >= 99.8 : agree >= 99.9999);   // the bias's full benefit shows in double only
+				CHECK(nonband <= 0.1);
+			}
+			std::printf("rect GPU model (%s) bias %d/131072: texel agreement %.4f%% of %llu, coverage mismatches %llu "
+			            "(outside A's edge band %llu = %.3f%% of common, on rectangles over 2 rows %llu; case (iii) reads %llu)\n",
+			            model == 2 ? "float24" : model == 1 ? "float32" : "double ", bias, agree, static_cast<unsigned long long>(st.common), static_cast<unsigned long long>(st.cov_mismatch),
+			            static_cast<unsigned long long>(st.cov_nonband), nonband, static_cast<unsigned long long>(st.cov_nonband_tall),
+			            static_cast<unsigned long long>(st.case3_reads));
+		}
+}
+
+static void test_m4_misc()
+{
+	// The LUT's column 0 is the identity: texcoord1 (0.5/256, (L + 0.5)/256) gives level L exactly.
+	bool ident = true;
+	for (unsigned j = 0; j < 256; ++j)
+		ident = ident && shade_lut_value(0, j) == j;
+	CHECK(ident);
+	// The tinted factor: SW's table (v * 8k) / 255 (shapes.cpp:2006-2021 with number_of_shading_tables 256) vs a
+	// rounding blend v * c / 255, c = min(8k, 255): within 1.
+	unsigned worst = 0;
+	for (unsigned k = 0; k < 32; ++k)
+		for (unsigned v = 0; v < 256; ++v)
+		{
+			const unsigned c = std::min(8 * k, 255u);
+			const unsigned sw = (v * 8 * k) / 255, gpu = (v * c + 127) / 255;
+			worst = std::max(worst, sw > gpu ? sw - gpu : gpu - sw);
+		}
+	CHECK(worst <= 1);
+	std::printf("tinted factor: SW floor vs rounding blend, worst %u\n", worst);
+	// The cache with S != T and an A8 kind: the bytes the caps count.
+	FakeAlloc fa;
+	TexCache cache(fa, TexCacheConfig{});
+	cache.begin_frame(1);
+	TexSlot* s = cache.create(TexKey{&fa, nullptr, TexKind::Mask, true}, 128, 64);
+	CHECK(s && s->S == 128 && s->T == 64 && s->bytes == 8192 && fa.bad_release == 0);
+	TexSlot* r = cache.create(TexKey{&fa, &fa, TexKind::NormalKeyed, true}, 16, 256);
+	CHECK(r && r->bytes == 16384 && cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, true}) == r);
+	CHECK(!cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, false}));   // the wrap is part of the key
+	cache.release_all();
+}
+
+static void test_config_m4()
+{
+	Config c;
+	CHECK(c.play && c.play_check == 0 && c.rect_bias == 1);
+	CHECK(config_apply(c, "play", "0") && !c.play);
+	CHECK(config_apply(c, "play_check", "30") && c.play_check == 30);
+	CHECK(!config_apply(c, "play_check", "100001") && c.play_check == 30);
+	CHECK(config_apply(c, "rect_bias", "65536") && c.rect_bias == 65536);
+	CHECK(!config_apply(c, "rect_bias", "65537") && !config_apply(c, "play", "2") && c.rect_bias == 65536 && !c.play);
+}
+
+// Coverage::All: common = A or B differs from the clear in RGB; both-clear pixels are `empty`; no band.
+static void test_diff_all()
+{
+	std::vector<uint32_t> a(4 * 3, 0), b(4 * 3, 0);
+	a[0] = 0xFF102030u;                  // drawn in A only
+	b[1] = 0xFF000001u;                  // drawn in B only
+	a[5] = 0x00405060u; b[5] = 0xFF405062u;   // a tinted SW pixel (alpha 0) vs C3D: compared, delta 2
+	a[6] = 0xFF000000u; b[6] = 0xFF000000u;   // black on both: RGB equals the clear, empty
+	const DiffResult r = diff_images(Image32{a.data(), 4, 3, 4}, Image32{b.data(), 4, 3, 4}, Coverage::All, 0, 2);
+	CHECK(r.common == 3 && r.empty == 9 && r.band == 0 && r.cov_mismatch_edge == 0 && r.cov_mismatch_nonedge == 0);
+	CHECK(r.within_tol == 2 && r.max_delta == 0x30);
+	CHECK(r.covered_a == 2 && r.covered_b == 2);
+}
+
+static void test_m4_core()
+{
+	test_config_m4();
+	test_diff_all();
+	test_rect_tex_convert();
+	test_rect_tiling_tex3ds();
+	test_rect_setup_and_model();
+	test_m4_misc();
+}
+
 int main()
 {
 	test_config();
@@ -3531,6 +3981,7 @@ int main()
 	test_ring();
 	test_m2_core();
 	test_m3_core();
+	test_m4_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

@@ -171,6 +171,12 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.lit);
 	if (key == "alpha_x2")
 		return parse_flag(value, cfg.alpha_x2);
+	if (key == "play")
+		return parse_flag(value, cfg.play);
+	if (key == "play_check")
+		return parse_unsigned(value, 0, 100000, cfg.play_check);
+	if (key == "rect_bias")
+		return parse_unsigned(value, 0, 65536, cfg.rect_bias);
 	if (key == "film")
 	{
 		if (value.empty())

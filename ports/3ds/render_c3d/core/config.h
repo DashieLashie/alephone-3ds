@@ -93,6 +93,12 @@
 	                    two TEV stages (design 4.2); 0 = M2's single stage (the texture as it is)
 	  alpha_x2 0|1      default 0: with lit 1, TEV stage 0's alpha is scaled x2 (the UNVERIFIED clamp
 	                    A/B of m3-alpha2.cfg); 0 = scale 1 (alpha 255 or 128 written, as in M2)
+	Keys of M4 (design 7, "M4 specification", "Keys"):
+	  play 0|1          default 1: with renderer c3d, mode readback, textures 1 and lit 1, play frames are
+	                    drawn by citro3d and read back into the view (else SW, as before M4)
+	  play_check N      0..100000, default 0 = off: every N-th C3D play frame is compared with SW's replay
+	                    over the same previous frame ("DIFF ... class=play")
+	  rect_bias N       0..65536, default 1: the bias added to a rectangle's texcoords, in 1/131072 texel
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -151,6 +157,10 @@ struct Config
 	// M3
 	bool lit = true;
 	bool alpha_x2 = false;
+	// M4
+	bool play = true;
+	unsigned play_check = 0;
+	unsigned rect_bias = 1;                 // 1/131072 texel
 	std::string film;
 };
 

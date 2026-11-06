@@ -12,6 +12,10 @@
 #include "../core/shade_lut.h"
 
 #include "../core/geometry.h"
+#include "../core/tex_convert.h"
+
+#include <algorithm>
+#include <climits>
 
 namespace a1_c3d {
 
@@ -25,6 +29,34 @@ Transfer to_transfer(int16 engine_transfer_mode)
 	case _tinted_transfer: return Transfer::Tinted;
 	default: return Transfer::Other;
 	}
+}
+
+RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures, int* level)
+{
+	if (r.transfer_mode == _static_transfer)
+		return RectSupport::Static;
+	const bool tinted = r.transfer_mode == _tinted_transfer;
+	if ((!tinted && r.transfer_mode != _textured_transfer) || !textures)
+		return RectSupport::Other;
+	const bitmap_definition* t = r.texture;
+	unsigned S = 0, T = 0;
+	if (!t || !(t->flags & _COLUMN_ORDER_BIT) || !rect_tex_size(t->width, t->height, t->bytes_per_row == NONE, S, T))
+		return RectSupport::Bitmap;
+	int L = 255;
+	if (tinted)
+	{
+		if ((r.transfer_data & 0xFF) >= 32)
+			return RectSupport::Other;
+	}
+	else if (!(r.flags & _SHADELESS_BIT))
+	{
+		L = sw_shade_index(M, static_cast<int16_t>(std::min<int32_t>(r.depth, SHRT_MAX)), static_cast<int32_t>(r.ambient_shade));
+		if (L < 0)
+			return RectSupport::Wrap;
+	}
+	if (level)
+		*level = L;
+	return RectSupport::Ok;
 }
 
 // --- FilterRasterizer ---
@@ -50,8 +82,14 @@ bool FilterRasterizer::ambient_wraps(const polygon_definition& p) const
 
 void FilterRasterizer::texture_horizontal_polygon(polygon_definition& p)
 {
-	if (!passes(classify(Entry::Horizontal, to_transfer(p.transfer_mode), foreground_)))
+	const int cls = classify(Entry::Horizontal, to_transfer(p.transfer_mode), foreground_);
+	if (!passes(cls))
 		return;
+	if (frame_excluded(cls))
+	{
+		++excluded_;
+		return;
+	}
 	if (c3d_excluded(Entry::Horizontal, p))
 	{
 		++excluded_;
@@ -71,8 +109,14 @@ void FilterRasterizer::texture_horizontal_polygon(polygon_definition& p)
 
 void FilterRasterizer::texture_vertical_polygon(polygon_definition& p)
 {
-	if (!passes(classify(Entry::Vertical, to_transfer(p.transfer_mode), foreground_)))
+	const int cls = classify(Entry::Vertical, to_transfer(p.transfer_mode), foreground_);
+	if (!passes(cls))
 		return;
+	if (frame_excluded(cls))
+	{
+		++excluded_;
+		return;
+	}
 	if (c3d_excluded(Entry::Vertical, p))
 	{
 		++excluded_;
@@ -92,11 +136,30 @@ void FilterRasterizer::texture_vertical_polygon(polygon_definition& p)
 
 void FilterRasterizer::texture_rectangle(rectangle_definition& r)
 {
-	if (!passes(classify(Entry::Rectangle, to_transfer(r.transfer_mode), foreground_)))
+	const int cls = classify(Entry::Rectangle, to_transfer(r.transfer_mode), foreground_);
+	if (!passes(cls))
 		return;
+	if (frame_excluded(cls))
+	{
+		++excluded_;
+		return;
+	}
 	rectangle_definition copy = r;
 	if (fullbright_ && copy.transfer_mode == _textured_transfer && !(copy.flags & _SHADELESS_BIT))
 		copy.ambient_shade = FIXED_ONE;
+	// M4: what C3D cannot draw is dropped on both sides of a C3D check (after the fullbright rewrite: the ambient
+	// SW will see). Static never gets here except through `frame` (excluded above) or `static` (not a C3D class).
+	if (c3d_only_)
+	{
+		const int32_t M = view_ ? static_cast<int32_t>(view_->maximum_depth_intensity) : 0;
+		const RectSupport rs = rect_support(copy, M, textures_);
+		if (rs != RectSupport::Ok)
+		{
+			++excluded_;
+			ambient_wrap_ += rs == RectSupport::Wrap;
+			return;
+		}
+	}
 	inner_->texture_rectangle(copy);
 }
 

@@ -361,6 +361,7 @@ if(A1_RENDER_C3D)
     "${_a1_c3d_dir}/core/tex_convert.cpp"
     "${_a1_c3d_dir}/core/texcache.cpp"
     "${_a1_c3d_dir}/core/shade_lut.cpp"
+    "${_a1_c3d_dir}/core/rect.cpp"
     "${_a1_c3d_dir}/back/context.cpp"
     "${_a1_c3d_dir}/back/present.cpp"
     "${_a1_c3d_dir}/back/view.cpp"

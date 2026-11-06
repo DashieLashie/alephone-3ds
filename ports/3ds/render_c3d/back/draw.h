@@ -52,17 +52,22 @@ struct ViewBegin
 // size, the target and staging out of frame, the sentinel fill, frame_begin, the texture cache's frame start
 // (retired frees, VRAM promotions), the clear (before the first draw), C3D_FrameDrawOn, the state save, the
 // world program, attributes, buffers and GPU state; TEV stage 0 = texture 0 with `textures 1`, else the
-// vertex colour.
-ViewBegin view_begin(int w, int h);
+// vertex colour. The target is cleared to `clear_rgba` (0xRRGGBBAA; M4: the tinted check's grey, 8.1).
+ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0);
 // The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
 ViewBegin view_skip(SkipReason reason);
+// M4 play frames (design 7, M4 specification "Play mode" (0)): view_begin's cheap refusals, tested before the
+// front end records anything: false and *why = Down (C3D side off, citro3d not up, a release pending, no program
+// recorded), Gate (the gate is closed) or Size (view_size_supported refuses w x h). Counts nothing.
+bool view_play_ready(int w, int h, SkipReason* why);
 
 // Appends one accepted polygon (3..16 vertices, already through core's accept_polygon, positions in view
 // pixels, w clamped, colour set) to the current ring half, fans it, and extends the pending draw when
 // `key` equals the previous polygon's, else issues the pending draw and starts a new one; a new draw with
 // `tex` looks its texture up (or converts it, texcache_get) and binds it to unit 0 when it changes. False
 // once the frame is discarded (ring full, command-buffer reserve, no room for a texture, or an earlier
-// view_discard); the polygon is then not drawn. Equal keys imply equal textures (the key holds the bitmap,
+// view_discard); the polygon is then not drawn. M4: a new draw also sets the blend of its class (kTinted: the
+// tinted blend with the key's transfer_data; else 2.4's world blend). Equal keys imply equal textures (the key holds the bitmap,
 // the tables and the class, which fix the kind).
 bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* tex = nullptr);
 
@@ -86,6 +91,11 @@ struct ViewEnd
 // (w x h, `pitch` pixels per row) and counts the pixels still holding the frame's sentinel into
 // *sentinel_count (if non-null). A discarded frame is ended without a readback (ok false).
 ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count);
+// M4 play frames (design 7, M4 specification "Play mode" (3)): as view_end, then only the pixels C3D covered
+// (alpha != 0) are copied into the 32-bit rows `rows[0..h)` (dest's row_addresses) as ARGB with alpha 0xFF; a
+// pixel no primitive wrote keeps what dest held (SW never clears world_pixels), a sentinel pixel is counted
+// (*sentinel_count) and not copied; *copied = the pixels written.
+ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied);
 
 // After C3D_Fini (release_and_fini): frees the world program and the rings. Idempotent.
 void draw_free();

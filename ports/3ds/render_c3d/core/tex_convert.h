@@ -18,6 +18,13 @@
 	  mask             A8 (one byte per texel, tiled with the same Morton pattern): 0 for index 0, else
 	                   255; no tables (the tint is the global one, applied at draw time)
 
+	M4: RLE rectangle bitmaps (sprites, weapons; design 7, M4 specification "Conversion of rectangle bitmaps").
+	`rows[c]` is column c (W columns, H texels each): 4 header bytes, first and last big-endian (last exclusive),
+	then the bytes of rows [first, last). The texture is S x T (S = pot(max(H, 8)) texels per memory row, T =
+	pot(max(W, 8)) memory rows): memory row tile_memory_row(T, c) holds column c, texel s of it is the index of
+	row s; everything outside a column's run, index 0 and the padding are transparent (kinds normal_keyed,
+	shadeless_keyed, mask only).
+
 	An RGBA8 texel is the little-endian u32 R<<24 | G<<16 | B<<8 | A, i.e. bytes A, B, G, R in memory.
 
 	This program is free software; you can redistribute it and/or modify
@@ -52,7 +59,21 @@ bool tex_supported(int width, int height, bool rle);
 inline bool tex_supported(const TexBitmap& b) { return tex_supported(b.width, b.height, b.rle); }
 
 inline unsigned tex_texel_bytes(TexKind k) { return k == TexKind::Mask ? 1 : 4; }
-inline size_t tex_bytes(unsigned W, TexKind k) { return static_cast<size_t>(W) * W * tex_texel_bytes(k); }
+inline size_t tex_bytes(unsigned S, unsigned T, TexKind k) { return static_cast<size_t>(S) * T * tex_texel_bytes(k); }
+inline size_t tex_bytes(unsigned W, TexKind k) { return tex_bytes(W, W, k); }
+
+constexpr unsigned kRectTexMin = 8;      // PICA's smallest texture side
+constexpr unsigned kRectTexMax = 1024;   // a side above it: the rectangle is unsupported
+
+// M4: the POT texture size of an RLE rectangle bitmap of `width` columns of `height` texels (S = texels per
+// memory row from the height, T = memory rows from the width). False: not RLE, or a side outside [1, 1024].
+bool rect_tex_size(int width, int height, bool rle, unsigned& S, unsigned& T);
+
+// M4: decodes and tiles an RLE rectangle bitmap into `out` (tex_bytes(S, T, kind) bytes, 4-byte aligned for the
+// RGBA kinds), S and T from rect_tex_size. Kinds NormalKeyed, ShadelessKeyed (tables needed) and Mask. False
+// (nothing written) for another kind, a size rect_tex_size refuses or does not give, or a null pointer.
+bool tex_convert_rle(const TexBitmap& bitmap, const uint32_t* shading_tables, TexKind kind, unsigned S, unsigned T,
+                     void* out);
 
 // Converts and tiles into `out` (tex_bytes(W, kind) bytes, 4-byte aligned for RGBA kinds). False
 // (nothing written) if the bitmap is unsupported, `rows` is null, or `tables` is null for a kind

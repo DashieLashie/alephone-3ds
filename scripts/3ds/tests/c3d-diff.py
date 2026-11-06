@@ -36,6 +36,20 @@
 #       `lit 1` and not `textures 0`, and the summary's c3d_lit_polys > 0; infra = lit's debug-line rule plus
 #       c3d_shadeless_polys > 0 and c3d_lit_polys == 0 (every compared polygon was shadeless). The summary's lit
 #       counters (c3d_lit_polys ... c3d_ambient_wrap) are printed whenever they are present.
+#       M4 (design 7 "M4 specification", "c3d-diff.py"): --strict CLASS[,CLASS] gates those of the --colour classes
+#       on the strict figures (Delta to A's own pixel: tinted) instead of the neighbourhood ones; --min-covered N
+#       fails a --colour class whose A-covered pixels sum to less than N over the run or that has fewer than
+#       --min-covered-checks K (default 1) checks with covered_A > 0 (a run with no sprite on screen must not pass
+#       on common == 0). The
+#       classes frame and play have no band (Coverage::All); their `empty` pixels are printed. The summary's
+#       rectangle counters (c3d_rects ...) are printed whenever they are present.
+#
+#   python3 -I scripts/3ds/tests/c3d-diff.py play LOG [--min-play-checks N] [--expect-offs N] [--within P --tol T]
+#       M4 play mode (design 7 "M4 specification", "c3d-diff.py"): prints the "[c3d] play final" line and the
+#       "DIFF ... class=play" checks; exit 1 if the final line is missing, c3d=0 (no C3D play frame), sentinel > 0,
+#       fewer than N play checks (default 0), the play checks' neighbourhood within (A's covered or B's drawn pixels,
+#       Coverage::All) under P % at Delta <= T (defaults 97, 4; the DIFF lines' "(tol T)" must equal --tol), or, with
+#       --expect-offs N, offs != N or ons != N - 1 (a run that ends off).
 #
 #   python3 -I scripts/3ds/tests/c3d-diff.py bmp A.bmp B.bmp [--class C]
 #       Reads two 32-bit BMPs (c3d-diff-<frame>-<class>-{sw,c3d}.bmp) and recomputes the metric of
@@ -82,6 +96,7 @@ def parse_diff_line(line):
             "sentinel": int(kv["sentinel"]) if "sentinel" in kv else 0,
             "ties": int(kv["ties"]) if "ties" in kv else 0,
             "tie_mismatch": int(kv["tie_mismatch"]) if "tie_mismatch" in kv else 0,
+            "empty": int(kv["empty"]) if "empty" in kv else 0,
         }
     except (KeyError, ValueError, IndexError):
         return None
@@ -135,6 +150,9 @@ def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour
     lc = lit_counters(summary)
     if lc:
         print("lit counters: " + " ".join("%s=%d" % (k[4:], lc[k]) for k in LIT_KEYS))
+    rk = dict(KV.findall(summary or ""))
+    if all(k in rk for k in RECT_KEYS):
+        print("rect counters: " + " ".join("%s=%s" % (k[4:], rk[k]) for k in RECT_KEYS))
     for d in dropped:
         print(d)
     m = re.search(r"dropped=(\d+)", summary or "")
@@ -189,8 +207,8 @@ def colour_check(colour, o, rows, other, summary, n_dropped, dbg, min_checks):
     """The M2 colour gate (revised, neighbourhood rule). Prints the figures; returns True on failure."""
     problems = []
     c3d_rows = [r for r in rows if r["c3d"] and r["class"] in colour]
-    print("%-8s %6s %10s %10s %9s %9s %9s %9s %7s" % (
-        "class", "checks", "non-edge", "covered_A", "within_nb", "mean_nb", "strict_in", "strict_mn", "max_nb"))
+    print("%-8s %6s %10s %10s %9s %9s %9s %9s %7s %9s" % (
+        "class", "checks", "non-edge", "covered_A", "within_nb", "mean_nb", "strict_in", "strict_mn", "max_nb", "empty"))
     for c in colour:
         rs = [r for r in c3d_rows if r["class"] == c]
         if len(rs) < min_checks:
@@ -211,10 +229,19 @@ def colour_check(colour, o, rows, other, summary, n_dropped, dbg, min_checks):
         non_pct = 100.0 * non / cov_a if cov_a else (0.0 if not non else float("inf"))
         in_pct = 100.0 * w_nb / common if common else 100.0
         mean_nb = s_nb / common if common else 0.0
-        print("%-8s %6d %10s %10d %8.3f%% %9.3f %8.3f%% %9.3f %7d" % (
-            c, len(rs), "%d (%.3f%%)" % (non, non_pct), cov_a, in_pct, mean_nb,
-            100.0 * w_st / common if common else 100.0, s_st / common if common else 0.0,
-            max((r["max_nb"] for r in rs), default=0)))
+        st_pct = 100.0 * w_st / common if common else 100.0
+        st_mean = s_st / common if common else 0.0
+        print("%-8s %6d %10s %10d %8.3f%% %9.3f %8.3f%% %9.3f %7d %9d" % (
+            c, len(rs), "%d (%.3f%%)" % (non, non_pct), cov_a, in_pct, mean_nb, st_pct, st_mean,
+            max((r["max_nb"] for r in rs), default=0), sum(r["empty"] for r in rs)))
+        if c in o.get("strict", []):
+            in_pct, mean_nb = st_pct, st_mean   # gated on the strict figures
+            print("  (gated on the strict figures)")
+        if o.get("min_covered", 0) > 0:
+            with_px = sum(1 for r in rs if r["cov_a"] > 0)
+            if cov_a < o["min_covered"] or with_px < o["min_covered_checks"]:
+                problems.append("class %s: %d covered pixel(s) in %d check(s) with any, under --min-covered %d / "
+                                "--min-covered-checks %d" % (c, cov_a, with_px, o["min_covered"], o["min_covered_checks"]))
         if rs:
             lo = min(rs, key=lambda r: r["within_nb"])
             hi = max(rs, key=lambda r: r["mean_nb"])
@@ -268,6 +295,8 @@ def colour_check(colour, o, rows, other, summary, n_dropped, dbg, min_checks):
         print("c3d-diff: FAIL (--colour)")
     return bool(problems)
 
+
+RECT_KEYS = ("c3d_rects", "c3d_tinted_rects", "c3d_rect_skipped", "c3d_rect_unsupported")
 
 LIT_KEYS = ("c3d_lit_polys", "c3d_shadeless_polys", "c3d_neg_ambient_polys", "c3d_flash_checks", "c3d_m_max",
             "c3d_flash_over", "c3d_ambient_wrap")
@@ -358,11 +387,84 @@ def cmd_bmp(pa, pb, cls):
     return 0
 
 
+def cmd_play(path, min_checks, expect_offs, within, tol):
+    final, rows, lines = None, [], []
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            if "[c3d] play final " in line:
+                final = line.strip()
+            elif "[c3d] play: " in line:
+                lines.append(line.strip())
+            else:
+                r = parse_diff_line(line)
+                if r and r.get("state") == "compared" and r["class"] == "play":
+                    rows.append(r)
+    for l in lines:
+        print(l)
+    print(final or "no [c3d] play final line")
+    problems = []
+    if not final:
+        problems.append("no [c3d] play final line")
+        kv = {}
+    else:
+        kv = dict(KV.findall(final))
+    def num(k):
+        try:
+            return int(kv.get(k, "0"))
+        except ValueError:
+            return 0
+    if final and num("c3d") <= 0:
+        problems.append("no C3D play frame (c3d=%d)" % num("c3d"))
+    if num("sentinel") > 0:
+        problems.append("sentinel %d" % num("sentinel"))
+    common = sum(r["common"] for r in rows)
+    w_nb = sum(round(r["common"] * r["within_nb"] / 100.0) for r in rows if r["within_nb"] is not None)
+    in_pct = 100.0 * w_nb / common if common else 100.0
+    worst = min((r["within_nb"] for r in rows if r["within_nb"] is not None), default=None)
+    print("play checks: %d, common %d, within_nb %.3f%% (tol %d), worst check %s, empty %d" % (
+        len(rows), common, in_pct, tol, "%.2f%%" % worst if worst is not None else "-", sum(r["empty"] for r in rows)))
+    if len(rows) < min_checks:
+        problems.append("%d play check(s), fewer than --min-play-checks %d" % (len(rows), min_checks))
+    if rows and in_pct < within:
+        problems.append("play checks within (neighbourhood) %.3f%%, under %.3f%%" % (in_pct, within))
+    for r in rows:
+        if r["tol"] != tol:
+            problems.append("a play check has (tol %d), --tol is %d" % (r["tol"], tol))
+            break
+    if expect_offs is not None and (num("offs") != expect_offs or num("ons") != expect_offs - 1):
+        problems.append("offs %d / ons %d, expected %d / %d (the run ends off)" % (num("offs"), num("ons"), expect_offs,
+                                                                                expect_offs - 1))
+    for p_ in problems:
+        print("c3d-diff: %s" % p_)
+    if problems:
+        print("c3d-diff: FAIL (play)")
+    return 1 if problems else 0
+
+
 def main(argv):
+    if len(argv) >= 3 and argv[1] == "play":
+        o = {"--min-play-checks": "0", "--expect-offs": None, "--within": "97", "--tol": "4"}
+        rest = argv[3:]
+        i = 0
+        while i < len(rest):
+            if rest[i] in o and i + 1 < len(rest):
+                o[rest[i]] = rest[i + 1]
+                i += 2
+            else:
+                print("c3d-diff: unknown or incomplete option %s" % rest[i], file=sys.stderr)
+                return 2
+        try:
+            return cmd_play(argv[2], int(o["--min-play-checks"]),
+                            int(o["--expect-offs"]) if o["--expect-offs"] is not None else None,
+                            float(o["--within"]), int(o["--tol"]))
+        except ValueError:
+            print("c3d-diff: play options need numbers", file=sys.stderr)
+            return 2
     if len(argv) >= 3 and argv[1] == "log":
         rest = argv[3:]
         opts = {"--coverage": None, "--band-pct": "2", "--min-checks": "1", "--colour": None,
-                "--nonedge-pct": "0.1", "--within": "98", "--tol": "2", "--mean": "1.0", "--shading": "full"}
+                "--nonedge-pct": "0.1", "--within": "98", "--tol": "2", "--mean": "1.0", "--shading": "full",
+                "--strict": None, "--min-covered": "0", "--min-covered-checks": "1"}
         flags = set()
         i = 0
         while i < len(rest):
@@ -378,7 +480,10 @@ def main(argv):
         try:
             band_pct, min_checks = float(opts["--band-pct"]), int(opts["--min-checks"])
             colour_opts = {"nonedge": float(opts["--nonedge-pct"]), "within": float(opts["--within"]),
-                           "tol": int(opts["--tol"]), "mean": float(opts["--mean"]), "shading": opts["--shading"]}
+                           "tol": int(opts["--tol"]), "mean": float(opts["--mean"]), "shading": opts["--shading"],
+                           "strict": [c for c in (opts["--strict"] or "").split(",") if c],
+                           "min_covered": int(opts["--min-covered"]),
+                           "min_covered_checks": int(opts["--min-covered-checks"])}
         except ValueError:
             print("c3d-diff: --band-pct, --nonedge-pct, --within, --mean need numbers; --min-checks, --tol integers",
                   file=sys.stderr)
@@ -400,7 +505,8 @@ def main(argv):
             print("c3d-diff: %s" % e, file=sys.stderr)
             return 2
     print("usage: c3d-diff.py log LOG [--expect-zero] [--coverage CLASS[,CLASS] --band-pct P --min-checks N]\n"
-          "                         [--colour CLASS[,CLASS] --nonedge-pct P --within P --tol T --mean M --shading full|lit|infra] "
+          "                         [--colour CLASS[,CLASS] --nonedge-pct P --within P --tol T --mean M --shading full|lit|infra\n"
+          "                          --strict CLASS[,CLASS] --min-covered N --min-covered-checks K] "
           "| bmp A.bmp B.bmp [--class C]")
     return 2
 

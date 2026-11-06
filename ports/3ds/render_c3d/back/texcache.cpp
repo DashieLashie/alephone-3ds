@@ -26,21 +26,20 @@ namespace a1_c3d {
 namespace {
 
 // One C3D_Tex per texture (M2 "Pools, caps, allocation"): the struct is malloc'd, so its address is stable
-// for as long as the slot holds it (citro3d keeps the pointer given to C3D_TexBind). RGBA8 kinds only in M2
-// (the A8 mask is M4's).
+// for as long as the slot holds it (citro3d keeps the pointer given to C3D_TexBind). RGBA8, and A8 for the
+// mask kind (M4, enums.h:73); S x T (M4: rectangles are not square).
 class C3dAllocator : public TexAllocator
 {
 public:
-	void* alloc(TexPool pool, unsigned W, TexKind kind, uint32_t bytes) override
+	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, bool clamp, uint32_t bytes) override
 	{
-		if (tex_texel_bytes(kind) != 4)
-			return nullptr;
 		C3D_Tex* t = static_cast<C3D_Tex*>(malloc(sizeof(C3D_Tex)));
 		if (!t)
 			return nullptr;
-		// texture.h:94-116: linear (linearMemAlign) or VRAM (vramMemAlign), no mipmaps.
-		const bool ok = pool == TexPool::Vram ? C3D_TexInitVRAM(t, static_cast<u16>(W), static_cast<u16>(W), GPU_RGBA8)
-		                                      : C3D_TexInit(t, static_cast<u16>(W), static_cast<u16>(W), GPU_RGBA8);
+		const GPU_TEXCOLOR fmt = kind == TexKind::Mask ? GPU_A8 : GPU_RGBA8;
+		// texture.h:94-116: linear (linearMemAlign) or VRAM (vramMemAlign), no mipmaps; width S, height T.
+		const bool ok = pool == TexPool::Vram ? C3D_TexInitVRAM(t, static_cast<u16>(S), static_cast<u16>(T), fmt)
+		                                      : C3D_TexInit(t, static_cast<u16>(S), static_cast<u16>(T), fmt);
 		if (!ok)
 		{
 			free(t);
@@ -50,14 +49,16 @@ public:
 		{
 			// Never expected: the caps would count another size than citro3d allocated.
 			printf("[c3d] tex: C3D_TexInit size %lu != %lu for %u x %u: refused\n", static_cast<unsigned long>(t->size),
-			       static_cast<unsigned long>(bytes), W, W);
+			       static_cast<unsigned long>(bytes), S, T);
 			C3D_TexDelete(t);
 			free(t);
 			return nullptr;
 		}
-		// texture.h:157-173: nearest (SW samples whole texels), repeat (texcoords are shifted by whole repeats).
+		// texture.h:157-173: nearest (SW samples whole texels); repeat for walls and floors (texcoords are shifted
+		// by whole repeats), clamp-to-edge for rectangles (M4: transparent padding, SW never reads outside).
 		C3D_TexSetFilter(t, GPU_NEAREST, GPU_NEAREST);
-		C3D_TexSetWrap(t, GPU_REPEAT, GPU_REPEAT);
+		const GPU_TEXTURE_WRAP_PARAM wrap = clamp ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
+		C3D_TexSetWrap(t, wrap, wrap);
 		return t;
 	}
 	void release(TexPool, void* handle) override
@@ -117,23 +118,37 @@ void texcache_frame_start(uint32_t frame)
 TexGet texcache_get(const TexSource& src, void** out)
 {
 	TexCache& c = texcache();
-	const TexKey key{src.id, src.tables, src.kind};
+	const TexKey key{src.id, src.tables, src.kind, src.rect};
 	if (TexSlot* s = c.lookup(key))
 	{
 		*out = s->handle;
 		return TexGet::Ok;
 	}
 	// The converter's own refusals, checked before a slot is taken.
-	if (!tex_supported(src.bitmap) || !src.bitmap.rows || !src.tables || tex_texel_bytes(src.kind) != 4)
-		return TexGet::Unsupported;
+	unsigned S = 0, T = 0;
+	if (src.rect)
+	{
+		const bool kind_ok = src.kind == TexKind::NormalKeyed || src.kind == TexKind::ShadelessKeyed || src.kind == TexKind::Mask;
+		if (!kind_ok || !rect_tex_size(src.bitmap.width, src.bitmap.height, src.bitmap.rle, S, T) || !src.bitmap.rows ||
+		    (src.kind != TexKind::Mask && !src.tables))
+			return TexGet::Unsupported;
+	}
+	else
+	{
+		if (!tex_supported(src.bitmap) || !src.bitmap.rows || !src.tables || tex_texel_bytes(src.kind) != 4)
+			return TexGet::Unsupported;
+		S = T = static_cast<unsigned>(src.bitmap.width);
+	}
 #ifdef A1_PROFILE
 	::a1_3ds::prof::Scope prof_scope(::a1_3ds::prof::C3dTex);
 #endif
-	TexSlot* s = c.create(key, static_cast<unsigned>(src.bitmap.width));
+	TexSlot* s = c.create(key, S, T);
 	if (!s)
 		return TexGet::Discard;
 	C3D_Tex* t = static_cast<C3D_Tex*>(s->handle);
-	if (!tex_convert(src.bitmap, src.tables, src.kind, t->data))
+	const bool converted = src.rect ? tex_convert_rle(src.bitmap, src.tables, src.kind, S, T, t->data)
+	                                : tex_convert(src.bitmap, src.tables, src.kind, t->data);
+	if (!converted)
 	{
 		if (s_convert_failed++ == 0)
 			printf("[c3d] tex: conversion refused a %d x %d bitmap: view frame discarded (unsupported)\n",

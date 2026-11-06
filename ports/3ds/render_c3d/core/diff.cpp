@@ -33,6 +33,60 @@ inline unsigned channel_delta(uint32_t a, uint32_t b)
 	return d;
 }
 
+// Coverage::All (see diff.h).
+DiffResult diff_all(const Image32& a, const Image32& b, uint32_t clear, int tol, int w, int h)
+{
+	DiffResult r;
+	for (int y = 0; y < h; ++y)
+	{
+		const uint32_t* pa = a.px + static_cast<size_t>(y) * a.pitch;
+		const uint32_t* pb = b.px + static_cast<size_t>(y) * b.pitch;
+		for (int x = 0; x < w; ++x)
+		{
+			const bool ea = ((pa[x] ^ clear) & 0x00FFFFFFu) == 0, eb = ((pb[x] ^ clear) & 0x00FFFFFFu) == 0;
+			r.covered_a += !ea;
+			r.covered_b += !eb;
+			if (pa[x] != pb[x])
+				++r.differ;
+			if (ea && eb)
+			{
+				++r.empty;
+				continue;
+			}
+			const unsigned d = channel_delta(pa[x], pb[x]);
+			++r.common;
+			r.sum_delta += d;
+			r.max_delta = std::max(r.max_delta, d);
+			if (static_cast<long>(d) <= tol)
+				++r.within_tol;
+			unsigned dn = d;
+			for (int dy = -1; dy <= 1; ++dy)
+			{
+				const int ny = y + dy;
+				if (ny < 0 || ny >= h)
+					continue;
+				for (int dx = -1; dx <= 1; ++dx)
+				{
+					const int nx = x + dx;
+					if ((dx == 0 && dy == 0) || nx < 0 || nx >= w)
+						continue;
+					const uint32_t an = a.px[static_cast<size_t>(ny) * a.pitch + nx];
+					// One side empty (a pixel only one renderer drew): an empty A-neighbour must not match B's
+					// clear and hide the miss (M4 critic round 2, minor 2).
+					if (ea != eb && ((an ^ clear) & 0x00FFFFFFu) == 0)
+						continue;
+					dn = std::min(dn, channel_delta(an, pb[x]));
+				}
+			}
+			r.sum_nb += dn;
+			r.max_nb = std::max(r.max_nb, dn);
+			if (static_cast<long>(dn) <= tol)
+				++r.within_nb;
+		}
+	}
+	return r;
+}
+
 } // namespace
 
 DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32_t clear, int tol,
@@ -43,6 +97,8 @@ DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32
 	const int h = std::min(a.height, b.height);
 	if (w <= 0 || h <= 0)
 		return r;
+	if (mode == Coverage::All)
+		return diff_all(a, b, clear, tol, w, h);
 
 	std::vector<uint8_t> cov(static_cast<size_t>(w) * static_cast<size_t>(h));   // A's coverage
 	for (int y = 0; y < h; ++y)
@@ -146,10 +202,10 @@ std::string diff_line(unsigned frame, const char* cls, const DiffResult& r, int 
 std::string diff_line_c3d(unsigned frame, const char* cls, const DiffResult& r, int tol, unsigned excluded,
                           unsigned sentinel)
 {
-	char tail[192];
+	char tail[208];
 	std::snprintf(tail, sizeof tail,
-	              " b=c3d excluded=%u sentinel=%u ties=%u tie_mismatch=%u within_nb=%.2f%% mean_nb=%.2f max_nb=%u",
-	              excluded, sentinel, r.ties, r.tie_mismatch, r.within_nb_pct(), r.mean_nb(), r.max_nb);
+	              " b=c3d excluded=%u sentinel=%u ties=%u tie_mismatch=%u within_nb=%.2f%% mean_nb=%.2f max_nb=%u empty=%u",
+	              excluded, sentinel, r.ties, r.tie_mismatch, r.within_nb_pct(), r.mean_nb(), r.max_nb, r.empty);
 	return diff_line(frame, cls, r, tol) + tail;
 }
 

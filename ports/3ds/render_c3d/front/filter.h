@@ -33,6 +33,15 @@ namespace a1_c3d {
 // The engine's transfer mode onto the classes' Transfer (core/classify.h).
 Transfer to_transfer(int16 engine_transfer_mode);
 
+// M4 (design 7, M4 specification "Front end", "Play mode" (2)): whether C3D draws a rectangle as SW would.
+// Static: _static (M5). Other: another transfer mode, `textures` off, or a tinted k = transfer_data & 0xff >= 32
+// (SW would read past the 256 tables). Bitmap: not a column-ordered RLE bitmap with sides in [1, 1024]. Wrap: SW's
+// short table index is negative (L < 0: SW reads before the tables). Ok: drawn; *level = SW's shade level L of a
+// lit _textured rectangle (sw_shade_index of M = view->maximum_depth_intensity, (short)MIN(depth, SHRT_MAX) and
+// ambient_shade, scottish_textures.cpp:738-758), 255 for a shadeless or tinted one.
+enum class RectSupport { Ok, Static, Other, Bitmap, Wrap };
+RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures, int* level = nullptr);
+
 // Forwards the primitives of class `cls` (kFrame: all of them) to `inner`. Every forwarded
 // primitive is a local copy, so neither the fullbright edit nor the inner rasterizer's in-place
 // clip edits reach the caller's (or the recording's) primitive. SetView, Begin, End and
@@ -47,14 +56,16 @@ public:
 	// rejects (an odd-sized, RLE or shadeless bitmap; with `textures` off also a transparent wall: SW skips
 	// texel 0, flat C3D would draw it solid) is dropped and counted as excluded, instead of discarding the
 	// check (section 7, M2 specification "What C3D draws in M2"). M3: also a polygon whose ambient wraps SW's
-	// short table index (ambient_wraps; counted in excluded and in ambient_wrap).
+	// short table index (ambient_wraps; counted in excluded and in ambient_wrap). M4: also a rectangle rect_support()
+	// refuses (Wrap counted in ambient_wrap too), and, for the class `frame`, every landscape and static primitive
+	// (M5's classes; the frame check compares the rest).
 	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright, bool c3d_only = false, bool textures = false)
 		: inner_(inner), cls_(cls), fullbright_(fullbright), c3d_only_(c3d_only), textures_(textures) {}
 
 	unsigned excluded() const { return excluded_; }
 	unsigned ambient_wrap() const { return ambient_wrap_; }
 
-	void SetView(view_data& View) override { inner_->SetView(View); }
+	void SetView(view_data& View) override { view_ = &View; inner_->SetView(View); }
 	void Begin() override { foreground_ = false; inner_->Begin(); }
 	void End() override { inner_->End(); }
 	void SetForeground() override { foreground_ = true; inner_->SetForeground(); }
@@ -65,6 +76,8 @@ public:
 	void texture_rectangle(rectangle_definition& r) override;
 
 private:
+	bool frame_excluded(int cls) const { return c3d_only_ && cls_ == kFrame && (cls == kLandscape || cls == kStatic); }
+	view_data* view_ = nullptr;
 	bool passes(int cls) const { return cls_ == kFrame || cls_ == cls; }
 	bool c3d_excluded(Entry e, const polygon_definition& p) const;
 	bool ambient_wraps(const polygon_definition& p) const;

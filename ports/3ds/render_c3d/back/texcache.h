@@ -25,13 +25,15 @@ namespace back {
 
 // What the front end hands over with a textured draw: the engine bitmap (its address is the key), a view
 // of its rows, the 32-bit shading tables and the conversion kind (normal_keyed for a _TRANSPARENT_BIT
-// bitmap on a wall, else normal).
+// bitmap on a wall, else normal). M4: `rect` = an RLE rectangle bitmap (tex_convert_rle, POT-padded S x T,
+// clamp-to-edge; kinds normal_keyed, shadeless_keyed, mask; tables may be null for mask).
 struct TexSource
 {
 	const void* id = nullptr;
 	TexBitmap bitmap;
 	const uint32_t* tables = nullptr;
 	TexKind kind = TexKind::Normal;
+	bool rect = false;
 };
 
 // The cache, created on first use from the debug-c3d caps (vram_cap, linear_cap, promote_max).

@@ -7,7 +7,8 @@
 	Receives the traversal from the harness (through FilterRasterizer), accepts the walls and floors
 	c3d_supports() allows exactly as the software mapper would draw them (core/geometry accept_polygon,
 	vertical or horizontal), builds their vertices (position, perspective weight, texcoords) and hands them
-	to back/draw.cpp (view_polygon). Any other primitive discards the view frame (view_discard(Unsupported)).
+	to back/draw.cpp (view_polygon). M4: rectangles (sprites, weapons, tinted) as one quad each (core/rect).
+	Any other primitive discards the view frame (view_discard(Unsupported)).
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -37,11 +38,12 @@ public:
 	// debug-c3d `textures` (the support predicate's transparent-wall rule), `uv_half` (the attribute
 	// shift of -1/2 pixel) and `lit` (texcoord1 for the shade LUT, M3; with textures only). Persist across
 	// set_target.
-	void set_options(bool textures, bool uv_half, bool lit)
+	void set_options(bool textures, bool uv_half, bool lit, unsigned rect_bias = 1)
 	{
 		textures_ = textures;
 		uv_half_ = uv_half;
 		lit_ = lit;
+		rect_bias_ = rect_bias;
 	}
 
 	void SetView(view_data& View) override { view_ = &View; }
@@ -81,6 +83,13 @@ public:
 	unsigned flash_checks() const { return flash_checks_; }
 	long m_max() const { return m_max_; }
 
+	// M4 counters since the start (design 7, M4 specification "Front end"): rectangles drawn, of them tinted;
+	// rectangles SW draws nothing for (rect_setup false); rectangles C3D cannot draw (the view frame is discarded).
+	unsigned rects() const { return rects_; }
+	unsigned tinted_rects() const { return tinted_rects_; }
+	unsigned rect_skipped() const { return rect_skipped_; }
+	unsigned rect_unsupported() const { return rect_unsupported_; }
+
 private:
 	view_data* view_ = nullptr;
 	int w_ = 0, h_ = 0;
@@ -104,6 +113,9 @@ private:
 	bool textures_ = false;
 	bool uv_half_ = true;
 	bool lit_ = true;
+	unsigned rect_bias_ = 1;   // 1/131072 texel
+	unsigned rects_ = 0, tinted_rects_ = 0, rect_skipped_ = 0, rect_unsupported_ = 0;
+	void note_m();
 	bool m_noted_ = false;   // this target's M was looked at (reset by set_target)
 	unsigned lit_polys_ = 0, shadeless_polys_ = 0, neg_ambient_polys_ = 0, flash_over_ = 0, flash_checks_ = 0;
 	unsigned excluded_reached_ = 0;   // an Excluded ambient past the filter (a bug; logged once)

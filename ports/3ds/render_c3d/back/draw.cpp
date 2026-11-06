@@ -92,6 +92,8 @@ struct Frame
 	unsigned tex_binds0 = 0;           // tex_binds() at the start: a change means someone else bound mid-frame
 	bool lit = false;                  // M3: the shade LUT on unit 1 and TEV stage 1 (saved, restored)
 	void* lut = nullptr;               // the LUT's C3D_Tex this frame (shade_frame_start)
+	unsigned blend = 0;                // M4: 0 = 2.4's world blend; 0x100 | c = the tinted blend with constant c
+	bool tinted_used = false;          // M4: the tinted blend was set this frame (restore_state puts the world's back)
 	uint32_t sentinel_argb = 0;
 	int w = 0, h = 0;
 	int half = 0;
@@ -112,6 +114,7 @@ struct Counters
 	unsigned prog_restore_mismatch = 0;
 	unsigned tex_bind_calls = 0, tex_restore_mismatch = 0;
 	unsigned tex1_restore_mismatch = 0, tev1_not_init = 0, unit1_left_bound = 0;   // M3
+	unsigned blend_sets = 0, blend_restores = 0;   // M4: tinted/world blend switches between draws; restores
 } s_n;
 
 // --- helpers ---
@@ -272,6 +275,38 @@ void issue_pending()
 	s_f.drew = true;
 }
 
+// M4 (design 7, M4 specification "Tinted", "State and its restore"): a draw's blend follows its class.
+// 2.4's world blend (ONE, ZERO), or for kTinted dst x c/255 on RGB, dst alpha kept: C3D_AlphaBlend(ADD, ADD, ZERO,
+// CONSTANT_COLOR, ZERO, ONE) with C3D_BlendingColor (effect.h:8, :12; enums.h:247-257; the same factor on the three
+// channels, so the register's byte order does not matter). c = 8k, k = transfer_data & 0xff (SW's tint table
+// k << 3 of 256, low_level_textures.h:504, shapes.cpp:2006-2021); the front end refuses k >= 32 (rect_support), the
+// clamp to 255 is only a guard.
+unsigned blend_of(const DrawKey& key)
+{
+	if (key.cls != kTinted)
+		return 0;
+	const unsigned k = static_cast<unsigned>(key.transfer_data) & 0xFFu;
+	const unsigned c = 8 * k > 255 ? 255 : 8 * k;
+	return 0x100u | c;
+}
+
+void set_blend(unsigned blend)
+{
+	if (blend == s_f.blend)
+		return;
+	if (blend)
+	{
+		const u32 c = blend & 0xFFu;
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ZERO, GPU_CONSTANT_COLOR, GPU_ZERO, GPU_ONE);
+		C3D_BlendingColor(0xFF000000u | (c << 16) | (c << 8) | c);
+		s_f.tinted_used = true;
+	}
+	else
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	s_f.blend = blend;
+	++s_n.blend_sets;
+}
+
 // Program, AttrInfo and BufInfo back to what the present set (the file head). The program through the
 // real bind, so the record is untouched; then the check that the record is still the one re-bound.
 void restore_state()
@@ -307,6 +342,16 @@ void restore_state()
 		if (!shade_unbind_unit1())
 			++s_n.unit1_left_bound;
 		s_f.lit = false;
+	}
+	// M4: the world blend and blend colour 0 (C3D_Init's: base.o C3D_Init never stores the context's +0x100) after
+	// a frame that drew tinted rectangles; the present sets its own blend before every draw (present.cpp:339-340).
+	if (s_f.tinted_used)
+	{
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+		C3D_BlendingColor(0);
+		s_f.blend = 0;
+		s_f.tinted_used = false;
+		++s_n.blend_restores;
 	}
 }
 
@@ -349,7 +394,24 @@ ViewBegin view_skip(SkipReason reason)
 	return skipped(reason);
 }
 
-ViewBegin view_begin(int w, int h)
+bool view_play_ready(int w, int h, SkipReason* why)
+{
+	SkipReason r = SkipReason::Down;
+	bool ok = false;
+	if (s_off || !is_up() || release_pending() || !program_recorded())
+		r = SkipReason::Down;
+	else if (gate_closed())
+		r = SkipReason::Gate;
+	else if (!view_size_supported(w, h, 8))
+		r = SkipReason::Size;
+	else
+		ok = true;
+	if (!ok && why)
+		*why = r;
+	return ok;
+}
+
+ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 {
 	s_f = Frame();
 	// Design 5.6.1 a: no citro3d call without the GPU rights, while suspended or closing, or with a
@@ -429,8 +491,9 @@ ViewBegin view_begin(int w, int h)
 	texcache_frame_start(s_k);
 
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
-	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered".
-	if (!view_clear_target(0x00000000u))
+	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered" (M4: the tinted check's grey,
+	// 8.1).
+	if (!view_clear_target(clear_rgba))
 	{
 		frame_end(0, false, FrameKind::View);
 		note_view_frame();
@@ -531,6 +594,7 @@ bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* t
 		issue_pending();
 		if (s_f.discarded)
 			return false;
+		set_blend(blend_of(key));
 		if (tex)
 		{
 			void* t = nullptr;
@@ -581,10 +645,12 @@ void view_discard(DiscardReason reason)
 		discard(reason);
 }
 
-ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count)
+namespace {
+
+// view_end's common part: the pending draw, the restore, the flushes, the reserve test, then the readback (or the
+// discarded end). ok: view_argb() holds the frame.
+ViewEnd end_and_read_back()
 {
-	if (sentinel_count)
-		*sentinel_count = 0;
 	if (!s_f.open)
 		return ViewEnd{false, DiscardReason::Begin};
 	{
@@ -615,6 +681,18 @@ ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count)
 		break;
 	}
 	s_f.open = false;
+	return ViewEnd{true, DiscardReason::Unsupported};
+}
+
+} // namespace
+
+ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count)
+{
+	if (sentinel_count)
+		*sentinel_count = 0;
+	const ViewEnd e = end_and_read_back();
+	if (!e.ok)
+		return e;
 	const uint32_t* src = view_argb();
 	unsigned sentinel = 0;
 	for (int y = 0; y < s_f.h; ++y)
@@ -629,7 +707,41 @@ ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count)
 	}
 	if (sentinel_count)
 		*sentinel_count = sentinel;
-	return ViewEnd{true, DiscardReason::Unsupported};
+	return e;
+}
+
+ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied)
+{
+	if (sentinel_count)
+		*sentinel_count = 0;
+	if (copied)
+		*copied = 0;
+	const ViewEnd e = end_and_read_back();
+	if (!e.ok)
+		return e;
+	const uint32_t* src = view_argb();
+	unsigned sentinel = 0, n = 0;
+	for (int y = 0; y < s_f.h; ++y)
+	{
+		const uint32_t* row = src + static_cast<size_t>(y) * s_f.w;
+		uint32_t* dst = reinterpret_cast<uint32_t*>(rows[y]);
+		for (int x = 0; x < s_f.w; ++x)
+		{
+			const uint32_t p = row[x];
+			if (p == s_f.sentinel_argb)
+				++sentinel;
+			else if (p >> 24)
+			{
+				dst[x] = p | 0xFF000000u;   // 5.2: the form of SW's pixels
+				++n;
+			}
+		}
+	}
+	if (sentinel_count)
+		*sentinel_count = sentinel;
+	if (copied)
+		*copied = n;
+	return e;
 }
 
 void draw_free()
@@ -661,12 +773,13 @@ int draw_stats_text(char* buf, size_t size)
 	                " views=%u draws=%u polys=%u verts=%u idx=%u ring_hw_v=%u,%u ring_hw_i=%u,%u "
 	                "discards=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) skips=%u/%u/%u/%u(down/gate/size/pref) "
 	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u lut=%s lut_builds=%u "
-	                "tex1_restore_mismatch=%u tev1_not_init=%u unit1_left_bound=%u",
+	                "tex1_restore_mismatch=%u tev1_not_init=%u unit1_left_bound=%u blend_sets=%u blend_restores=%u",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
 	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.discards[5],
 	                n.skips[0], n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch, n.tex_bind_calls,
-	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init, n.unit1_left_bound);
+	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init, n.unit1_left_bound,
+	                n.blend_sets, n.blend_restores);
 }
 
 } // namespace back

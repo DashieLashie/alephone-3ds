@@ -81,9 +81,9 @@ TexSlot* TexCache::take_free_slot()
 	return victim;
 }
 
-void* TexCache::alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint32_t bytes,
-                                    uint32_t victims_used_below)
+void* TexCache::alloc_with_eviction(TexPool pool, const TexSlot& shape, uint32_t victims_used_below)
 {
+	const uint32_t bytes = shape.bytes;
 	if (bytes > cap_[pi(pool)])
 		return nullptr;
 	bool counted = false;
@@ -92,7 +92,7 @@ void* TexCache::alloc_with_eviction(TexPool pool, unsigned W, TexKind kind, uint
 	{
 		if (used_[pi(pool)] + bytes <= cap_[pi(pool)])
 		{
-			if (void* h = alloc_.alloc(pool, W, kind, bytes))
+			if (void* h = alloc_.alloc(pool, shape.S, shape.T, shape.key.kind, shape.key.clamp, bytes))
 			{
 				used_[pi(pool)] += bytes;
 				return h;
@@ -160,7 +160,7 @@ TexSlot* TexCache::lookup(const TexKey& key)
 	for (TexSlot& s : slots_)
 	{
 		if (s.state == TexSlotState::Live && s.generation == stats_.generation && s.key.bitmap == key.bitmap &&
-		    s.key.tables == key.tables && s.key.kind == key.kind)
+		    s.key.tables == key.tables && s.key.kind == key.kind && s.key.clamp == key.clamp)
 		{
 			s.last_used_frame = frame_;
 			++stats_.hits;
@@ -171,11 +171,15 @@ TexSlot* TexCache::lookup(const TexKey& key)
 	return nullptr;
 }
 
-TexSlot* TexCache::create(const TexKey& key, unsigned W)
+TexSlot* TexCache::create(const TexKey& key, unsigned S, unsigned T)
 {
-	const uint32_t bytes = static_cast<uint32_t>(tex_bytes(W, key.kind));
+	TexSlot shape;
+	shape.key = key;
+	shape.S = S;
+	shape.T = T;
+	shape.bytes = static_cast<uint32_t>(tex_bytes(S, T, key.kind));
 	TexSlot* s = take_free_slot();
-	void* h = s ? alloc_with_eviction(TexPool::Linear, W, key.kind, bytes, frame_) : nullptr;
+	void* h = s ? alloc_with_eviction(TexPool::Linear, shape, frame_) : nullptr;
 	if (!h)
 	{
 		++stats_.discards_tex;
@@ -185,12 +189,14 @@ TexSlot* TexCache::create(const TexKey& key, unsigned W)
 	s->state = TexSlotState::Live;
 	s->key = key;
 	s->generation = stats_.generation;
-	s->W = W;
-	s->bytes = bytes;
+	s->S = S;
+	s->T = T;
+	s->bytes = shape.bytes;
 	s->pool = TexPool::Linear;
 	s->handle = h;
 	s->last_used_frame = frame_;
 	s->seq = next_seq_++;
+	const uint32_t bytes = shape.bytes;
 	s->promote_pending = cfg_.promote_max > 0 && bytes <= cap_[pi(TexPool::Vram)];
 
 	++stats_.conversions;
@@ -231,7 +237,7 @@ bool TexCache::next_promotion(GxQueue& gx, bool command_buffer_not_empty, TexPro
 			return false;
 		}
 		// A VRAM slot is evicted for this one only if it was used less recently (no thrashing).
-		void* dst = alloc_with_eviction(TexPool::Vram, s->W, s->key.kind, s->bytes,
+		void* dst = alloc_with_eviction(TexPool::Vram, *s,
 		                                std::min(frame_, s->last_used_frame));
 		if (!dst)
 		{

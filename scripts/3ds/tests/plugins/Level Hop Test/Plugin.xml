@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M4 test (docs/3ds/CITRO3D_DESIGN.md, section 7, M4 specification, "Configs", m4-off.cfg): 10 s into the
+     first level played, the player is teleported to the next level, so play mode's "off until the next level" can be
+     seen to go off, come on again at the level change and go off again. Installed by run-azahar.sh --level-hop-test. -->
+<plugin name="Level Hop Test" version="1.0" description="3DS test: next level after 10 s" solo_lua="levelhop.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

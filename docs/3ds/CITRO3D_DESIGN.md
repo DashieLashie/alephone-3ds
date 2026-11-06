@@ -3005,7 +3005,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     because `dx = (W << 16)/w` truncates, often **a few 1/65536 below** an integer (e.g. 3.99998), so any bias of
     1/65536 or more flips those. Host test (W ∈ {8, 31, 64, 128, 200}, H ∈ {8, 81, 128, 200}, screen sizes 1..400,
     centred, clipped and flipped; 9.8 M pixels): ε = 0, 1, 2, 8 /131072 give 99.68 / **100.000** / 99.92 / 99.83 %
-    of SW's texels in exact arithmetic, 99.59 / **99.85** / 99.83 / 99.78 % in a float24 model (vertex attributes
+    of SW's texels in double arithmetic (the same with the corners stored as float32, as `Vertex` does and Azahar's
+    host-GPU backend then interpolates: round 2 minor 1), 99.59 / **99.85** / 99.83 / 99.78 % in a float24 model (vertex attributes
     rounded to a 17-bit significand, interpolated, floored). **UNVERIFIED** (round 1 finding 5): the float24 model is
     not PICA's documented behaviour and Azahar's host-GPU backend interpolates in float32, so only the console tells
     how close PICA comes (section 10); the neighbourhood gate absorbs the residual off-by-one texel. The
@@ -3084,7 +3085,9 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     **`Coverage::All`**: there is no band and no coverage mismatch (A's tinted pixels have alpha 0, so `TopByte` would
     call them uncovered); the compared (`common`) pixels are those where A **or** B differs from the clear in RGB, and
     the pixels both leave at the clear are counted apart (`empty`, printed; round 1 finding 2: otherwise an excluded
-    sky would pass as Δ 0). The neighbourhood minimum runs over A's 8 neighbours.
+    sky would pass as Δ 0). The neighbourhood minimum runs over A's 8 neighbours, but over A's **non-empty**
+    neighbours when only one side drew the pixel (round 2 minor 2: else a pixel C3D dropped next to an empty A pixel
+    would score Δ 0).
   - *Play mode* (1.5's row "milestone < M4 → `false` in play" goes; `front/frame.cpp` `render_frame`, after the
     diff-frame branch). A **play frame** is a world frame with `renderer c3d`, `mode readback`, `play 1` (new key,
     default 1), `textures 1` and `lit 1` (round 1 minor 7: no flat or unlit picture for the player) and the renderer
@@ -3166,8 +3169,9 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   - *`c3d-diff.py`.* `--colour` accepts `sprites,weapons,tinted,frame,play`; `--strict CLASS[,CLASS]` gates those
     classes on the strict figures (tinted); `--nonedge-pct` per run as today; frame/play lines have no band.
     **`--min-covered N`** (round 1 finding 1): per gated class, A's covered pixels summed over the run ≥ N **and** at
-    least `--min-checks` checks with `covered_A > 0`, so a run without sprites on screen fails instead of passing on
-    `common == 0` (used for sprites, weapons, tinted: N = 2 000 on a bench spot, 20 000 on a film). New `play LOG`
+    least `--min-covered-checks K` checks with `covered_A > 0`, so a run without sprites on screen fails instead of
+    passing on `common == 0` (used for sprites, weapons, tinted: N = 2 000 and K = 10 on a bench spot, N = 20 000 and
+    K = 100 on a film; K is not every check: a weapon is still being raised on the first frames of a level). New `play LOG`
     command: tabulates the `[c3d] play final` line; exit 1 on `sentinel` > 0, no C3D play frame, `--min-play-checks
     N` not met (so `play_check 30` producing no check fails), a gated `class=play` line failing the frame gate, or
     (with `--expect-offs N`) a different number of offs/ons.
@@ -4066,4 +4070,11 @@ frame kind (9); the copy pass tests the sentinel before alpha, and the tinted-ov
 `:858`, no `flash_over` for rectangles, tinted `k ≥ 32` unsupported (11). Also from the host tests (main session):
 `rect_bias` is in 1/131072 texel with default 1 (a bias ≥ 1/65536 flips SW's truncated positions just below
 integers), and `blend_left_tinted` is dropped (citro3d has no blend getter; the present diff is the proof).
+
+### M4 pre-implementation, round 2 (critic: APPROVE, 3 minor, folded)
+
+All round-1 findings checked fixed in the spec and in the early core/back code. Folded: (1) a float32-storage
+model row in the host test (the same agreement as double on the grid: 100.000 % at ε = 1/131072); (2)
+`Coverage::All`'s neighbourhood skips empty A-neighbours when only one side drew the pixel; (3) `blend_of`'s
+comment: the front end refuses tinted `k ≥ 32`, the clamp is a guard.
 

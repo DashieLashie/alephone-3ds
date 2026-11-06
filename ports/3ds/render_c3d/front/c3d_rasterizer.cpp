@@ -11,7 +11,9 @@
 #include "filter.h"
 #include "../back/draw.h"
 #include "../core/classify.h"
+#include "../core/rect.h"
 #include "../core/shade_lut.h"
+#include "../core/tex_convert.h"
 
 #include "player.h"
 
@@ -36,9 +38,88 @@ void C3dRasterizer::texture_horizontal_polygon(polygon_definition& p)
 	polygon(Entry::Horizontal, p);
 }
 
-void C3dRasterizer::texture_rectangle(rectangle_definition&)
+// M4 (design 7, M4 specification "Rectangles on the GPU", "texcoord1 of a rectangle", "Front end"): SW's set-up
+// (core/rect rect_setup), one quad over the box with SW's fixed-point texel positions at the pixel centres plus
+// rect_bias, w = 1, texcoord1 constant (the LUT's column 0 at SW's level L, exact).
+void C3dRasterizer::texture_rectangle(rectangle_definition& r)
 {
-	back::view_discard(back::DiscardReason::Unsupported);
+	if (!view_)
+	{
+		back::view_discard(back::DiscardReason::Unsupported);
+		return;
+	}
+	note_m();
+	const int32_t M = static_cast<int32_t>(view_->maximum_depth_intensity);
+	int L = 255;
+	if (rect_support(r, M, textures_, &L) != RectSupport::Ok)
+	{
+		++rect_unsupported_;
+		back::view_discard(back::DiscardReason::Unsupported);
+		return;
+	}
+	const bitmap_definition* tex = r.texture;
+	RectBox box;
+	if (!rect_setup(RectIn{r.x0, r.y0, r.x1, r.y1, r.clip_left, r.clip_right, r.clip_top, r.clip_bottom, tex->width,
+	                       tex->height, r.flip_horizontal},
+	                w_, h_, box))
+	{
+		++rect_skipped_;
+		return;
+	}
+	unsigned S = 0, T = 0;
+	rect_tex_size(tex->width, tex->height, true, S, T);   // rect_support checked it
+	const bool tinted = r.transfer_mode == _tinted_transfer;
+	const bool shadeless = !tinted && (r.flags & _SHADELESS_BIT) != 0;
+
+	back::TexSource ts;
+	ts.id = tex;
+	ts.bitmap.width = tex->width;
+	ts.bitmap.height = tex->height;
+	ts.bitmap.rows = const_cast<const uint8_t* const*>(reinterpret_cast<uint8_t* const*>(tex->row_addresses));
+	ts.bitmap.rle = true;
+	ts.tables = static_cast<const uint32_t*>(r.shading_tables);
+	ts.kind = tinted ? TexKind::Mask : (shadeless ? TexKind::ShadelessKeyed : TexKind::NormalKeyed);
+	ts.rect = true;
+
+	// texcoord1: the level L in the LUT's column 0 (shade_lut_value(0, j) == j); shadeless: LUT 255; tinted: any
+	// defined coordinate (the blend multiplies the source by zero). Without `lit` the second stage is off.
+	const bool lit = lit_;
+	const float u1 = shadeless ? 255.5f / 256.0f : 0.5f / 256.0f;
+	const float v1 = (static_cast<float>(tinted ? 0 : L) + 0.5f) / 256.0f;
+	const double eps = static_cast<double>(rect_bias_) / 131072.0;
+	const DrawKey key{classify(Entry::Rectangle, to_transfer(r.transfer_mode), foreground_), r.texture, r.shading_tables,
+	                  r.transfer_mode, r.transfer_data, static_cast<uint16_t>(r.flags & _SHADELESS_BIT)};
+	const int xs[4] = {box.cl, box.cr, box.cr, box.cl}, ys[4] = {box.ct, box.ct, box.cb, box.cb};
+	Vertex v[4];
+	for (int i = 0; i < 4; ++i)
+	{
+		Vertex& o = v[i];
+		o.x = static_cast<float>(xs[i]);
+		o.y = static_cast<float>(ys[i]);
+		o.w = 1.0f;
+		o.u0 = static_cast<float>((rect_s(box, ys[i]) + eps) / S);   // texels along the column (memory row)
+		o.v0 = static_cast<float>((rect_t(box, xs[i]) + eps) / T);   // the column (memory row index)
+		o.u1 = lit ? u1 : 0.0f;
+		o.v1 = lit ? v1 : 0.0f;
+		o.r = o.g = o.b = o.a = 0xFF;
+	}
+	if (back::view_polygon(v, 4, key, &ts))
+	{
+		++rects_;
+		tinted_rects_ += tinted;
+	}
+}
+
+void C3dRasterizer::note_m()
+{
+	if (m_noted_ || !view_)
+		return;
+	m_noted_ = true;
+	const int32_t M = static_cast<int32_t>(view_->maximum_depth_intensity);
+	if (M > NATURAL_LIGHT_INTENSITY)
+		++flash_checks_;
+	if (M > m_max_)
+		m_max_ = M;
 }
 
 void C3dRasterizer::texture_vertical_polygon(polygon_definition& p)
@@ -123,14 +204,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	const bool shadeless = (p.flags & _SHADELESS_BIT) != 0;
 	const bool lit = textures_ && lit_;
 	const int32_t M = static_cast<int32_t>(view_->maximum_depth_intensity);
-	if (!m_noted_)
-	{
-		m_noted_ = true;
-		if (M > NATURAL_LIGHT_INTENSITY)
-			++flash_checks_;
-		if (M > m_max_)
-			m_max_ = M;
-	}
+	note_m();
 	ShadePoly sp;
 	if (lit)
 	{
