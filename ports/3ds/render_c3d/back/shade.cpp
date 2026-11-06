@@ -24,7 +24,9 @@
 
 // back/context.cpp: -Wl,--wrap=C3D_TexBind. Unit 1 is bound only through the real one.
 extern "C" void __real_C3D_TexBind(int unitId, C3D_Tex* tex);
-// citro3d's context (base.o: a global object of 0x2d0 bytes in .bss; texture.o C3D_TexBind addresses it).
+// citro3d's context (base.o: a global object of 0x2d0 bytes in .bss; texture.o C3D_TexBind addresses it). Read
+// and written through casts to other types: sound only because citro3d is a separate archive and the port
+// builds without LTO (CLAUDE.md, "No LTO").
 extern "C" uint8_t __C3D_Context[];
 
 namespace a1_c3d {
@@ -60,10 +62,12 @@ void* shade_frame_start()
 	case State::Vram:
 		return &s_vram;
 	case State::Copying:
-		// frame_begin() returned: the frame that queued the copy has retired (design 0.3). Re-bind before the
-		// delete, so the context never points at freed memory (unit 1 is normally unbound between frames, but
-		// stays bound if the context layout check failed).
-		__real_C3D_TexBind(1, &s_vram);
+		// frame_begin() returned: the frame that queued the copy has retired (design 0.3). With the layout
+		// confirmed unit 1 is already NULL between frames (shade_unbind_unit1), and binding here would leave it
+		// bound into the present if view_begin discarded before its lit block (critic, post-review minor 1); in
+		// the fallback it still holds the linear copy, so it is re-bound before the delete.
+		if (s_layout != Layout::Ok)
+			__real_C3D_TexBind(1, &s_vram);
 		C3D_TexDelete(&s_lin);
 		s_state = State::Vram;
 		printf("[c3d] shade: LUT promoted to VRAM\n");

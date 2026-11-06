@@ -2835,8 +2835,9 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     depends on that layout: it is **checked at run time** the first time — right after the real
     `C3D_TexBind(1, lut)` the slot must hold `lut` with bit 0 and dirty bit 24 set, logged `[c3d] shade:
     citro3d context layout confirmed` — and if the check fails unit 1 keeps the LUT (counted
-    `unit1_left_bound`, must be 0). The Copying → Vram step still re-binds before deleting (it matters only
-    in that fallback). The `C3D_TexBind` wrap's record is extended from unit 0 to units 0-2
+    `unit1_left_bound`, must be 0). The Copying → Vram step re-binds before deleting **only in that
+    fallback** (with the layout confirmed unit 1 is already NULL, and a bind there would reach the present if
+    `view_begin` discarded before its lit block: critic, post-review minor 1). The `C3D_TexBind` wrap's record is extended from unit 0 to units 0-2
     (`back/context.cpp` `__wrap_C3D_TexBind`): a foreign unit-1 bind ever, or during a frame, counts
     `tex1_restore_mismatch` (must be 0: only `back/` binds unit 1, through the real function).
     (2) **TEV stage 1**, saved by copy in `view_begin` (`*C3D_GetTexEnv(1)`) and put back with
@@ -2921,8 +2922,9 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     (`--min-checks 20`) and both films (`--min-checks 200`) pass `--colour walls,floors --shading lit
     --nonedge-pct 0.1 --within 98 --tol 4 --mean 1.5`, `sentinel` 0, 0 discards; `m3-infra.cfg` on L0
     passes `--shading infra`; `m2-diff.cfg` (`fullbright 1`) on L0 still passes M2's gate on the M3 binary;
-    `m3-present-diff.cfg` (host GPU) `present_diff` 0 and the four restore counters 0 (`tex_restore_mismatch`, `tex1_restore_mismatch`, `tev1_not_init`,
-    `prog_restore_mismatch`); the LUT log lines
+    `m3-present-diff.cfg` (host GPU) `present_diff` 0 and the five restore counters 0 (`tex_restore_mismatch`, `tex1_restore_mismatch`, `tev1_not_init`,
+    `unit1_left_bound`, `prog_restore_mismatch`), with `[c3d] shade: citro3d context layout confirmed` in every
+    lit run (both backends); the LUT log lines
     (built once, promoted once, VRAM from then on); the re-measured reserve; M1's walls coverage
     (`m1-diff-walls.cfg` L0), M0's calibration (`m0-readback-cal.cfg`) and P1 scripts 07, 08, 13, 14, 22
     unharmed (host GPU); the OFF builds' `objdump -d` unchanged and `nm` clean. The lit counters of the
@@ -3741,4 +3743,14 @@ context layout of citro3d 1.7.1 checked at run time on the first lit frame, fall
 99.69 % / 0.11, floors 99.87 % / 0.15). The specification's "Binding and the state the present relies on" (1),
 the 0.3 rows and section 10 item 6 are revised accordingly; the whole acceptance series is re-run on the new
 binary.
+
+### M3 acceptance, unit 1 after the frame — review (critic: APPROVE, 2 minor; 2026-11-05)
+
+On `087ab93cb`, against libcitro3d.a 1.7.1: `__C3D_Context` is the one object `C3D_TexBind` and
+`C3Di_UpdateContext` use; offsets (flags +0x20, slot +0x11c) and dirty bit 24 match `C3D_TexBind`'s store; the
+flush rebuilds the unit mask from the non-null slots, so unit 1 is disabled at the present's first draw; no
+race (main thread only; the unit-0 re-bind's bit 23 and the unbind's bit 24 both survive). Folded: (1) the
+Copying → Vram re-bind only in the fallback (two early-discard paths of `view_begin` could otherwise leave
+unit 1 bound into the present); (2) `unit1_left_bound` and the layout line join the acceptance, re-run in
+full. Note added: the context access needs no LTO.
 
