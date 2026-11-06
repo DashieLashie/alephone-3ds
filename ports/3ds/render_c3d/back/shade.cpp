@@ -24,6 +24,8 @@
 
 // back/context.cpp: -Wl,--wrap=C3D_TexBind. Unit 1 is bound only through the real one.
 extern "C" void __real_C3D_TexBind(int unitId, C3D_Tex* tex);
+// citro3d's context (base.o: a global object of 0x2d0 bytes in .bss; texture.o C3D_TexBind addresses it).
+extern "C" uint8_t __C3D_Context[];
 
 namespace a1_c3d {
 namespace back {
@@ -32,11 +34,19 @@ namespace {
 
 enum class State : uint8_t { None, Linear, Copying, Vram };
 State s_state = State::None;
-// Static structs: citro3d keeps the pointer given to C3D_TexBind (texture.o C3D_TexBind+0x24-0x2c), and unit 1
-// keeps the LUT between frames (C3D_TexBind(1, NULL) would dereference NULL + 12, design 0.3).
+// Static structs: citro3d keeps the pointer given to C3D_TexBind (texture.o C3D_TexBind+0x24-0x2c).
 C3D_Tex s_lin, s_vram;
 unsigned s_builds = 0;
 bool s_logged_lin_fail = false, s_logged_vram_fail = false;
+
+// texture.o C3D_TexBind (citro3d 1.7.1): flags at +0x20 (bit 0 = active), tex[unit] at (unit + 70) * 4, dirty
+// bit 23 + unit.
+constexpr size_t kCtxFlags = 0x20, kCtxTex0 = 0x118;
+enum class Layout : uint8_t { Unknown, Ok, Bad };
+Layout s_layout = Layout::Unknown;
+
+uint32_t* ctx_flags() { return reinterpret_cast<uint32_t*>(__C3D_Context + kCtxFlags); }
+void** ctx_tex(int unit) { return reinterpret_cast<void**>(__C3D_Context + kCtxTex0 + 4 * unit); }
 
 } // namespace
 
@@ -51,7 +61,8 @@ void* shade_frame_start()
 		return &s_vram;
 	case State::Copying:
 		// frame_begin() returned: the frame that queued the copy has retired (design 0.3). Re-bind before the
-		// delete, so the context never points at freed memory.
+		// delete, so the context never points at freed memory (unit 1 is normally unbound between frames, but
+		// stays bound if the context layout check failed).
 		__real_C3D_TexBind(1, &s_vram);
 		C3D_TexDelete(&s_lin);
 		s_state = State::Vram;
@@ -114,6 +125,26 @@ void* shade_frame_start()
 	}
 	}
 	return nullptr;
+}
+
+void shade_check_bound(const void* lut)
+{
+	if (s_layout != Layout::Unknown)
+		return;
+	const bool ok = *ctx_tex(1) == lut && (*ctx_flags() & 1u) && (*ctx_flags() & (1u << 24));
+	s_layout = ok ? Layout::Ok : Layout::Bad;
+	printf("[c3d] shade: citro3d context layout %s (unit 1 slot at +0x%x); unit 1 is %s after each lit frame\n",
+	       ok ? "confirmed" : "NOT as expected", static_cast<unsigned>(kCtxTex0 + 4),
+	       ok ? "unbound" : "left bound to the LUT");
+}
+
+bool shade_unbind_unit1()
+{
+	if (s_layout != Layout::Ok || !(*ctx_flags() & 1u))
+		return false;
+	*ctx_tex(1) = nullptr;
+	*ctx_flags() |= 1u << 24;
+	return true;
 }
 
 void shade_free()

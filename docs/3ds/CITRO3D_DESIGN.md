@@ -76,7 +76,8 @@ bottom-screen modes" are stage 7 ([STAGE7.md](STAGE7.md)).
 | `C3D_Init` zeroes the three texture-unit pointers and sets **all six TEV stages** to `C3D_TexEnvInit`'s values (sources `PREVIOUS`, operands 0, `REPLACE`, colour `0xFFFFFFFF`, scale 1: a pass-through) | base.o `C3D_Init`+0x14c-0x154, +0x15c-0x178 (M3 spec, main session); `texenv.h`:33-43 |
 | The state flush enables texture unit *i* only if its pointer is non-null (a null unit is skipped, not dereferenced) and sets the unit mask + bit 16 (texture-cache clear) in the tex config | base.o `C3Di_UpdateContext`+0x1e0-0x230 (M3 spec) |
 | `C3D_SetTexEnv(id, env)` copies the 20-byte stage into the context and marks it dirty; `env == NULL` writes `C3D_TexEnvInit`'s values | texenv.o `C3D_SetTexEnv`+0x14-0x58, +0x5c-0x90 (M3 spec) |
-| **`C3D_TexBind(unit ≥ 1, NULL)` dereferences NULL + 12** (it reads `tex->param` to refuse non-2D types before storing; only unit 0 skips the test): once bound, units 1-2 can only be re-bound to another texture | texture.o `C3D_TexBind`+0x10-0x20 (M3 round 1, critic) |
+| **`C3D_TexBind(unit ≥ 1, NULL)` dereferences NULL + 12** (it reads `tex->param` to refuse non-2D types before storing; only unit 0 skips the test): through the API, units 1-2 can only be re-bound to another texture; M3 unbinds unit 1 with the store itself (`__C3D_Context` + 0x118 + 4·unit, dirty bit 23 + unit), checked at run time | texture.o `C3D_TexBind`+0x10-0x38 (M3 round 1, critic; M3 acceptance) |
+| An enabled texture unit whose texcoord the shader does not output samples an undefined coordinate: **Azahar's software backend segfaults** (`Pica::Texture::LookupTexelInTile`); the host-GPU backend does not; PICA UNVERIFIED | macOS crash reports, M3 acceptance |
 
 ### 0.4 Current numbers
 
@@ -2818,18 +2819,26 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     Both are configured **only after M2's SAVE block** (`draw.cpp`:413-415), at stage 0's place (:431), so the
     early returns of `view_begin` (:400-410, before the SAVE) leave nothing to restore; `lit 0` and
     `textures 0` frames neither touch nor save stage 1 or unit 1 (round 1 finding 4).
-    (1) **Unit 1 = the LUT, and it stays bound** (round 1 finding 1). `C3D_TexBind(unit ≥ 1, NULL)` reads
+    (1) **Unit 1 = the LUT during the frame, and no texture after it** (round 1 finding 1; revised after the
+    acceptance, Review log "M3 acceptance, unit 1 after the frame"). `C3D_TexBind(unit ≥ 1, NULL)` reads
     `tex->param` before storing (texture.o `C3D_TexBind`+0x10-0x20: `ldr ip, [r1, #12]`): a data abort on
-    hardware (Azahar returns 0 for the unmapped read and would hide it), and citro3d has no other way back to
-    a null unit 1. So `view_begin` binds the LUT to unit 1 through `__real_C3D_TexBind(1, …)` on every lit
-    frame and **`restore_state` leaves it**: from the first lit frame on, unit 1 holds the LUT until
-    `C3D_Fini` (the struct and its memory live until `shade_free()`, after `C3D_Fini`; the Copying → Vram step
-    re-binds before deleting). During the present unit 1 is then **enabled** (0.3: non-null → enabled) but
-    unread: the present's TEV stage 0 reads `TEXTURE0` only and stage 1 is a pass-through; the present's
-    shader has no texcoord1 output, so unit 1 samples an undefined coordinate whose value nobody uses (the
-    cost of the extra unit on PICA: section 10). The `C3D_TexBind` wrap's record is extended from unit 0 to
-    units 0-2 (`back/context.cpp` `__wrap_C3D_TexBind`): a foreign unit-1 bind ever, or during a frame,
-    counts `tex1_restore_mismatch` (must be 0: only `back/` binds unit 1, through the real function).
+    hardware (Azahar returns 0 for the unmapped read and would hide it). Leaving the LUT bound was the first
+    answer, but then unit 1 is **enabled during the present** while the present's shader has no texcoord1
+    output, so it samples an undefined coordinate: **Azahar's software backend segfaults on it**
+    (`Pica::Texture::LookupTexelInTile`, macOS crash reports of every software-backend run, right after the
+    first lit view frame; the host-GPU backend shows nothing), and on PICA the effect is unknown. So
+    `view_begin` binds the LUT through `__real_C3D_TexBind(1, …)` on every lit frame and `restore_state`
+    **unbinds it** with `shade_unbind_unit1()` (`back/shade.cpp`): the store `C3D_TexBind` makes for unit 0
+    (no type check: +0x24-0x38, the pointer at `__C3D_Context` + 0x118 + 4·unit, dirty bit 23 + unit), done
+    for unit 1 with NULL; the state flush then disables the unit (0.3), which is the state the present had
+    before M3. `__C3D_Context` is a global object of citro3d 1.7.1 (base.o `.bss`, 0x2d0 bytes), so the write
+    depends on that layout: it is **checked at run time** the first time — right after the real
+    `C3D_TexBind(1, lut)` the slot must hold `lut` with bit 0 and dirty bit 24 set, logged `[c3d] shade:
+    citro3d context layout confirmed` — and if the check fails unit 1 keeps the LUT (counted
+    `unit1_left_bound`, must be 0). The Copying → Vram step still re-binds before deleting (it matters only
+    in that fallback). The `C3D_TexBind` wrap's record is extended from unit 0 to units 0-2
+    (`back/context.cpp` `__wrap_C3D_TexBind`): a foreign unit-1 bind ever, or during a frame, counts
+    `tex1_restore_mismatch` (must be 0: only `back/` binds unit 1, through the real function).
     (2) **TEV stage 1**, saved by copy in `view_begin` (`*C3D_GetTexEnv(1)`) and put back with
     `C3D_SetTexEnv(1, &saved)` in `restore_state` (copy semantics, 0.3); the saved value is compared with
     the init value (0.3) and a difference counted `tev1_not_init` (must be 0: nothing else configures stage
@@ -3102,8 +3111,8 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    leaves out most exact ties SW covers; 0 non-tie mismatches.
    **M3:** PICA's modulate rounding against Azahar's `(a·b)/255` (the lit-colour prediction assumes it); the
    alpha ×2 clamp (`m3-alpha2.cfg`: self-luminous coverage intact = clamps); texcoord1 precision at LUT bin
-   edges and float24 at `u ≈ −2 048`; unit 1 left enabled (the LUT) during the present's draws: no visual
-   effect (`present_diff` 0) and no measurable cost in `present`.
+   edges and float24 at `u ≈ −2 048`; the unbinding of unit 1 after a lit frame on hardware (`[c3d] shade:
+   citro3d context layout confirmed`, `unit1_left_bound=0`, no hang at the next present).
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -3717,3 +3726,19 @@ bound is safe for the present and `view.cpp`'s calibration (neither reads unit 1
 the ambient after the `fullbright` rewrite and skips shadeless polygons; `c3d_ambient_wrap` is printed apart
 from `excluded`. Console-only (section 10 item 6): the ×2 clamp, PICA's modulate rounding, texcoord1
 precision, unit 1 enabled during the present (no visual effect, no cost, no hang).
+
+### M3 acceptance, unit 1 after the frame (coordinator, 2026-11-05; a design change after the code review)
+
+The first acceptance series ran the M3 binary as reviewed (`eff8931b5`): every host-GPU run passed, but every
+**software-backend** run stopped after the first lit check: Azahar itself died (no timeout, no exit line;
+macOS crash reports: `EXC_BAD_ACCESS` in `Pica::Texture::LookupTexelInTile` on a `SwRenderer` worker). Cause:
+with the LUT left bound, unit 1 is enabled during the present, whose shader outputs no texcoord1, so the
+unit samples an undefined coordinate. (The same series also lost runs to a full disk, from outside the
+session; those were re-run.) Fix: `restore_state` unbinds unit 1 again with the store `C3D_TexBind` makes for
+unit 0 (`back/shade.cpp` `shade_unbind_unit1`; the API's own NULL path for unit ≥ 1 reads NULL + 12), the
+context layout of citro3d 1.7.1 checked at run time on the first lit frame, fallback = leave it bound
+(`unit1_left_bound`). With it, `m3-diff.cfg` L0 under the software backend runs to the end and passes (walls
+99.69 % / 0.11, floors 99.87 % / 0.15). The specification's "Binding and the state the present relies on" (1),
+the 0.3 rows and section 10 item 6 are revised accordingly; the whole acceptance series is re-run on the new
+binary.
+

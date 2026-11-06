@@ -111,7 +111,7 @@ struct Counters
 	unsigned skips[static_cast<int>(SkipReason::kCount)] = {};
 	unsigned prog_restore_mismatch = 0;
 	unsigned tex_bind_calls = 0, tex_restore_mismatch = 0;
-	unsigned tex1_restore_mismatch = 0, tev1_not_init = 0;   // M3
+	unsigned tex1_restore_mismatch = 0, tev1_not_init = 0, unit1_left_bound = 0;   // M3
 } s_n;
 
 // --- helpers ---
@@ -292,8 +292,9 @@ void restore_state()
 			++s_n.tex_restore_mismatch;
 	}
 	// M3 "Binding and the state the present relies on": TEV stage 1 back (copy semantics: texenv.o
-	// C3D_SetTexEnv+0x14-0x58), checked against C3D_Init's pass-through (base.o C3D_Init+0x15c-0x178). Unit 1
-	// keeps the LUT (C3D_TexBind(1, NULL) would dereference NULL + 12); no one but back/ may bind it.
+	// C3D_SetTexEnv+0x14-0x58), checked against C3D_Init's pass-through (base.o C3D_Init+0x15c-0x178); unit 1
+	// back to no texture (shade_unbind_unit1: C3D_TexBind(1, NULL) would dereference NULL + 12); no one but
+	// back/ may bind it.
 	if (s_f.lit)
 	{
 		C3D_SetTexEnv(1, &s_saved_env1);
@@ -303,6 +304,8 @@ void restore_state()
 			++s_n.tev1_not_init;
 		if (tex1_foreign_binds() != 0)
 			++s_n.tex1_restore_mismatch;
+		if (!shade_unbind_unit1())
+			++s_n.unit1_left_bound;
 		s_f.lit = false;
 	}
 }
@@ -487,9 +490,10 @@ ViewBegin view_begin(int w, int h)
 		C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 		C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
 		C3D_TexEnvFunc(env1, C3D_Alpha, GPU_REPLACE);
-		// Unit 1 = the LUT (texture unit 1 samples texcoord1: normal_mapping example, design 0.3); it stays bound
-		// after the frame.
+		// Unit 1 = the LUT (texture unit 1 samples texcoord1: normal_mapping example, design 0.3); unbound again
+		// by restore_state.
 		__real_C3D_TexBind(1, static_cast<C3D_Tex*>(s_f.lut));
+		shade_check_bound(s_f.lut);
 		s_f.lit = true;
 	}
 	else
@@ -657,12 +661,12 @@ int draw_stats_text(char* buf, size_t size)
 	                " views=%u draws=%u polys=%u verts=%u idx=%u ring_hw_v=%u,%u ring_hw_i=%u,%u "
 	                "discards=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) skips=%u/%u/%u/%u(down/gate/size/pref) "
 	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u lut=%s lut_builds=%u "
-	                "tex1_restore_mismatch=%u tev1_not_init=%u",
+	                "tex1_restore_mismatch=%u tev1_not_init=%u unit1_left_bound=%u",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
 	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.discards[5],
 	                n.skips[0], n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch, n.tex_bind_calls,
-	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init);
+	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init, n.unit1_left_bound);
 }
 
 } // namespace back

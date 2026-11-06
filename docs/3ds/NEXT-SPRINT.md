@@ -1582,3 +1582,50 @@ only = the conversion flush; a texture wrong from the frame after its promotion 
 (arguments: `texture.o` `C3D_TexLoadImage`); a crash or hang at a promotion = the GX queue order.
 Record the log and stop; M3 waits for the fix.
 
+
+## M3 console check, short version (15-25 min; when the user is at the console)
+
+**Not run yet.** Written 2026-11-05 for `port-stage10-M3`. Azahar cannot answer two of M3's questions (design
+section 10 item 6, "M3:"): **PICA's TEV rounding** (the lit colours assume Azahar's `(a·b)/255`; host prediction
+≤ 2 per channel, mean ≤ 0.47) and **the TEV alpha ×2 clamp** (`alpha_x2 1`; not M3's default, but M5's static
+will rely on it). It is also the first hardware run of **unit 1's unbinding after a lit frame** (a direct store
+into citro3d's context, checked at run time: `C3D_TexBind(1, NULL)` would dereference NULL + 12 on hardware,
+design 0.3; with unit 1 left enabled, Azahar's software backend segfaults at the next present). Setup, driving and the `$H/m1/run.sh` helper as in "M1
+console check, short version" (HUD + Map; `cmake --build build-3ds-c3d-prof` at `port-stage10-M3` or later).
+**Press A at once at the menu** (its demo otherwise takes the first diff frames; M2 console check). On L0
+compare checks **at equal coverage** (L0's walls coverage cycles on the console: M2 console check).
+
+**1. Lit diff on L0** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf` and
+`scripts/3ds/tests/c3d/m3-diff.cfg` as `/3ds/alephone/debug-c3d`. Y in the launcher,
+`$H/m1/run.sh build-3ds-c3d-prof m3s-l0`; A twice; the game quits after the BENCH line. Then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m3s-l0.txt --colour walls,floors --shading lit --nonedge-pct 0.1 --within 98 --tol 4 --mean 1.5 --min-checks 20`.
+**Pass:** exit 0, `sentinel=0` on every line, 0 discards, `[c3d] shade: LUT built (linear, 65536 B)` then
+`[c3d] shade: LUT promoted to VRAM` once each, `[c3d] shade: citro3d context layout confirmed`, and in
+`[c3d] cmdbuf final` `tex_restore_mismatch=0 tex1_restore_mismatch=0 tev1_not_init=0 unit1_left_bound=0
+prog_restore_mismatch=0`, `view_frame_words=1304 draw_words=282
+readback_words=10` (command words are deterministic: a difference means something real). Azahar (host GPU)
+per check: walls `covered=40140/40137 cov_mismatch=7/0 ties=22 tie_mismatch=7 within_nb=99.69% mean_nb=0.21
+max_nb=60`, floors `covered=52624/52627 cov_mismatch=9/0 ties=35 tie_mismatch=9 within_nb=99.87% mean_nb=0.71
+max_nb=21` (M2 full bright on the same view: `mean_nb` 0.05 / 0.02, so lighting adds 0.16 / 0.69). **Reading
+it:** the console's `mean_nb` against Azahar's measures PICA's rounding (a mean well above 1.5, or `within_nb`
+under 98 % while coverage is fine, = a different multiply: record and stop); coverage holes inside polygons =
+the alpha test (should not happen with scale 1).
+
+**2. The ×2 clamp** (~5 min). ftpd: `scripts/3ds/tests/c3d/m3-alpha2.cfg` as `debug-c3d` (`debug-perf` stays);
+`$H/m1/run.sh build-3ds-c3d-prof m3s-alpha2`; the same `c3d-diff.py` command. **Clamps** (Azahar's answer on
+both backends): the same figures as launch 1 at equal coverage, `non-edge 0`. **Wraps:** non-edge coverage
+mismatches (self-luminous texels, A 128 × 2 → 0, dropped by the alpha test): exit 1 on `non-edge`. Either way
+M3 is unaffected (its default is scale 1); record which, for M5 (design 4.3 static).
+
+**3. Optional, dark areas and the weapon flash: the L08 film** (~6 min). ftpd: put
+`tests/replays/Marathon 2/Tooncinator Films/M2 L08 Nuke and Pave.682.filA` as `/3ds/alephone/c3d-film.filA`,
+`scripts/3ds/tests/c3d/m3-film-l08.cfg` as `debug-c3d`, and **delete `debug-perf`**;
+`$H/m1/run.sh build-3ds-c3d-prof m3s-l08` (the film starts by itself and the game quits at its end); the same
+command with `--min-checks 200`. **Pass:** exit 0; the summary's `c3d_flash_checks` > 0 (Azahar: 8,
+`c3d_m_max=81920`). Azahar: walls 99.69 % / mean 0.60, floors 99.52 % / 0.81, 0 ring refusals.
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d` and `c3d-film.filA`. **Record** in
+`PERF.md` ("Stage 10 M3 — console, short check") per launch the class table, the per-check figures at equal
+coverage, the `[c3d] cmdbuf final` line and the lit counters; then the design's M3 status, section 10 item 6
+("M3:") and the Review log. Note any hang at a present or at the exit after a lit frame (none expected:
+unit 1 is disabled again before the present).
