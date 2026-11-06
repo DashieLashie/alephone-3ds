@@ -1173,12 +1173,10 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    samples FCRAM and VRAM textures together (bisected; design Review log "M3 acceptance, software-backend
    films"): under it the films run all-linear (`gxq_budget 3`) and pass. **Next (user decision 2026-11-05):
    M4.** Console: "M3 console check, short version" at the end of this file.
-   **Pending Azahar test (user decision 2026-11-06): negative ambient.** Neither film put a negatively lit
-   polygon on screen (`c3d_neg_ambient_polys` 0; the host test covers the LUT lookup, > 100 cases exact).
-   Close it with a solo Lua plugin that sets light states' `intensity` below 0 (`Lua/lua_map.cpp`:2723,
-   `Lua_Light_State_Set_Intensity`; floors/ceilings only, walls pin their ambient, design M3 "SW model")
-   and one lit L0 diff per Azahar backend: pass = M3's lit gate with `c3d_neg_ambient_polys` > 0 and
-   `c3d_ambient_wrap` 0. Scheduled as piece 0 of `KICKOFF_M4.md`.
+   **Negative ambient: passed in Azahar (2026-11-06, piece 0 of `KICKOFF_M4.md`).** A solo Lua plugin
+   (`Negative Light Test`, `run-azahar.sh --negative-light-test`) puts every light state at −0.5; one lit L0
+   diff per backend (`m3-neglight.cfg`): 604 negatively lit polygons drawn, 0 wraps, M3's lit gate passes on
+   both (`PERF.md` "Stage 10 M3", "Negative ambient").
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.

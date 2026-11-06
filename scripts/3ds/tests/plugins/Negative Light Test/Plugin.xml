@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M3 test (docs/3ds/CITRO3D_DESIGN.md, section 7, M3 specification, negative ambient): every state of
+     every light gets intensity -0.5, so floors and ceilings are lit with a negative ambient (walls pin theirs to
+     [0, 1], RenderRasterize.cpp:598-599). Installed by scripts/3ds/run-azahar.sh --negative-light-test. -->
+<plugin name="Negative Light Test" version="1.0" description="3DS test: every light at intensity -0.5" solo_lua="neglight.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

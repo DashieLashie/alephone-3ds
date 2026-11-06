@@ -1603,6 +1603,15 @@ dim floors). **Not reached:** negative ambient (`c3d_neg_ambient_polys` and `c3d
 the L08 light never went negative while in view); flash checks 0 on the L01 film in this run (2 in an earlier
 one: film timing differs between runs).
 
+**Negative ambient (2026-11-06, piece 0 of `KICKOFF_M4.md`, the M3 binary).** A solo Lua plugin
+(`scripts/3ds/tests/plugins/Negative Light Test/`, `run-azahar.sh --negative-light-test`) sets every state of
+every light to intensity −0.5 and toggles each light once at `init`, so the new state is entered at once.
+`m3-neglight.cfg` (= `m3-diff.cfg`) on L0, 20 checks: **`c3d_neg_ambient_polys` 604 of 1 320 lit polygons,
+`c3d_ambient_wrap` 0** (−0.5 gives SW index 128: drawn, not excluded), M3's lit gate passes on both backends:
+host GPU walls 99.94 % / `mean_nb` 0.15, floors 99.88 % / 0.67; software backend 99.94 % / 0.02, 99.86 % / 0.04;
+0 non-edge mismatches, the layout line and the three unit-1/TEV counters 0 in both runs. (Walls pin their
+ambient to [0, 1], so the negatively lit polygons are floors and ceilings, as the specification says.)
+
 **Ring sizing.** The L08 film's non-convex floors (M2's span quads, up to 140 per polygon) overflowed the
 1 024-vertex ring half in 2 checks (`discarded (ring)`; high-water of the accepted checks 973 / 1 467): the
 defaults are now **2 048 vertices / 4 096 indices** per half (+72 KiB linear); with them 0 refusals, high-water

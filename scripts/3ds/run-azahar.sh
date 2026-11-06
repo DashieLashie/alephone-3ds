@@ -43,6 +43,8 @@
 #                  level's first terminal 3 s in; docs/3ds/STAGE7.md); without it it is removed
 #   --infravision-test  install scripts/3ds/tests/plugins/Infravision Test (solo Lua: infravision
 #                  from the level's start; docs/3ds/CITRO3D_DESIGN.md, M3); without it it is removed
+#   --negative-light-test  install scripts/3ds/tests/plugins/Negative Light Test (solo Lua: every light
+#                  state at intensity -0.5; CITRO3D_DESIGN.md, M3); without it it is removed
 #   --load-test    install scripts/3ds/tests/plugins/Load Test (solo Lua: saves 5 s into
 #                  level 0, teleports to level 1 at 10 s, saves again 5 s into level 1;
 #                  docs/3ds/NEXT-SPRINT.md B1); without it it is removed
@@ -92,6 +94,7 @@ decoders=0
 level_music=0
 terminal_test=0
 infravision_test=0
+negative_light_test=0
 load_test=0
 perf_level=
 fatal_file=
@@ -113,6 +116,7 @@ while [ $# -gt 0 ]; do
 		--level-music) level_music=1 ;;
 		--terminal-test) terminal_test=1 ;;
 		--infravision-test) infravision_test=1 ;;
+		--negative-light-test) negative_light_test=1 ;;
 		--load-test) load_test=1 ;;
 		--fatal) shift; fatal_file=${1:?--fatal needs a file} ;;
 		--perf) shift; perf_level=${1:?--perf needs a level number} ;;
@@ -283,6 +287,12 @@ if [ "$copy_data" = 1 ]; then
 	if [ "$infravision_test" = 1 ]; then
 		cp -R "$repo/scripts/3ds/tests/plugins/Infravision Test" "$plugin"
 		echo "run-azahar: installed the Infravision Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Negative Light Test"
+	rm -rf "$plugin"
+	if [ "$negative_light_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Negative Light Test" "$plugin"
+		echo "run-azahar: installed the Negative Light Test plugin"
 	fi
 	plugin="$userdir/$name/Plugins/Load Test"
 	rm -rf "$plugin"
