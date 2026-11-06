@@ -402,7 +402,7 @@ bool view_play_ready(int w, int h, SkipReason* why)
 		r = SkipReason::Down;
 	else if (gate_closed())
 		r = SkipReason::Gate;
-	else if (!view_size_supported(w, h, 8))
+	else if (!view_size_supported(w, h, 8) || view_size_failed(w, h))
 		r = SkipReason::Size;
 	else
 		ok = true;

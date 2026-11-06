@@ -58,7 +58,8 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0);
 ViewBegin view_skip(SkipReason reason);
 // M4 play frames (design 7, M4 specification "Play mode" (0)): view_begin's cheap refusals, tested before the
 // front end records anything: false and *why = Down (C3D side off, citro3d not up, a release pending, no program
-// recorded), Gate (the gate is closed) or Size (view_size_supported refuses w x h). Counts nothing.
+// recorded), Gate (the gate is closed) or Size (view_size_supported refuses w x h, or view_ensure failed for it
+// before). Counts nothing.
 bool view_play_ready(int w, int h, SkipReason* why);
 
 // Appends one accepted polygon (3..16 vertices, already through core's accept_polygon, positions in view

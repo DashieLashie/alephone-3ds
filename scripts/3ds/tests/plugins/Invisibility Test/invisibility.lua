@@ -19,7 +19,11 @@ local function spawn(dist, side, kind)
 	local y = p.y + dist * math.sin(a) + side * math.cos(a)
 	local poly = p.polygon:find_polygon(p.x, p.y, x, y)
 	if poly then
-		Monsters.new(x, y, poly.floor.height + 0.25, poly, kind)
+		local m = Monsters.new(x, y, poly.floor.height + 0.25, poly, kind)
+		if m then
+			m.blind = true   -- they must not fire at the player (critic M4 code review, minor 10)
+			m.deaf = true
+		end
 	end
 end
 

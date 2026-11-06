@@ -3093,8 +3093,10 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     default 1), `textures 1` and `lit 1` (round 1 minor 7: no flat or unlit picture for the player) and the renderer
     not "off until the next level". In order:
     (0) *Cheap refusals first* (round 1 minor 8): `software_alpha_blending` not off (`pref`), citro3d not up or a
-    release pending (`down`), the gate closed (`gate`), a view size `view_size_supported` refuses (`size`, e.g.
-    Classic's 640 × 480) → SW draws the frame directly (`draw(ctx, sw)`, no recording), counted `skip:<reason>`.
+    release pending (`down`), the gate closed (`gate`), a view size `view_size_supported` refuses or `view_ensure`
+    failed for before (`size`) → SW draws the frame directly (`draw(ctx, sw)`, no recording), counted
+    `skip:<reason>`. Classic's world view (640 × 320, `PERF.md` "Resolution", 204 800 pixels) **is** supported (a
+    correction, code review minor 3): play runs there too, and the acceptance has a Classic `play_check` run.
     (1) *Record*: `s_recorder.clear()`, `forward = nullptr`, `draw(ctx, &s_recorder)` — the one traversal. On
     overflow (8 192 events; M0's null maxima are 387 vertices, 89 polygons, 18 rectangles) the frame is drawn by a
     second traversal `draw(ctx, sw)`, counted `overflow`: the only side effect of a traversal is the weapon
@@ -3159,6 +3161,10 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     N` (0..65536, 1/131072 texel; default 1). Printed in the `[c3d] debug-c3d:` line. **The M1-M3 configs get `play
     0`** (round 1 minor 7), so their re-runs on the M4 binary are the regressions they were; play is exercised by the
     `m4-*` configs.
+  - *The diff configs* (`m4-diff`, `m4-tinted`, `m4-film*`) carry **`play 0`** (code review minor 6): their
+    non-diff frames stay SW, so a diff log shows only checks; play mode has its own runs (`m4-play*.cfg`, incl.
+    `m4-play-film.cfg` over the L01 film). **Sprites are gated on L0 and the films only**: the L6 and L20 bench
+    spots have no sprite on screen (`--min-covered` refuses an empty class there), so those gate weapons and frame.
   - *Configs* (every software-backend run with VRAM promotions needs `gxq_budget 3`, the Azahar fault of M3; each
     `m4-*.cfg` says so): `m4-diff.cfg` (`diff 1`, 20 checks, `classes sprites,weapons,frame`, lit, `diff_tol 4`),
     `m4-tinted.cfg` (`diff 15`, `classes tinted,frame`, `diff_tol 3`: with the player invisible every weapon is
@@ -3173,7 +3179,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     passing on `common == 0` (used for sprites, weapons, tinted: N = 2 000 and K = 10 on a bench spot, N = 20 000 and
     K = 100 on a film; K is not every check: a weapon is still being raised on the first frames of a level). New `play LOG`
     command: tabulates the `[c3d] play final` line; exit 1 on `sentinel` > 0, no C3D play frame, `--min-play-checks
-    N` not met (so `play_check 30` producing no check fails), a gated `class=play` line failing the frame gate, or
+    N` not met (so `play_check 30` producing no check fails), **any** `class=play` line under the frame gate (each
+    check on its own; the pooled figure is printed: code review finding 1), or
     (with `--expect-offs N`) a different number of offs/ons.
   - *Host tests* (8.4): RLE conversion (every kind, padding, `first`/`last` at 0 and `H`, an empty column, tiling of
     a non-square image vs tex3ds byte for byte when present); `rect_setup` vs the transliterated SW clip on a grid
@@ -3210,6 +3217,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   ≤ 1/channel; ineligible frames (5.4) readback; frame-indexed test in direct
   mode shows N or N−1 @30/@60 with `alt_load`; GX high-water ≤ 24; scripts
   07, 13, 14 pass. Gate **G3-a**.
+- Prerequisite from M4 (commit review minor 4): the texture cache's lookup scans all 512 slots per new draw key
+  (`core/texcache.cpp` `lookup`); a hash on `(bitmap, tables)` before direct mode, measured.
 
 ### M7 — 2x2 supersampling (optional, after G3)
 - View at 800x480 (texture 1024x512), halved by `GX_TRANSFER_SCALE_XY`
@@ -4077,4 +4086,19 @@ All round-1 findings checked fixed in the spec and in the early core/back code. 
 model row in the host test (the same agreement as double on the grid: 100.000 % at ε = 1/131072); (2)
 `Coverage::All`'s neighbourhood skips empty A-neighbours when only one side drew the pixel; (3) `blend_of`'s
 comment: the front end refuses tinted `k ≥ 32`, the clamp is a guard.
+
+### M4 commit review (critic: REVISE, 1 major, 9 minor; applied before the acceptance)
+
+On `f389f85a5`. No renderer defect: record/scan/replay, the dest handling, the blend switch and its restore on
+every path, `rect_setup` and the tint factor checked against the sources. (1, major) `c3d-diff.py play` pooled the
+play checks: each check is now gated on its own (a synthetic log with one bad check among 95 fails). Minors: (2)
+`--expect-offs` replaces the "a C3D frame" rule by "c3d 0, cmdbuf discards > 0"; (3) Classic's 640 × 320 world view
+is supported, not refused: a Classic `play_check` run is added; (4) the 512-slot linear lookup is not measured: a
+hash on `(bitmap, tables)` is an M6 prerequisite (recorded there); (5) per-class gates are separate invocations
+(the series and `PERF.md` give the exact lines); (6) the diff configs get `play 0`, play has its own runs incl. a
+film; (7) the "M4 console check, short version" is written with the record; (8) the play check reads `dest` through
+`row_addresses[y]`, as the copy writes; (9) `copied` and `empty_frames` in `[c3d] play final`, and
+`view_play_ready` refuses a size `view_ensure` failed for; (10) the Invisibility Test's compilers are made blind and
+deaf. The first acceptance series was stopped (four runs in) and re-run in full on the fixed binary; its L6/L20
+sprite gates had failed on `--min-covered` (no sprite on those bench spots), which the tooling is meant to catch.
 

@@ -27,6 +27,9 @@ bool view_size_supported(int w, int h, int min_side);
 // deleted and made again) OUT of frame: C3D_RenderTargetDelete svcBreaks inside one. False: out of
 // memory (logged once; the size is not retried).
 bool view_ensure(int w, int h);
+// M4: the size view_ensure could not make (out of memory) and does not retry; play frames are refused before
+// recording (view_play_ready; critic M4 code review, minor 9).
+bool view_size_failed(int w, int h);
 // The target of the last successful view_ensure(); owned by citro3d's context.
 C3D_RenderTarget* view_target();
 // Fills the staging of the current size with `rgba` (0xRRGGBBAA) and flushes it (out of frame, before

@@ -470,8 +470,8 @@ struct PlayState
 	unsigned discard[kDiscardCount] = {};
 	unsigned skip[kSkipCount] = {};
 	unsigned run = 0, max_run = 0, offs = 0, ons = 0;
-	unsigned long long sentinel = 0;
-	unsigned checks = 0;
+	unsigned long long sentinel = 0, copied = 0;
+	unsigned checks = 0, empty_frames = 0;   // empty: C3D play frames that copied no pixel
 	bool off = false;
 	uint32_t off_gen = 0;
 	bool logged_first = false;
@@ -508,10 +508,12 @@ int play_counts_text(char* buf, size_t size)
 	return snprintf(buf, size,
 	                "frames=%u c3d=%u sw=%u overflow=%u off_frames=%u scan=%u/%u/%u/%u/%u/%u"
 	                "(landscape/static/other/bitmap/wrap/flash) discard=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) "
-	                "skip=%u/%u/%u/%u/%u(down/gate/size/pref/config) offs=%u ons=%u max_run=%u sentinel=%llu play_checks=%u",
+	                "skip=%u/%u/%u/%u/%u(down/gate/size/pref/config) offs=%u ons=%u max_run=%u sentinel=%llu play_checks=%u "
+	                "copied=%llu empty_frames=%u",
 	                p.frames, p.c3d, p.sw, p.overflow, p.off_frames, p.scan[0], p.scan[1], p.scan[2], p.scan[3], p.scan[4],
 	                p.scan[5], p.discard[0], p.discard[1], p.discard[2], p.discard[3], p.discard[4], p.discard[5],
-	                p.skip[0], p.skip[1], p.skip[2], p.skip[3], p.skip[4], p.offs, p.ons, p.max_run, p.sentinel, p.checks);
+	                p.skip[0], p.skip[1], p.skip[2], p.skip[3], p.skip[4], p.offs, p.ons, p.max_run, p.sentinel, p.checks,
+	                p.copied, p.empty_frames);
 }
 
 // Design 7, M4 "Play mode". True: the frame is in dest (C3D or the SW replay). False: the caller draws it in SW
@@ -596,13 +598,12 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			return true;
 		}
 		// play_check: A starts as dest's previous frame, as dest does.
+		// Through row_addresses[y], as view_end_play writes (critic M4 code review, minor 8).
 		if (check)
 		{
 			s_a.make(w, h);
-			const int pitch = dest->bytes_per_row / 4;
 			for (int y = 0; y < h; ++y)
-				memcpy(&s_a.pixels[static_cast<size_t>(y) * w], reinterpret_cast<const uint32_t*>(dest->row_addresses[0]) + static_cast<size_t>(y) * pitch,
-				       static_cast<size_t>(w) * 4);
+				memcpy(&s_a.pixels[static_cast<size_t>(y) * w], dest->row_addresses[y], static_cast<size_t>(w) * 4);
 		}
 		// (3) the C3D frame, read back into dest.
 		vb = back::view_begin(w, h, 0);
@@ -636,6 +637,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	++P.c3d;
 	P.run = 0;
 	P.sentinel += sentinel;
+	P.copied += copied;
+	P.empty_frames += copied == 0;
 	if (check)
 	{
 		// SW's replay over the same previous frame, against what the play path left in dest.
@@ -644,8 +647,10 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		s_recorder.replay(sw);
 		swr->screen = dest;
 		texture_random_seed() = s0;   // as after SW's own traversal: the replay above consumed what it did
-		const Image32 d{reinterpret_cast<const uint32_t*>(dest->row_addresses[0]), w, h, dest->bytes_per_row / 4};
-		const DiffResult r = diff_images(s_a.image(), d, Coverage::All, 0, static_cast<int>(cfg.diff_tol));
+		s_b.make(w, h);
+		for (int y = 0; y < h; ++y)
+			memcpy(&s_b.pixels[static_cast<size_t>(y) * w], dest->row_addresses[y], static_cast<size_t>(w) * 4);
+		const DiffResult r = diff_images(s_a.image(), s_b.image(), Coverage::All, 0, static_cast<int>(cfg.diff_tol));
 		printf("%s\n", diff_line_c3d(s_frame, "play", r, static_cast<int>(cfg.diff_tol), 0, sentinel).c_str());
 		++P.checks;
 	}

@@ -47,9 +47,10 @@
 #   python3 -I scripts/3ds/tests/c3d-diff.py play LOG [--min-play-checks N] [--expect-offs N] [--within P --tol T]
 #       M4 play mode (design 7 "M4 specification", "c3d-diff.py"): prints the "[c3d] play final" line and the
 #       "DIFF ... class=play" checks; exit 1 if the final line is missing, c3d=0 (no C3D play frame), sentinel > 0,
-#       fewer than N play checks (default 0), the play checks' neighbourhood within (A's covered or B's drawn pixels,
-#       Coverage::All) under P % at Delta <= T (defaults 97, 4; the DIFF lines' "(tol T)" must equal --tol), or, with
-#       --expect-offs N, offs != N or ons != N - 1 (a run that ends off).
+#       fewer than N play checks (default 0), any play check's neighbourhood within (A's covered or B's drawn pixels,
+#       Coverage::All) under P % at Delta <= T (defaults 97, 4; each check on its own, the pooled figure is printed;
+#       the DIFF lines' "(tol T)" must equal --tol), or, with --expect-offs N, offs != N or ons != N - 1 (a run that
+#       ends off); with --expect-offs the "C3D frame" rule becomes c3d == 0 and cmdbuf discards > 0 (m4-off.cfg).
 #
 #   python3 -I scripts/3ds/tests/c3d-diff.py bmp A.bmp B.bmp [--class C]
 #       Reads two 32-bit BMPs (c3d-diff-<frame>-<class>-{sw,c3d}.bmp) and recomputes the metric of
@@ -413,8 +414,15 @@ def cmd_play(path, min_checks, expect_offs, within, tol):
             return int(kv.get(k, "0"))
         except ValueError:
             return 0
-    if final and num("c3d") <= 0:
-        problems.append("no C3D play frame (c3d=%d)" % num("c3d"))
+    if expect_offs is None:
+        if final and num("c3d") <= 0:
+            problems.append("no C3D play frame (c3d=%d)" % num("c3d"))
+    else:
+        # m4-off.cfg: every C3D frame discards on cmdbuf, so none completes (critic M4 code review, minor 2).
+        m = re.search(r"discard=(\d+)/(\d+)/(\d+)/", final or "")
+        if num("c3d") != 0 or not m or int(m.group(3)) <= 0:
+            problems.append("--expect-offs: c3d %d (must be 0) and cmdbuf discards %s (must be > 0)" % (
+                num("c3d"), m.group(3) if m else "?"))
     if num("sentinel") > 0:
         problems.append("sentinel %d" % num("sentinel"))
     common = sum(r["common"] for r in rows)
@@ -425,8 +433,11 @@ def cmd_play(path, min_checks, expect_offs, within, tol):
         len(rows), common, in_pct, tol, "%.2f%%" % worst if worst is not None else "-", sum(r["empty"] for r in rows)))
     if len(rows) < min_checks:
         problems.append("%d play check(s), fewer than --min-play-checks %d" % (len(rows), min_checks))
-    if rows and in_pct < within:
-        problems.append("play checks within (neighbourhood) %.3f%%, under %.3f%%" % (in_pct, within))
+    # Every check on its own (critic M4 code review, finding 1): an occasional bad frame must not vanish in the pool.
+    for r in rows:
+        if r["within_nb"] is None or r["within_nb"] < within:
+            problems.append("play check frame %d: within (neighbourhood) %s%%, under %.3f%%" % (
+                r["frame"], r["within_nb"], within))
     for r in rows:
         if r["tol"] != tol:
             problems.append("a play check has (tol %d), --tol is %d" % (r["tol"], tol))
