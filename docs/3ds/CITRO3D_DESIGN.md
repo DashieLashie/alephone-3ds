@@ -2712,7 +2712,7 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   both Azahar backends. Under Azahar's **software** backend the films need `gxq_budget 3` (all linear): that
   rasteriser faults when one draw samples textures from FCRAM and VRAM together (an emulator bug, bisected;
   Review log "M3 acceptance, software-backend films"); so run, both films pass. Negative ambient not reached in
-  either film. Console: `NEXT-SPRINT.md` "M3 console check, short version" (TEV rounding, the ×2 clamp, the unit-1
+  either film; an Azahar test forcing it (a Lua plugin) is pending, piece 0 of `KICKOFF_M4.md`. Console: `NEXT-SPRINT.md` "M3 console check, short version" (TEV rounding, the ×2 clamp, the unit-1
   unbinding on PICA).
 - **M3 specification (revision of 2026-11-03, before code; Review log "M3 pre-implementation").**
   Where the lines above, 2.1-2.2, 4.1-4.3 and the code disagree, this block rules. Citations are the code
