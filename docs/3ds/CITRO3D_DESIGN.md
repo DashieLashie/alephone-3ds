@@ -3224,6 +3224,255 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   within ±2 points of SW; `vram_cap 512` and `fail_every 50` runs pass,
   evictions/discards counted; first-10-frames upload counts logged; 5 films ×
   3 min `diff 30` within tolerance. Gate **G2-a**.
+- **M5 specification (revision 1 of 2026-11-07, before code; Review log "M5 pre-implementation", round 1).** Where the lines
+  above, 1.5, 2.2, 3.2-3.3, 4.2-4.3, 8.1 and 8.3 and the code disagree, this block rules. Citations are the code as of
+  `12550c9be`. **No engine edit.** Kickoff `KICKOFF_M5.md`. Two sessions: (1) the spec, landscapes and static on diff
+  frames; (2) the play scan, `fail_every`, the level-start counts, the configs, the films, the acceptance and G2-a.
+  - *Checked against the kickoff and the code at HEAD.* (a) `tex_convert` has no landscape path: `tex_supported`
+    takes square POT bitmaps in [128, 512] only (`core/tex_convert.h`), and `texcache_get` refuses every non-rectangle
+    kind whose texel is not 4 bytes (`back/texcache.cpp`), so the A8 `Mask` exists for RLE rectangles only in practice.
+    (b) `fail_every` is parsed nowhere (`core/config.*`: only `vram_cap`, `linear_cap`, `promote_max`). (c) The cache
+    already logs the first 10 frames after a generation change, as **KiB summed over every level** (`TexStats::
+    gen_window_bytes`, `stats_line` "gen-window KiB"), not per level and without texture counts. (d) `vram_cap 512` has a
+    config since M2 (`m2-vram512.cfg`, diff only). (e) The allocator takes one wrap for both axes (`C3dAllocator::alloc`:
+    `C3D_TexSetWrap(t, wrap, wrap)`; `texture.h`:169 takes `wrapS, wrapT`). (f) **`_solid` polygons** (smear,
+    `render.cpp`:985-987) are drawn by **no** SW mapper: both precalculation switches end in `VHALT_DEBUG` (a no-op in
+    release, `scottish_textures.cpp`:138-142) and every bit-depth switch in `fc_assert(false)` (a no-op without
+    `DEBUG_FAST_CODE`, `csalerts.h`:97-103). M4 sent such frames to SW (`PlayScan` `other`); M5 skips them (below).
+  - *SW's landscape, exactly* (`scottish_textures.cpp`:1102-1170, lines :257-264 of `low_level_textures.h`). Every
+    landscape goes through the **horizontal** mapper (`texture_vertical_polygon` punts `_big_landscaped` to it, :436-439),
+    so its coverage is the floor rule (`accept_polygon(..., Orient::Horizontal)`, M2's fan/spans/ties). `R` =
+    `texture->width` rows (`row_addresses`), each `texture->height` texels; `bits = NextLowerExponent(height)`. With
+    `LandscapeOptions` `o = View_GetLandscapeOptions(ShapeDesc)` (`ViewControl.h`:81-106; defaults HorizExp 1, VertExp 1,
+    OGL_AspRatExp 0, VertRepeat **false**, Azimuth 0): `first = (landscape_yaw + o.Azimuth) << (bits + HorizExp + 16 − 9)`,
+    `hpd = (half_cone << (1 + bits + HorizExp + 16 − 9)) / standard_screen_width`, `vpd` the same with VertExp (`_fixed`,
+    int32). Pixel `x` of a line reads texel `s(x) = floor(V/65536) mod 2^bits`, `V = first + x·hpd` (the `<< free_bits`
+    and `>> (32 − bits)` of :1164-1165 and :245-262 keep bits 16..16+bits−1 of V; the 2^32 wrap is a multiple of
+    2^(16+bits)). Line `y` reads row `r(y) = R − 1 − PIN(k′ + (R >> 1), 0, R − 1)`, `k = (y − hh − dtp)·vpd >> 16`
+    (short `y0`, arithmetic shift: a floor), `k′ = k`, or with VertRepeat `k′ = ((k + h2) & (2h2 − 1)) − h2`, `h2 =
+    (height >> OGL_AspRatExp) >> 1`. Shading: `_SHADELESS_BIT` → `shading_tables` itself (table 0), else
+    `calculate_shading_table(…, depth 0, ambient FIXED_ONE)`, the top table for any `M` (host-asserted, below). Every
+    pixel is written (no transparency test).
+  - *Landscapes on the GPU* (new `core/landscape.*`, plain C++, host-tested; the front end calls it). Affine (w = 1),
+    attributes evaluated at `(X − ½, Y − ½)` as M2's `uv_half` (the pixel centre then interpolates to SW's value at the
+    integer pixel). **u** (texels along a row) `= V(X − ½)/65536 − 2^bits·m`, `m = floor(min over the polygon / 2^bits)`
+    (whole repeats only, so `GPU_REPEAT` keeps the phase; the shift keeps float24's range small). **v** (the row) `=
+    (R − (R >> 1)) − f(Y − ½) − ε + δ`, `f(y) = (y − hh − dtp)·vpd/65536` (round 1 finding 1: `R − (R >> 1)`, not
+    `R >> 1`, which is wrong for odd R) — with δ = 0, `floor(v) = R − 1 − (k + (R >> 1))` whenever `frac(f) + ε ∈ (0, 1]`;
+    f is a multiple of 1/65536, so **ε = 1/131072** (M4's `rect_bias` value) is exact for every
+    line. **u** gets the same ε (`V/65536` is a multiple of 1/65536; an exact integer must not round down). GPU
+    coordinates `u0 = (u + ε)/S`, `v0 = v/T`, `S = 2^bits`, `T = pot(max(R, 8))`. **Padding** (3.2, Review item 10): rows
+    `R … T−1` repeat row `R − 1`, and the sampler is **`GPU_REPEAT` on s, `GPU_CLAMP_TO_EDGE` on t** (`texture.h`:169,
+    `enums.h`:35-41): `v ≥ R` reads row R − 1 (SW's PIN at 0 in `k`), `v < 0` reads row 0 (the PIN at R − 1), so the
+    clamp *is* SW's PIN and no split is needed without VertRepeat. **The row offset δ** (found by the host test before
+    code): SW's row positions are often exact integers or a few 1/65536 from one (the horizon line has `f = 0`; "round"
+    `vpd` such as 52 428 repeat fractions near 0 and 1), and float32 corners at ~256 rows carry ~1/65536 of error, so
+    `ε` alone gives only **96.6 %** of lines right in float32 (86.8 % in the float24 model). Rows are constant per line,
+    so any affine v whose value at each line's centre lies in `[r(y), r(y) + 1)` is exact: per polygon (per band with
+    VertRepeat) `δ` = the middle of `[max(r − g), min(r + 1 − g))` over its unpinned lines (`g` = the δ = 0 value; pinned
+    lines accept any `δ ∈ (−1, 1)`), computed on the CPU from the polygon's line range (`landscape_row_offset`, ≤ 240
+    integer steps). Measured on the host grid: **100 % double, 99.996 % float32, 98.16 % float24** (bands of 16 lines
+    gave 99.81 % in float24 in a first experiment; not done: the split costs vertices and the float24 figure is **UNVERIFIED** on PICA,
+    section 10). Columns keep ε (a centred offset over a whole polygon's width gains nothing; ε: 99.992 % float32, 99.04 %
+    float24 on the host grid). **VertRepeat** (M1's landscapes; not in Marathon 2):
+    `k′` jumps where `k + h2` crosses a multiple of `2h2`; the polygon's line range is cut into **bands** of constant
+    `n = (k + h2) div 2h2` (`landscape_bands`), each with `v = (R − (R >> 1)) − (f − 2h2·n) − ε + δ`; a polygon with one band is
+    drawn as above, one with more is drawn as **SW's own spans** (M2's span path, `sw_spans`), its merged quads split at
+    the band rows, so the coverage stays SW's exactly and no clip vertex is computed. Supported landscape bitmaps
+    (`landscape_tex_size`): not RLE, `height` a power of two in [8, 1024], `width` in [1, 1024], `S·T·4 ≤ 1 MiB`;
+    anything else is unsupported (counted `c3d_land_unsupported`, a scan reason `landscape` in play).
+  - *Landscape texture.* New `TexSource::landscape`; conversion `tex_convert_landscape(bitmap, tables, kind, S, T, out)`:
+    memory row `t < R` = `row_addresses[t]`'s first `S` texels, rows `t ≥ R` = row `R − 1`, tiled by `tile_index` /
+    `tile_memory_row` (M4: any S, T). Kinds **`Normal`** (top table RGB, A as 3.2) and **`Shadeless`** (table 0:
+    infravision); both RGBA8. **Not RGB565**: 5-bit red/blue round by up to 4 (`255/31 ≈ 8.2` per step), which fails
+    8.3's Δ ≤ 2 by itself. A Marathon 2 landscape (270 × 512 → 512 × 512) is **1 024 KiB**: one per level, plus its
+    infravision copy while the player uses infravision. Beside ≤ 26 (texture, table) pairs at L0's spot (M0's null
+    table: walls 64 KiB each, sprite frames up to ~32 KiB) the working set can pass the VRAM cap (3 584 KiB) with the
+    infravision copy (round 1 minor 9: ~3.7 MiB), so evictions happen there, as designed (LRU; the LUT and the noise
+    are outside the cache). Promoted like any texture (one 1 MiB `TextureCopy`). A 1 MiB conversion when infravision
+    toggles is a mid-play burst: every frame converting ≥ 512 KiB outside the level-start window is logged (first 8,
+    `[c3d] tex: burst …`). The wrap becomes **part of the key**: `TexKey::clamp` (bool) → `TexKey::wrap`
+    (`Repeat`, `Clamp`, `Landscape` = repeat s, clamp t), passed to `TexAllocator::alloc` for both pools as M4's clamp.
+  - *texcoord1 of a landscape.* `L = sw_shade_index(M, 0, FIXED_ONE)` (host-asserted 255 for `M` in
+    [`FIXED_ONE`, 2^20]) → `(0.5/256, (L + 0.5)/256)` through the LUT's column 0 (M4: exact); shadeless →
+    `(255.5/256, 255.5/256)`. Landscapes are never `wrap` or `flash` (depth 0): the scan's polygon checks skip them.
+  - *SW's static, exactly* (`low_level_textures.h`:590-645; `scottish_textures.cpp`:221-225, :524-545, :738-755,
+    :862-865). Polygons: `texture_horizontal_polygon` punts `_static` to the **vertical** mapper (:221-225), so every
+    static polygon has the wall rule's coverage (`Orient::Vertical`) and, on a horizontal surface, wall texcoords
+    from the floor's origin/vector; the texel is read only for `_TRANSPARENT_BIT` bitmaps (`check_transparent`).
+    Rectangles: always `check_transparent` (RLE index 0), M4's coverage. Per written texel position: `if (seed >=
+    drop) *write = seed ^ (seed << 8)` (32 bit: R = seed's high byte, G = high ^ low, B = low, **top byte 0**), then
+    the Galois step `seed = (seed >> 1) ^ (seed & 1 ? 0xb400 : 0)`; `drop = (uint16) transfer_data` (`render.cpp`:796-
+    831: 0, 0x8000, the fade phase, 0x8000 ± 0x6000·sin); the seed (`texture_random_seed()`) runs on across
+    primitives and frames and advances only on non-transparent texels.
+  - *Static on the GPU* (4.3, revised). **Noise texture**: **256 × 256** RGBA8 (256 KiB; round 1 finding 2: all 65 535
+    states, so its density is SW's period density; 9.1's "shade LUT + noise" grows from 128 to 320 KiB, VRAM total ≤ 5 166
+    KiB), laid out **down columns** like SW's walk (texel `(x, y)` = state `256x + y` after seed 1; minor 6), `RGB = (hi,
+    hi ^ lo, lo)`, **`A = min(255, hi + 1)`** (minor 8: no floor of 2 is needed, the sentinel needs alpha 0x01 *and* its
+    RGB; the shift by one keeps every byte level apart: a floor merges the lowest levels); nearest, **repeat**. Built on the first static draw of the run (linear, flushed: a CPU fill inside
+    the frame, as a texture conversion) and promoted to VRAM in a later frame by the LUT's own state machine (`back/
+    shade.cpp`, generalised to two resident textures; under `gxq_budget 3` neither leaves linear memory). **Alpha
+    test** `GEQUAL ref`, `ref = min(255, (drop >> 8) + 1)`: a written texel needs `hi ≥ drop >> 8` (SW: `seed ≥ drop`;
+    they differ only for `hi == drop >> 8`, `lo < drop & 0xff`: at most 255 of 65 535 states, **0.39 points**, and for
+    `drop ≥ 0xFF00`, where `hi` 254 and 255 share A 255: ≤ 0.78 points of a nearly invisible fade; the whole-texture
+    density, host-asserted); `ref ≥ 1` rejects transparent texels (A 0). A window of the texture vs a run of
+    SW's states differs by sampling noise only (host simulation, below). **TEV** (`texenv.h`:49-96): stage 0 RGB `REPLACE(TEXTURE1)`;
+    alpha `MODULATE(TEXTURE0 α, TEXTURE1 α)` for transparent bitmaps (unit 0 = the **`Mask`** kind, A8 0/255, so the
+    product is the noise alpha or 0), `REPLACE(TEXTURE1 α)` for the others; stage 1 `REPLACE(PREVIOUS)` both.
+    **texcoord1** = `((X + ox)/256, (Y + oy)/256)` at the vertex `(X, Y)`, `(ox, oy)` ∈ [0, 256)² from a front-end
+    xorshift32 advanced once per static primitive (never `texture_random_seed()`: SW's replays restore it, M0).
+    **w**: 1 for rectangles and for polygons whose bitmap is not transparent (no texcoord0 is sampled: they draw the
+    coverage only: the noise is screen-locked, as SW's); transparent static **walls** keep the wall's w and texcoord0
+    (`wall_attrs`) and the Mask (minor 5: `texcache_get` and the cache accept the A8 `Mask` kind for M2's square wall
+    bitmaps, whose conversion `tex_convert` already has; host-tested): texcoord1 is then interpolated perspective-correctly (the noise follows the surface:
+    4.3's listed approximation). A transparent static polygon from `texture_horizontal_polygon` (SW: wall texcoords
+    from a floor's data) is **unsupported** (`c3d_static_unsupported`; none in Marathon 2's maps is expected, counted).
+    Static requires `textures 1` and `lit 1` (unit 1 is set up and restored by the lit frame), else unsupported. If the
+    noise texture cannot be allocated (it is not a cache entry) the frame is discarded `tex` (logged once, retried in
+    the next frame that needs it).
+  - *Unit 1 and TEV, the state machine* (`back/draw.cpp`; M3's rule "every unit and stage enabled is put back").
+    A lit frame starts in mode **Lit** (M3: LUT on unit 1, stages 0-1 as 4.2, alpha test `GEQUAL 128`). A draw's mode is
+    a property of its key: `kStatic` → **Static(ref, masked)** (`masked` = the Mask on unit 0), else Lit. `view_polygon`
+    sets it **between draws** with M4's `set_blend`, after `issue_pending()`: Lit → Static binds the noise to unit 1
+    (`__real_C3D_TexBind(1, noise)`, never through the wrapper: `tex1_foreign_binds` stays 0), writes stages 0 and 1 and
+    the alpha test (`static_sets`); Static → Lit binds the LUT again, rewrites stages 0 and 1 as `view_begin` does
+    (one shared function) and the alpha test `GEQUAL 128` (`static_restores`); Static → Static with another ref or mask
+    rewrites stage 0's alpha and the test. The ref and the mask are in the key (`transfer_data`, the class and the
+    bitmap's flag through the texture), so equal keys never need a switch. `restore_state` is unchanged in what it
+    restores (stage 1 from the saved copy, `shade_unbind_unit1`, the present sets its own stage 0, alpha test and blend
+    before every draw, `present.cpp`:339-340) and runs for every lit frame, so a frame **ending** in Static leaves unit
+    1 unbound and stage 1 at C3D_Init's state exactly as a Lit one (`unit1_left_bound`, `tev1_not_init`,
+    `tex1_restore_mismatch` stay 0). Counted `static_frames_ended` (frames whose last draw was static). Proof: the
+    present diff with static on screen (`m5-present-diff.cfg`, a static film stretch or the Static Test plugin below)
+    → `present_diff` 0 and the restore counters 0 with `static_sets` > 0.
+  - *Front end* (`front/c3d_rasterizer.cpp`). `polygon()` dispatches on the transfer first: `_big_landscaped` →
+    `landscape(p)` (Horizontal acceptance, `landscape_attrs`, the `Landscape` texture), `_static` → `static_polygon(p)`
+    (Vertical acceptance), **`_solid` → skipped** (SW draws nothing; counted `c3d_solid_skipped`, not a discard),
+    else M2-M4's path. `texture_rectangle`: `_static` → the Mask kind, M4's quad, texcoord1 = noise, key class
+    `kStatic`. Counters (`DIFF summary`, `play final`): `c3d_land_polys`, `c3d_land_spans`, `c3d_land_unsupported`,
+    `c3d_static_polys`, `c3d_static_rects`, `c3d_static_unsupported`, `c3d_solid_skipped`.
+    `FilterRasterizer::c3d_excluded` gains the unsupported landscapes and statics (excluded on both sides of a
+    check, as M2's unsupported walls).
+  - *Diff checks* (8.1). **`landscape`**: as floors (clear 0, `Coverage::TopByte`: SW's table pixels carry 0xFF).
+    **`static`**: three replays — A = SW, B = C3D (both over clear 0, `Coverage::NotClear`: SW's top byte is 0, its
+    value never 0 since the LFSR state is never 0), and **C = SW with every static primitive's `transfer_data`
+    forced to 0** (the filter's `static_cover` edit), i.e. SW's coverage: every texel position SW could write. New
+    `diff_static(A, B, C)` (core, host-tested) prints `[c3d] DIFF frame=… class=static cover=|C| written=|A|/|B∩C|
+    density=dA/dB out=e/n` (`out` = B pixels outside C, split by C's edge band). **`frame`**: landscapes are now
+    **included** (8.3); static stays excluded on both sides (8.3; `frame_excluded` → `kStatic` only). **play**
+    (`play_check`): a frame with static is compared with **C's pixels excluded** (computed by one more SW replay
+    only on such frames; `diff_images` gains an optional exclude mask; counted `static_px` on the line): the
+    noise differs per pixel by design. **This widens what the play gate excludes** (M4's play checks covered every
+    pixel; their static frames were SW): it applies 8.3's "full frame: static excluded", which the user already set
+    for the frame check, to the play check; **the user's decision** (round 1 minor 3), asked with the `static_px`
+    counts of the first runs.
+  - *Colour and density gates.* **landscape**: 8.3's row **as written** (coverage non-edge ≤ 0.1 % of A's covered;
+    **strict** ≥ 98 % within Δ ≤ 2, no mean gate; the neighbourhood figure printed): the texel choice is SW's to the
+    exact 1/65536 (host test: 100 % in double and float32), full bright, so the strict figure should hold; a new key
+    **`landscape_tol N`** (default 0 = `diff_tol`) prints landscape lines at their own tolerance, so one run gates
+    landscapes at 2 and the frame at 4 (`c3d-diff.py` compares `--tol` with the gated classes' lines only).
+    **static** (8.3 "density ±2 points"; the measurement is new, the number is not): **per run, pooled** over the
+    checks, `|ΣB∩C/ΣC − ΣA/ΣC| ≤ 2` points with **ΣC ≥ 40 000** (`--min-covered 40000`); per check printed, not gated
+    (round 1 finding 2; host simulation of SW runs of n consecutive states against windows of the 256² texture: σ of
+    the difference 2.2 / 1.1 / 0.5 / 0.25 points at n = 1 024 / 4 096 / 16 384 / 40 000, P(|Δ| > 2) 36 % / 5-10 % / ≤
+    0.1 % / 0, mean ≤ 0.12); `out` non-edge ≤ 0.5 % of ΣC (M4's sprite coverage number, as rectangles carry most
+    static). **frame**, **play**: unchanged (M4: ≥ 97 %
+    within Δ ≤ 4, neighbourhood). If the strict landscape gate fails for a reason the design accepts (texel boundaries),
+    the neighbourhood rule is the fallback **only on the user's decision** (a tolerance change).
+  - *Play mode* (M4 (2)'s scan). `landscape` and `static` stop being reasons for drawable primitives: they remain the
+    names of the **unsupported** cases (`landscape_tex_size` false; a transparent static from the horizontal entry;
+    static without `lit`). `_solid` is no longer `other`. **Still SW, and why:** `other` (a tinted polygon, a tinted `k ≥
+    32`, any other transfer mode: none in Marathon 2's content, kept as the guard), `bitmap` (sizes C3D refuses),
+    `wrap` (SW's own output is undefined there: M3), `flash` (`M > kFlashMax` on a lit wall/floor: SW's `SHRT_MAX` clamp,
+    never in Marathon 2). None is taken now; each stays a counted reason. Before the scan (M4 (0)), see-through liquids
+    (`software_alpha_blending` on: SW blends, 4.3) still send every frame to SW (`skip:pref`; minor 9). Diff frames keep M0's form.
+  - *`fail_every N`* (new key, 0..100 000, default 0; the "Runtime config" list). **Every N-th `TexCache::create()`
+    fails before allocating** (counted `forced_fails`, and `discards_tex` as any create() failure), so the draw that
+    needed the texture discards the frame (`tex`) and SW redraws it from the recording (M4's discard path); the next
+    frame retries (the counter has moved on). It proves: (i) every forced failure is one counted discard and never a
+    wrong picture (`sentinel` 0, every play check in gate); (ii) with `fail_every 1` every frame that needs a new texture
+    discards, ten in a row turn play off and a level change turns it on (`--expect-offs` as M4's off test); (iii)
+    nothing leaks across a discard: a new **cache audit** (`TexCache::audit()`, in the final `[c3d] tex` line and on
+    every generation change) recomputes each pool's bytes from the live and retiring slots and the deferred-free list
+    and compares them with `used_` (`audit ok` / `audit MISMATCH`), and a frame's other creates stay valid entries.
+    Forcing the allocator instead (soft failure) would be absorbed by M2's evict-and-retry (`kEvictAfterAllocFail`) and
+    prove nothing new; real allocation failures are already counted (`alloc-fail`, 3 on M4's L01 film). **Run**
+    (minor 4): `fail_every 50` over the L01 film in play mode, whose M4 run made 1 463 creates (≈ 29 forced failures);
+    the gate needs `forced_fails ≥ 10` and as many `tex` discards beyond the real ones.
+  - *Level-start counts* (3.3 "the level-start burst"; section 10 item 10 decides pre-warming on the console). Per
+    generation: the KiB and textures converted and the promotions pending at the start of each of the first 10 view
+    frames after the change, and those frames' GX high-water, printed once as `[c3d] tex: level start gen G: KiB
+    k0..k9 textures n0..n9 pending p0..p9 gx_hw H` (deterministic counts: authoritative in Azahar). The summed
+    `gen-window KiB` stays.
+  - *Eviction runs.* `vram_cap 512` (8 walls of VRAM; a landscape never fits and stays linear: `promote_pending`
+    needs `bytes ≤ cap`, `core/texcache.cpp` `create`): a play run over a film with play checks (evictions,
+    promotions and discards counted; every check in gate). **Host GPU only**: under the software backend `gxq_budget
+    3` keeps every texture linear, which makes `vram_cap` inert (the run would be the plain `-swbe` run again).
+  - *GX queue, command buffer, rings.* No new GX op per frame (the noise's one promotion uses the LUT's rule: it
+    needs the frame's own entries free after it). A mode switch adds a texture bind, two TEV stages and the alpha test
+    to the next draw's state flush: `draw_words`, `view_frame_words` and the first-draw words are re-measured over the
+    acceptance, **`kDrawReserveWords` = 2 × the worst draw measured** (564 today; raised and recorded if a static draw
+    exceeds 282). Frames without landscapes and static add no word: M3's diff stays at `view_frame_words` 1304 (the
+    regression check of M4). Rings (2 048 / 4 096) unchanged unless a film refuses (then doubled and recorded); the
+    high-water is logged on the films (landscape span quads only with VertRepeat).
+  - *Zones.* No new zone: landscape and static draws are `c3d_draw`; the noise build and the landscape conversion
+    are `c3d_tex` (M2).
+  - *Keys* (`core/config.*` + host test): `fail_every N`, `landscape_tol N`. Printed in the `[c3d] debug-c3d:` line.
+    The M1-M4 configs are unchanged (their runs are the regressions; `m4-*` play configs now draw landscapes and
+    static, which is the point of their re-run).
+  - *The Static Test plugin* (`scripts/3ds/tests/plugins/Static Test/`, `run-azahar.sh --static-test`; pattern of M4's
+    Invisibility Test): best effort, it places a monster 2 WU ahead of the player that teleports in and out (fold
+    in/out: `_static` rectangles with the fade drop) every few seconds, so a bench spot shows static rectangles for
+    the `static` gate and the present diff; if the Lua API cannot produce it, the static gate runs on the films only
+    (recorded).
+  - *Films* (5 × 3 min, `diff 30`, classes `landscape,static,sprites,weapons,frame`). Chosen by a screening run of
+    candidates in play mode on the M4 binary (its per-second `scan=landscape/static` counters show what each film puts
+    on screen): **L01** (2 646 landscape and 269 static frames in M4) plus four others with landscapes, static or
+    eviction pressure, named with their counts in the session's record; `--min-covered` per class is set from a first
+    run of the M5 binary (a class a film never shows is not gated on that film, and that narrowing is recorded).
+  - *Host tests* (8.4): `landscape_attrs` vs a literal transliteration of :1102-1170 + :245-262 on a grid (yaw 0..511,
+    `dtp` ±60, `half_cone` from 40 to 80, screens 400 × 240 and 640 × 320, R ∈ {270, 135, 512}, height ∈ {256, 512},
+    HorizExp/VertExp 0..2, Azimuth, VertRepeat on/off): the texel (row and column) at every pixel centre agrees 100 %
+    in double and ≥ 99.99 % in float32 (asserted; rows with δ), the float24 model printed; `landscape_bands` vs the per-line `k′`; the
+    padding conversion (rows past R = row R − 1, tiling vs `tex3ds` when present); `sw_shade_index(M, 0, FIXED_ONE) ==
+    255`; the noise generator = SW's LFSR step, its texels' RGB through the readback's ARGB conversion = SW's
+    `randomize_vertical_polygon_lines_write<pixel32>` (minor 6), the column layout, the whole-texture density for every
+    `drop` vs SW's `(65536 − drop)/65535` (|Δ| ≤ 0.4 points asserted, ≤ 0.8 for `drop ≥ 0xFF00`), the window-density simulation (printed); the
+    Mask conversion of a square wall bitmap; `diff_static`; `diff_images` with an exclude mask;
+    the cache with `wrap Landscape`, `fail_every` and `audit()`; the keys.
+  - *Configs* (each software-backend run `-swbe` with `gxq_budget 3`): `m5-diff.cfg` (`diff 1`, 20 checks, `classes
+    landscape,static,frame`, lit, `diff_tol 4`, `landscape_tol 2`), `m5-static.cfg` (`classes static,frame` with the
+    plugin), `m5-film.cfg` (`diff 30`, `diff_frames 0`: the run's length), `m5-play.cfg` (`play 1`, `play_check 30`),
+    `m5-vram512.cfg` (play, `vram_cap 512`), `m5-fail50.cfg` (play over the L01 film) / `m5-fail1.cfg` (play, a level
+    hop),
+    `m5-present-diff.cfg`, `m5-bench-c3d.cfg` / `m5-bench-sw.cfg`.
+  - *Accept* (Azahar, non-authoritative; both backends unless noted). `m5-diff.cfg` on L0/L6/L20: `landscape` passes
+    the strict gate on every spot that shows one (**L6 required**, 8.3), the frame (landscapes included) passes M4's
+    frame gate; `static` passes the density gate on the plugin run and the films that show it; the 5 films pass every
+    gated class; M4's play runs (scripts 06, 07, 12, 13, 14, the L01 film, Classic L20) pass again with **landscape and
+    static scan counts 0** (every such frame now C3D) and C3D play frames on L0 and L6; `m5-vram512` (host GPU) and
+    `m5-fail50` pass with evictions / forced failures and discards counted and `audit ok`; `m5-fail1` + a level hop
+    shows the off/on lines; `m5-present-diff` `present_diff` 0, the restore counters 0, `static_sets` > 0; M3's lit
+    gate, M2's full-bright gate, M1's walls coverage, M0's calibration and P1 scripts 08, 22 unharmed
+    (`view_frame_words` 1304 on M3's diff); the level-start lines logged; the OFF builds' `objdump -d` unchanged and
+    `nm` clean. **Recorded, not gated:** the C3D-vs-SW bench on L0/L6/L20, the play counters per reason before (M4) and
+    after, the films' cache/ring high-water marks, command words.
+  - ***G2-a*** (0.5), measured at the end of the acceptance, **on the final binary, host-GPU backend**:
+    (1) `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` from M0's null-mode table (`PERF.md` "Stage 10 M0": L0 0.34,
+    L6 0.62, L20 0.33 ms); null mode does not run the M1-M5 code, so it is not re-measured: **passes with a wide
+    margin**. (2) `busy(readback) ≤ busy(SW) + 1 ms` on **each** of L0, L6, L20: `perf-bench.sh`, HUD + Map @30, 1 run,
+    `m5-bench-c3d.cfg` (play 1, no checks) vs `m5-bench-sw.cfg` (`renderer sw`), `busy` = frame − idle; valid only if
+    the C3D run's play frames are ≥ 95 % of its world frames on each spot (else the number does not measure the
+    renderer and is reported as such). **What M4 already says:** L20 +3.49 ms (`c3d_draw` 8.37 + `c3d_readback` 2.18
+    + `render` 1.08 against SW's `render` 8.64); L0/L6 were all landscape (SW). Expected after M5: L0 and L6 move to
+    the C3D path; the readback and copy are per frame (about 2.2 ms), the draw path's share is unknown in advance (it
+    holds the traversal, which SW also pays, and per-polygon work: L0 71, L6 89, L20 41 polygons at most, M0), so L0
+    and L6 are **expected at or above L20's +3.49 ms** (round 1 minor 7); Azahar understates copies ~40 % (`PERF.md`
+    "How to read these numbers"), so G2-b on the console is likely worse. **The prediction is a G2-a failure on its
+    second half.** The outcome and what follows are the **user's decision** (M6 removes the readback and the copy,
+    where the extra time is; or stop at readback; or measure G2-b on the console first), presented at the end of the
+    session in plain language with the numbers; the gate itself is not changed.
+  - *Not in M5:* direct mode (M6), the texture-cache hash (an M6 prerequisite), supersampling, stereo.
 
 ### M6 — direct mode (HUD + Map)
 - Touch: `screen.cpp` hook 3 (`PATCHES.md` 47).
@@ -3316,9 +3565,9 @@ KiB) are authoritative in Azahar; `C3D_GetDrawingTime/ProcessingTime`
 | view target (400x240; Classic 480x240) | — | 375 / 450 | — | — |
 | view texture-target 512x256 / 1024x512 | — | — | 512 | 2 048 |
 | overlay texture 512x256 | — | — | 512 | 512 |
-| shade LUT + noise | — | 128 | 128 | 128 |
+| shade LUT + noise (M5: 64 + 256) | — | 320 | 320 | 320 |
 | texture cache VRAM pool (cap) | — | 3 584 | 3 584 | 2 048 |
-| **total** | 887 | ≤ 4 974 / 5 049 | 5 623 | 5 623 |
+| **total** | 887 | ≤ 5 166 / 5 241 | 5 815 | 5 815 |
 
 In direct mode a dialog switches to the 640x480 menu surface, presented
 through the same 512x256 texture; the overlay texture is idle then. Totals
@@ -3398,6 +3647,11 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    M4 "Rectangles on the GPU"); the `CONSTANT_COLOR` blend's rounding (predicted Δ ≤ 1); A8 sampling into the alpha
    test and `GPU_CLAMP_TO_EDGE`; non-square POT textures (`C3D_TexInit(S, T)`) on hardware; play-mode readback cost
    and HOME/suspend in play mode (`NEXT-SPRINT.md` "M4 console check, short version").
+   **M5:** landscape texel choice under PICA's float24 texcoords (host model: rows 98.16 % with the per-polygon row
+   offset δ, columns 99.04 %; pre-stated fallback: δ per band of 16 lines, 99.81 % rows in the model); how TEV's
+   `MODULATE` rounds `255·(hi + 1)/255` on masked static draws (the alpha test's step); the 1 MiB landscape conversion
+   and its `TextureCopy` at level start and when infravision toggles (with item 10); the G2-b bench (readback vs SW
+   busy on L0/L6/L20) (`NEXT-SPRINT.md` "M5 console check, short version").
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -4137,3 +4391,43 @@ backends) and script 07 end on the timeout kill, and `[c3d] play final` is print
 play` now falls back to the last one when the final line is missing (it says so). Script 14 opens its terminal at
 L0's start, which is all landscape: 0 C3D frames by construction, gated with the new `--min-c3d 0`. A tooling fix:
 the renderer and the accepted binary are unchanged; re-gated from the same logs, all four pass.
+
+### M5 pre-implementation (coordinator, 2026-11-07)
+
+The M5 specification (section 7, M5) was written against the code at `12550c9be`. Checked against the kickoff:
+there is no landscape conversion and `texcache_get` refuses a non-rectangle A8 texture; `fail_every` is not parsed;
+the first-10-frames counts exist only as KiB summed over all levels; the allocator applies one wrap to both axes;
+and `_solid` (smear) polygons are drawn by no SW mapper in a release build, so M5 skips them instead of sending the
+frame to SW. Decisions taken in the specification: landscapes affine with SW's 1/65536 positions plus a 1/131072
+bias, padded rows and a per-axis wrap (repeat s, clamp t) in the cache key, RGBA8 (RGB565 fails Δ ≤ 2 by itself),
+VertRepeat as SW's spans split at band rows; static as a 128 × 128 noise texture of SW's LFSR states with alpha
+`max(2, hi)` and the alpha test `max(1, drop >> 8)` (density within 1.2 points of SW by construction, no sentinel
+collision), the A8 mask on unit 0 for transparent bitmaps, a Lit/Static mode switched between draws like M4's blend;
+the static check measured against a third replay with the drop forced to 0 (SW's coverage); `fail_every` on the
+cache's create() (hard failures; soft ones are absorbed by evict-and-retry) with a cache audit; per-level start
+counts; G2-a measured on the final binary with M0's `R_est` and a fresh bench, predicted to fail its second half.
+Gates: landscape 8.3 as written (strict) with its own printed tolerance; static density measured pooled per run
+and per check over 4 096 coverage pixels (the ±2 points of 8.3 unchanged). Pending: the critic's review.
+
+### M5 pre-implementation, round 1 (critic: REVISE, 2 major, 7 minor; applied)
+
+(1) The landscape row constant is `R − (R >> 1)`, not `R >> 1` (wrong for odd R; the host grid has R = 135). Found
+independently by the first host run, which also showed that ε alone leaves float32 rows at 96.6 % (SW's exact-integer
+positions): a per-polygon row offset δ, the middle of the feasible interval, gives 99.996 % (float32) and 98.16 %
+(float24 model). (2) A per-check static density gate at |C| ≥ 4 096 fails on sampling noise alone (simulated: 5-10 %
+of checks): the gate is pooled per run with ΣC ≥ 40 000 (σ 0.25 points), per-check figures printed; the noise
+texture holds all 65 535 states (256 × 256, 256 KiB; 9.1 updated). Minors: the play check's static exclusion is a
+change to what a gate includes, so it goes to the user (3); `fail_every 50` runs over the L01 film (≈ 29 forced
+failures) with a floor of 10, and a noise allocation failure discards `tex` (4); the Mask kind for square wall
+bitmaps is stated (5); the noise RGB is host-checked against SW's pixel formula through the readback's ARGB, and
+laid out down columns like SW's walk (6); G2-a's prediction no longer contradicts its own scaling (7); the alpha
+floor of 2 goes: A = min(255, hi + 1), ref = min(255, (drop >> 8) + 1), host-asserted ≤ 0.39 points (≤ 0.78 for
+drop ≥ 0xFF00) (8); see-through liquids, the honest VRAM sum and the infravision burst log added (9).
+
+### M5 pre-implementation, round 2 (critic: APPROVE, 2 minor, folded)
+
+The row offset's pinned-line argument, the noise encoding `A = min(255, hi + 1)` / `ref = min(255, (drop >> 8) + 1)`,
+the 256² column-ordered texture and the pooled static gate checked. Folded: the VertRepeat band formula carries
+`R − (R >> 1)` and δ (1); section 10 item 6 gains the M5 console items (float24 landscapes with the band fallback,
+MODULATE rounding on masked static, the 1 MiB conversion and copy, G2-b) (2). The VRAM table counts the noise at
+256 KiB.
