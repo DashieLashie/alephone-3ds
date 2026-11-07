@@ -2709,6 +2709,9 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   ambient, weapon flash.
 - Accept: host LUT ≤ 1 level everywhere; diff `walls,floors` lit ≥ 98% Δ ≤ 4,
   mean ≤ 1.5 on L0/L6/L20 + 2 films; infravision via the Lua plugin.
+- **Console (2026-11-07): short check passed** (`PERF.md` "Stage 10 M3-M5 — console, short checks": lit walls /
+  floors 99.56 % / 99.80 %, `mean_nb` 0.23 / 0.72 against Azahar's 0.21 / 0.71, command words 1304 / 282 / 10
+  identical, the ×2 alpha clamps, unit 1 unbound after each lit frame with `unit1_left_bound=0`).
 - **Status (2026-11-05): M3 implemented and accepted** (`PERF.md` "Stage 10 M3", Azahar —
   non-authoritative; commits `c3b4349c4`..`dd955459a`; critic: spec APPROVE round 2, code APPROVE, post-review
   change APPROVE). Host LUT worst 1 level (90.6 % exact); L0/L6/L20, both films (200 checks each), infravision
@@ -3211,6 +3214,9 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     films' cache and ring high-water marks; command words.
   - *Not in M4:* landscapes, static (rectangles and polygons), eviction hardening (M5); direct mode (M6).
 
+- **Console (2026-11-07): short check passed** (`PERF.md` "Stage 10 M3-M5 — console, short checks": sprites 99.51 %
+  with 78 non-edge (Azahar 79), weapons 100 %, tinted exact with `blend_sets` = `blend_restores` = 40, play mode on
+  L20 780/780 C3D with 26 checks at 99.445 %, HOME / lid close / HOME > Close in play mode clean).
 - **Status (2026-11-06): M4 implemented and accepted** (`PERF.md` "Stage 10 M4", Azahar — non-authoritative;
   commits `f389f85a5` code, `2de08146a` review fixes, then the record; critic: spec REVISE then APPROVE round 2,
   code REVISE then APPROVE round 2). Host tests 2 617 932 checks, 0 failures (`rect_setup` = SW; texel agreement
@@ -3503,6 +3509,10 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     draw restored; L01 film in play mode: 4 650 frames, **all C3D** (M4: 2 915 to SW), 361 with static, 155 play checks,
     worst 98.63 %, 0 discards, `sentinel` 0; the level-start line logs (2 MiB in frame 0, `audit ok`, GX high-water 11).
   - *Not in M5:* direct mode (M6), the texture-cache hash (an M6 prerequisite), supersampling, stereo.
+- **Console (2026-11-07): short check, one gate missed by 0.16 point** (`PERF.md` "Stage 10 M3-M5 — console, short
+  checks": landscapes on L6 strict 100 %; the Look Up Test's cut path **97.84 % strict**, 0 non-edge, `within_nb`
+  99.87 %; static and present counters pass, static not seen by eye; **G2-b +6.15 / +7.77 / +7.25 ms** busy on L0 /
+  L6 / L20).
 - **Status (2026-11-07): M5 implemented and accepted** (`PERF.md` "Stage 10 M5", Azahar — non-authoritative;
   commits `13910b169` session 1, `663d05820` and `9d6fde66f` review fixes, then the record; critic: spec REVISE then
   APPROVE round 2, code REVISE then APPROVE round 2). Host tests 2 654 258 checks, 0 failures. On both Azahar
@@ -3707,6 +3717,18 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    landscape span path's columns under float24 (`m5-lookup.cfg`: Azahar's software backend 97.72 % strict, every miss one
    column late; host GPU exact; Review log "M5 code review, round 1"); the G2-b bench (readback vs SW
    busy on L0/L6/L20) (`NEXT-SPRINT.md` "M5 console check, short version").
+   **Console 2026-11-07 (M3-M5 short checks, `PERF.md` "Stage 10 M3-M5 — console, short checks"):** *verified* —
+   M3 modulate rounding (walls / floors `mean_nb` 0.23 / 0.72 against Azahar's 0.21 / 0.71, `max_nb` equal, command
+   words equal), the ×2 clamp (clamps), unit 1's unbinding (`unit1_left_bound=0`, no hang); M4 rectangle texels at
+   `rect_bias 1` (78 non-edge sprite pixels against Azahar's 79), the constant-colour blend (bit-exact, 59 040 px),
+   A8 sampling and non-square POT (no mismatch), HOME / lid / Close in play mode (clean `gfxExit`); M5 landscape
+   texels without a cut (strict 100 %, 254 700 px), the 2 MiB part's conversion at level start, the present with
+   static (31 checks exact). *Refuted (as the host model predicted):* the span path's columns under float24 (97.84 %
+   strict, 0 non-edge, `within_nb` 99.87 %; the pre-stated remedy is the clip-at-cut fallback, the user's call).
+   *Measured:* G2-b readback − SW busy **+6.15 / +7.77 / +7.25 ms** on L0 / L6 / L20. *Not settled:* static's look
+   (seen for about 1 s, not noticed), the landscape part's `TextureCopy` when infravision toggles, FCRAM-against-VRAM
+   sampling cost (one landscape promotion was blocked after 4 170 play frames: `promo 84/0/1(land 1)`, so a 2 MiB
+   VRAM block is not always free late in a session), texcoord1 at LUT bin edges.
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
    **Console 2026-10-19:** the P1 present target's orientation and flags are right
@@ -4569,3 +4591,22 @@ only on `--min-covered` (no landscape at L20 or in the L06 / L21 films, 1 858 pi
 40 000 minimum because the film's last static stretch comes after check 450 (the first run reached 63 426 at −0.35
 points): read by hand, no tolerance change. G2-a as in `PERF.md` "Stage 10 M5".
 
+### M3-M5 console short checks (coordinator, 2026-11-07)
+
+Fifteen launches on the New 3DS, one sitting, code = tag `port-stage10-M5`, no subagents, no code change
+(`PERF.md` "Stage 10 M3-M5 — console, short checks"). **No hardware bug found in M3, M4 or M5's pipeline.** What
+Azahar could not say, and the console did: PICA's modulate and constant-colour blend round as Azahar's
+`(a·b)/255` (lit means within 0.02, tinted bit-exact); texcoord interpolation on rectangles matches at
+`rect_bias 1`; unit 1's unbinding is safe on hardware; play frames in flight survive HOME, sleep and Close with
+the gate closed. **One predicted miss:** the landscape span path (`land_cut 400`) scores 97.84 % strict against
+the 98 % gate: no non-edge coverage mismatch, `within_nb` 99.87 %; it is the float24 behaviour the software
+backend showed (97.72 %), not a regression. The user's call whether to adopt the clip-at-cut fallback. It is not
+only a test path: the default-config L0 play run (`m5s-pres`, `land_cut 512`) drew `land_spans=827` in 827 frames,
+so the span path runs in ordinary play wherever a landscape polygon crosses the cut; that run had no landscape
+diff, so the default's exactness on L0 was not measured. **G2-b** (readback − SW busy): +6.15 / +7.77 / +7.25 ms,
+2-3× Azahar: M6's direct mode is the way to remove it; the plan (user decision 2026-11-07) stands. **Two
+observations that need a follow-up, neither blocking:** (1) every 1 s window in play mode has one frame of 70-87 ms
+(SW: 40-50), and the user saw a regular micro-stutter; probable cause `stats_tick()`'s once-a-second printing over
+3dslink and to the SD log (unverified; M3's diff runs without play mode show none), which would also inflate G2-b's
+busy figures a little; (2) static's look was never seen (25 of 827 frames at the bench spot), so `MODULATE` on
+masked static rests on the counters alone. Not run: M3 step 3 (L08 film), M4's software rerun and Classic.

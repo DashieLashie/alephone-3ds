@@ -1196,6 +1196,13 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    **G2-a fails** (busy +2.04 / +4.88 / +3.51 ms on L0 / L6 / L20 against +1 ms; `R_est` passes). **Next (user
    decision 2026-11-07, whatever G2-a showed): M6**, kickoff `KICKOFF_M6.md`. Console: "M5 console check, short
    version" at the end of this file (not run).
+   **M3, M4 and M5 console short checks run 2026-11-07, in one sitting (15 launches; `PERF.md` "Stage 10 M3-M5 —
+   console, short checks"):** M3 passed (lit colours = Azahar within 0.02 `mean_nb`, command words identical, ×2
+   alpha clamps, unit 1 unbinds), M4 passed (sprites 78 non-edge, tinted exact, play mode 780/780 C3D, HOME / lid /
+   Close clean), M5 passed except the Look Up Test's strict gate (97.84 % against 98 %: PICA's float24 columns, as
+   Azahar's software backend; the clip-at-cut fallback is the remedy if wanted) and static's look (not seen).
+   **G2-b: readback costs +6.15 / +7.77 / +7.25 ms busy on L0 / L6 / L20** (Azahar +2.04 / +4.88 / +3.51).
+   A 1 Hz stutter in play (stats printing, unverified) is noted there. **Next: M6** (`KICKOFF_M6.md`).
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1616,7 +1623,8 @@ Record the log and stop; M3 waits for the fix.
 
 ## M3 console check, short version (15-25 min; when the user is at the console)
 
-**Not run yet.** Written 2026-11-05 for `port-stage10-M3`. Azahar cannot answer two of M3's questions (design
+**Run on the console 2026-11-07, steps 1-2 passed (step 3, the L08 film, not run;
+`PERF.md` "Stage 10 M3-M5 — console, short checks").** Written 2026-11-05 for `port-stage10-M3`. Azahar cannot answer two of M3's questions (design
 section 10 item 6, "M3:"): **PICA's TEV rounding** (the lit colours assume Azahar's `(a·b)/255`; host prediction
 ≤ 2 per channel, mean ≤ 0.47) and **the TEV alpha ×2 clamp** (`alpha_x2 1`; not M3's default, but M5's static
 will rely on it). It is also the first hardware run of **unit 1's unbinding after a lit frame** (a direct store
@@ -1663,7 +1671,8 @@ unit 1 is disabled again before the present).
 
 ## M4 console check, short version (20-30 min; when the user is at the console)
 
-**Not run yet.** Written 2026-11-06 for `port-stage10-M4`. Azahar cannot answer M4's hardware questions (design
+**Run on the console 2026-11-07, steps 1-4 passed (step 3's software rerun and Classic not run;
+`PERF.md` "Stage 10 M3-M5 — console, short checks").** Written 2026-11-06 for `port-stage10-M4`. Azahar cannot answer M4's hardware questions (design
 section 10 item 6, "M4:"): **PICA's float24 texcoords on rectangles** (the host model gives 99.85 % texel agreement
 at `rect_bias` 1, UNVERIFIED), **the constant-colour blend** of tinted rectangles (exact in Azahar), and **play mode
 on hardware**: the readback and copy cost per frame and HOME > Close / suspend with play frames in flight. It can
@@ -1713,7 +1722,9 @@ Review log.
 
 ## M5 console check, short version (25-35 min; when the user is at the console)
 
-**Not run yet.** Written 2026-11-07 for `port-stage10-M5`. Azahar cannot answer M5's hardware questions (design
+**Run on the console 2026-11-07: steps 1, 3 (counters) and 4 passed; step 2 failed its strict gate narrowly
+(97.84 % against 98 %, the predicted float24 outcome); static not seen by eye (`PERF.md` "Stage 10 M3-M5 —
+console, short checks").** Written 2026-11-07 for `port-stage10-M5`. Azahar cannot answer M5's hardware questions (design
 section 10 item 6, "M5:"): **the landscape span path's columns under PICA's float24** (Azahar's software backend
 misses the strict 98 % by one column on the look-up; host GPU exact), **the 2 MiB landscape part** (its conversion
 and `TextureCopy` at level start, whether VRAM finds a contiguous 2 MiB block, the cost of sampling it from FCRAM

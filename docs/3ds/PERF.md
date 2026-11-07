@@ -1808,3 +1808,76 @@ on vs `m5-bench-sw.cfg` = `renderer sw`; recorded, not deciding: user decision 2
 spots were all SW): their landscapes cost `c3d_draw` 10.2 ms against SW's `render` 11.2 / 9.0. fps 30.3 everywhere,
 `gaps` 0. G2-a fails; per the user's decision M6 (direct mode, which removes the readback and the copy) is next all
 the same. Azahar understates copies (~40 %), so G2-b on the console is likely worse.
+
+## Stage 10 M3-M5 — console, short checks (New 3DS, 2026-11-07)
+
+One sitting, 15 launches, HUD + Map; Framerate Target 30 for the whole session (the card's 60 was set to 30 with
+`setprefs.sh` and put back byte-identical at the end). Code = tag `port-stage10-M5` (`git diff --stat
+port-stage10-M5 HEAD -- ports scripts` empty), `build-3ds-c3d-prof`, over 3dslink; transcripts
+`build-3ds/hw/m1/{m5s-*,m4s-*,m3s-*}.txt` (not in git). Runbooks: `NEXT-SPRINT.md` "M3 / M4 / M5 console check,
+short version". No Luma dump, no hang, every launch ended with `real gfxExit returned`. Azahar references are
+the host-GPU figures of "Stage 10 M3" / "M4" / "M5" above. M3 step 3 (the L08 film), M4's software rerun
+(`m4s-sw20`) and M4's optional Classic run were not run (the user's plan; the M5 bench covers L20's SW figure).
+
+**Summary.** M3: **pass** (lit colours equal Azahar's within 0.02 `mean_nb`; the ×2 alpha clamps). M4: **pass**
+(sprites 78 non-edge vs Azahar 79; tinted blend bit-exact; play mode 780/780 C3D; HOME, lid and Close in play mode
+clean). M5: landscapes on L6 **pass** (strict 100 %), static + present **pass** on the counters (static not seen
+by eye), Look Up Test **strict 97.84 %, under the 98 % gate by 0.16 point** (the predicted PICA-float24 outcome).
+**G2-b: readback costs +6.2 / +7.8 / +7.3 ms of busy time on L0 / L6 / L20 (Azahar +2.0 / +4.9 / +3.5).**
+
+### M5 (launches 1-3 and the bench)
+
+| Launch | Result |
+| --- | --- |
+| 1, `m5-diff.cfg` + L6 | landscape strict: exit 0, 254 700 px, **100.000 %**, max 0, 0 non-edge, `sentinel=0` (Azahar: same); frame: exit 0, 99.32 % (Azahar 99.58 %), `mean_nb` 0.52, 0 discards, restore counters 0. `view_frame_words=3464 draw_words=282 readback_words=10`. `c3d_land_spans=0` (L6 has no cut). `tex: level start gen 1: KiB 2048 0 448 0 0 64 …`, `promo 9/0/0(land 0)`, `audit ok`, 0 alloc-fail, 0 evictions. BENCH `max=479.92` ms: the level-start conversion frame |
+| 2, `m5-lookup.cfg` (Look Up Test plugin) + L0, 60 checks | **landscape strict 97.842 %** (gate 98 %: exit 1, `--colour` fail). `within_nb` 99.872 %, `mean_nb` 0.015, `max_nb` 91, **0 non-edge**, `empty=0`, 1 988 404 px; `c3d_land_spans=274`, 25 220 span quads, 0 ring refusals; frame exit 0 (`mean_nb` 0.92). Azahar: host GPU 100 %, software backend 97.72 %. `view_frame_words=3328`; `tex … promo 22/0/0(land 0) evict 12 alloc-fail 0 audit ok`. Not dumped, so "every miss one column late" is inferred from the match with the software backend, not seen |
+| 3, `m5-present-diff-l0.cfg` + L0 | `present_diff final: 31 checks, 0 with RGB differences`, max \|diff\| 0; `static_sets=39 = static_restores=39 + static_frames_ended=0`; `[c3d] play final frames=827 c3d=827 sw=0`, discards and skips 0, `sentinel=0`; 25 static frames, 47 static rects; `view_frame_words=3956`; `land_spans=827` in 827 frames (the span path also runs in default-config play on L0, which had no landscape diff). **The user saw no static on screen** (25 of 827 frames, about 1 s): the static's look (`MODULATE` on masked draws) is **not visually verified** |
+
+**G2-b** (C3D play mode, readback, `m5-bench-c3d.cfg`, against `m5-bench-sw.cfg`; 30 fps cap, `gaps` 0-1; busy = frame − idle):
+
+| Level | C3D frame / idle / **busy** | SW frame / idle / **busy** | **C3D − SW** | Azahar | C3D `render` / `c3d_draw` / `c3d_readback` / `c3d_wait` | SW `render` |
+| --- | --- | --- | --- | --- | --- | --- |
+| L0 | 33.57 / 14.52 / 19.05 | 32.61 / 19.71 / 12.90 | **+6.15 ms** | +2.04 | 1.22 / 5.77 / 1.74 / 2.13 | 5.90 |
+| L6 | 32.82 / 13.12 / 19.70 | 32.58 / 20.65 / 11.93 | **+7.77 ms** | +4.88 | 1.35 / 5.84 / 2.25 / 2.13 | 5.16 |
+| L20 | 33.07 / 13.84 / 19.23 | 32.60 / 20.62 / 11.98 | **+7.25 ms** | +3.51 | 1.45 / 5.01 / 1.69 / 2.26 | 4.93 |
+
+fps 29.79 / 30.47 / 30.24 (C3D) against 30.67 / 30.69 / 30.67 (SW); C3D `max` 87-88 ms against SW 51 ms. Azahar
+understated the copy cost as predicted (2-3×). Recorded, not deciding (user decision 2026-11-07). The SW `max` of
+a window is 40-50 ms; **every 1 s window of the C3D play runs holds one frame of 70-87 ms** (m4s-play20, with play
+checks every 30th frame: 165-215 ms). The user also reported a regular micro-stutter in play. **Likely cause, not
+verified:** `stats_tick()` (`back/context.cpp`) prints ~6 `[c3d]` lines once a second, mirrored over 3dslink and
+written to the SD log. The M3 diff runs (no play mode) show no 1 s hitches (windows 40-55 ms after the 20 diff
+frames), so the busy figures above may include about one such frame per second; a build with the stats printing off
+would show it. Not changed in this session.
+
+### M4 (launches 10-13)
+
+| Launch | Result |
+| --- | --- |
+| 11, `m4-diff.cfg` + L0 | sprites,weapons: exit 0; **sprites** 99.508 % within, **78 non-edge (0.155 %)**, `mean_nb` 0.655, `max_nb` 77, worst check 97.50 %; **weapons** 100.000 %, max 1; frame exit 0, 99.563 % (Azahar: sprites 99.95 %, 79 non-edge 0.159 %, 0.61; weapons 100 %, max 1; frame 99.70 %). `rect_bias 1` holds on hardware (no retry with 2 or 0 needed). `view_frame_words=3724` against Azahar's 3432: scene content (this build's console runs vary 3328-3956), not a hardware difference. Discards 0, five restore counters 0, `unit1_left_bound=0` |
+| 12, `m4-tinted.cfg` + Invisibility Test + L0 | exit 0; tinted **59 040 px, 100.000 %, max 0, 0 non-edge** (= Azahar); `blend_sets=40 = blend_restores=40` (= Azahar); `tinted_rects=40`. PICA's constant-colour blend rounds as Azahar's, no offset. `view_frame_words=3668` |
+| 13, `m4-play.cfg` + L20 | `c3d-diff.py play --min-play-checks 1`: exit 0, **26 checks, `within_nb` 99.445 %** (worst 99.41 %; Azahar 28 at 99.70 %); `play final frames=780 c3d=780 sw=0`, discards and skips 0, `sentinel=0`. BENCH (with play checks, not comparable to the bench above) 26.46 fps, `render` 5.77, `c3d_draw` 5.18, `c3d_readback` 2.09 |
+| 10, `m4-play.cfg`, step 4 (HOME, lid, Close) | **pass.** HOME at +186.8 s, resumed after 4.2 s, picture right; lid closed at +199.6 s (`ONSLEEP`), `ONWAKEUP` 1.1 s later, play continued, picture right; HOME > Close (the user: about 1 s): `gfxExit` with the gate closed (`gpu_right 0, should_close 1, suspended 1`), queue retired after 0 ms, `C3D_Fini` returned, `real gfxExit returned`; `play final frames=4170 c3d=4170 sw=0`, 0 skipped presents, `gate_episodes=0`. No new Luma dump (`crash_dump_00000000-6`, all older). The first hardware test of play frames in flight across suspend |
+
+Late-session finding (launch 10, 4 170 frames, 85 textures converted): `tex … promo 84/0/1(land 1) … evict 29 alloc-fail 1`:
+**one landscape promotion was blocked** (no contiguous 2 MiB VRAM block that late), so that part was sampled from
+FCRAM; nothing wrong on screen. VRAM does not always find the block next to the render targets (design 10 item 10
+for M6).
+
+### M3 (launches 14-15)
+
+| Launch | Result |
+| --- | --- |
+| 14, `m3-diff.cfg` + L0 | exit 0; walls 40140/40133 `cov_mismatch=19/0` `ties=22 tie_mismatch=19` **99.556 %** `mean_nb` **0.23** `max_nb` 60; floors 52624/52631 `19/0` `ties=35 tie_mismatch=19` **99.800 %** `mean_nb` **0.72** `max_nb` 21; 0 non-edge (Azahar: walls 99.69 % / 0.21 / 60, floors 99.87 % / 0.71 / 21). `LUT built (linear, 65536 B)`, `LUT promoted to VRAM`, `citro3d context layout confirmed (unit 1 slot at +0x11c)`; `tev1_not_init=0 unit1_left_bound=0`, restore counters 0, discards 0. **`view_frame_words=1304 draw_words=282 readback_words=10`: identical to Azahar** |
+| 15, `m3-alpha2.cfg` + L0 | exit 0; the same figures as launch 14 (walls 99.556 % / 0.23, floors 99.800 % / 0.72), 0 non-edge, `alpha_x2 1`, command words identical: **the ×2 alpha clamps on PICA** (as Azahar) |
+
+### Design section 10 item 6, this session
+
+Verified: M3 TEV modulate rounding (`mean_nb` within 0.02 of Azahar, max identical); ×2 clamp; unit 1's unbinding
+after a lit frame on hardware; M4 rectangle texel choice at `rect_bias 1`; the constant-colour blend (exact);
+play-mode HOME / sleep / Close; M5 landscape columns without a cut (strict 100 %); the 2 MiB part's conversion at
+level start (L6) and the present path with static (31 checks, exact). Refuted (predicted): the span path's columns
+under float24 are not exact (97.84 % strict, as Azahar's software backend). Measured: G2-b. Not reached or not
+settled: static's look; the landscape part's `TextureCopy` when infravision toggles; sampling a part from FCRAM
+against VRAM (one blocked promotion seen, no timing); texcoord1 at LUT bin edges; A8 / clamp / non-square POT
+beyond what the diffs imply (no mismatch); the 2 MiB VRAM block (blocked once late in a long session).
