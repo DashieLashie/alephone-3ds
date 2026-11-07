@@ -18,8 +18,8 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   try the zero-copy present. The plan is the end of `docs/3ds/NEXT-SPRINT.md`. **Plan A (the fixes) is complete and
   verified on the console (2026-10-26):** the HOME > Close hang (A5/A6), the fatal-error hand-off, the 3dslink
   mirror stall, Power Off, and the fatal fallback's exit (A7, also carried to `3ds-port`). **B** (zero-copy
-  present): B-a measured on the console below the 0.5 ms rule; B-b is being built on its own branch `stage10-bb`
-  (not merged; user decision 2026-10-26). **C (the renderer) on `stage10-c3d`: M0 done** (2026-10-27, tag
+  present): B-a measured on the console below the 0.5 ms rule; B-b was built on its own branch `stage10-bb`
+  (user decision 2026-10-26) and **merged into `stage10-c3d` on 2026-11-07 before M6** (user decision; `zero_copy` defaults to 1). **C (the renderer) on `stage10-c3d`: M0 done** (2026-10-27, tag
   `port-stage10-M0`, `PATCHES.md` 45); **M1 done** (2026-10-27, tag `port-stage10-M1`, Azahar only, no engine edit:
   walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **M2 session 1 done** (2026-11-02, no tag:
   conversion, tiling, texture-cache logic, hooks 2a/2b = `PATCHES.md` 46, floors and texcoords, harness with
@@ -95,7 +95,7 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
    if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's (both used), 47-48 are reserved by
-   stage 10 for M6/M8; 49-55 are used or taken (55: B-b on `stage10-bb`); take 56+ for anything else.
+   stage 10 for M6/M8; 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07); take 56+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

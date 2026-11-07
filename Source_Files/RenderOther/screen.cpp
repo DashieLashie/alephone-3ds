@@ -1138,6 +1138,13 @@ static void change_screen_mode(int width, int height, int depth, bool nogl, bool
 		}
 	}
 	if (!main_surface) {
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+		// Stage 10 B (docs/3ds/CITRO3D_DESIGN.md 5.7, PATCHES.md 55): the GPU present reads this surface.
+		int a1_pitch = 0;
+		if (void* a1_px = a1_3ds::main_surface_pixels(vmode_width, vmode_height, a1_pitch))
+			main_surface = SDL_CreateRGBSurfaceFrom(a1_px, vmode_width, vmode_height, 32, a1_pitch, pixel_format_32.Rmask, pixel_format_32.Gmask, pixel_format_32.Bmask, 0);
+		if (!main_surface)
+#endif
 		main_surface = SDL_CreateRGBSurface(SDL_SWSURFACE, vmode_width, vmode_height, 32, pixel_format_32.Rmask, pixel_format_32.Gmask, pixel_format_32.Bmask, 0);
 	}
 #ifdef MUST_RELOAD_VIEW_CONTEXT

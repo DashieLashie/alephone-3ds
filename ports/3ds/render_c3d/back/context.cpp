@@ -69,7 +69,7 @@ bool s_releasing = false;   // release_and_fini() is running (a fatal error insi
 GxQueue s_gx;
 GateTracker s_gate;
 // C3D frames ended while the gate condition held: with suspend_gate 0 every such frame (two per
-// present with two_frame 1: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
+// present of a two-frame present: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
 unsigned s_frames_gate_closed = 0;
 uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
 bool s_view_frame_ran = false;       // a view frame ran since the present's last sample (note_view_frame)
@@ -116,13 +116,13 @@ void load_config()
 	landscape_set_part_rows(static_cast<int>(s_cfg.land_cut));   // before any landscape texture (M5 test key)
 	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
 	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
-	       "two_frame %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
+	       "two_frame %d, zero_copy %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
 	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
 	       "ring_indices %u, reserve_extra %u, textures %d, uv_half %d, diff_tol %u, vram_cap %u, "
 	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, film \"%s\"\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
-	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.renderer_c3d ? "c3d" : "sw",
+	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.zero_copy, s_cfg.renderer_c3d ? "c3d" : "sw",
 	       s_cfg.mode == Mode::Null ? "null" : s_cfg.mode == Mode::Direct ? "direct" : "readback",
 	       s_cfg.diff, s_cfg.diff_frames, static_cast<unsigned long>(s_cfg.classes), s_cfg.fullbright,
 	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
@@ -661,12 +661,13 @@ void stats_tick()
 	if (now - s_stats_tick < kTicksPerSecond)
 		return;
 	s_stats_tick = now;
-	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3). two_frame 1: `draw` =
-	// frame D (draw + framebuffer transfer), `upload` = frame U. two_frame 0: `draw` = the whole
-	// present (upload + draw + transfer), so across the modes compare it with draw + upload.
+	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3). a two-frame present
+	// (two_frame 1 or zero-copy): `draw` = frame D (draw + framebuffer transfer), `upload` = frame U
+	// (printed when the period had such samples). One-frame presents: `draw` = the whole present
+	// (upload + draw + transfer), so across the modes compare it with draw + upload.
 	char gpu[64];
 	int n = snprintf(gpu, sizeof gpu, " gpu_ms draw=%.2f", s_gpu_n[0] ? s_gpu_ms[0] / s_gpu_n[0] : 0.0);
-	if (s_cfg.two_frame)
+	if (s_gpu_n[1] > 0)
 		snprintf(gpu + n, sizeof gpu - n, " upload=%.2f", s_gpu_n[1] ? s_gpu_ms[1] / s_gpu_n[1] : 0.0);
 	printf("[c3d] stats presents=%u (+%u) odd_surface=%u gx_high_water=%d gx_refused=%u "
 	       "cmdbuf_usage=%.4f present_screen_false_returns=%u gate_skipped=%u%s\n",

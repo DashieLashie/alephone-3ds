@@ -1,0 +1,38 @@
+# Stage 10 B-b (docs/3ds/CITRO3D_DESIGN.md 5.7.5, 5.7.9 item 3): game -> main menu -> game in one run.
+# main_surface goes 400x240 (HUD + Map: the zero-copy buffer) -> 640x480 (menus: staging path) ->
+# 400x240 again (the same buffer, reused: exactly one "[c3d] zero_copy: surface buffer" line).
+# Run with a present_diff config (b-zero-copy-diff.cfg): 0 differences after every path switch.
+# With bottom_screen=2 (Classic) every surface takes the staging path.
+wait 1000
+screens gm-menu
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+screens gm-game1
+log --- Circle Pad up 2 s (walk forward) ---
+circle 0 150
+wait 2000
+circle 0 0
+wait 1000
+log --- START (quit dialog), A (quit to the main menu) ---
+tap START
+wait 1000
+screens gm-quit-dialog
+tap A
+wait 4000
+screens gm-menu2
+log --- second game ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+screens gm-game2
+circle 0 150
+wait 2000
+circle 0 0
+wait 3000
+screens gm-game2-walk
+log --- HOME > Close ---
+quit
+wait 5000

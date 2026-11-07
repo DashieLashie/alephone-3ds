@@ -40,6 +40,17 @@
 	                    U, then the quad); only to measure the cost structure of plan B-b. With
 	                    suspend_gate 1 the gate is checked again between U and D
 
+	Key of plan B-b (design 5.7.2, 5.7.7, the zero-copy present):
+
+	  zero_copy 0|1     default 1. 1 = the 400x240 game surface (HUD + Map) is allocated in linear
+	                    memory (512 KiB, once, never freed) and the GPU's display transfer reads it
+	                    directly; the channel order is fixed by three masked draws, and the present
+	                    is two C3D frames (U, D). 0 = the engine allocates the surface itself and
+	                    every present goes through the staging image: exactly the P1 present.
+	                    Acts from the next game screen setup (the surface is created there), so put
+	                    the file on the card before launching. One build serves both sides of the
+	                    measurement. Needs present gpu; with present cpu the key does nothing.
+
 	Keys of M0 (design 7, "M0 specification"; the renderer harness):
 
 	  renderer sw|c3d   default sw. c3d: the citro3d renderer (in M0 only the null mode runs)
@@ -176,6 +187,7 @@ struct Config
 	unsigned land_cut = 512;                // test only: the landscape texture's cut row (64..512)
 	bool quiet = false;                     // test only: no once-a-second [c3d] stats lines (the final ones stay)
 	std::string film;
+	bool zero_copy = true;
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
