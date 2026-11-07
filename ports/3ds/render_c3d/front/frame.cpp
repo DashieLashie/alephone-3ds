@@ -765,6 +765,8 @@ void run_null(DrawFn draw, void* ctx)
 
 void stats_tick()
 {
+	if (back::config().quiet)
+		return;
 	const uint64_t now = machine_tick_count();
 	if (s_stats_ms == 0)
 		s_stats_ms = now;

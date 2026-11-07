@@ -1844,11 +1844,8 @@ by eye), Look Up Test **strict 97.84 %, under the 98 % gate by 0.16 point** (the
 fps 29.79 / 30.47 / 30.24 (C3D) against 30.67 / 30.69 / 30.67 (SW); C3D `max` 87-88 ms against SW 51 ms. Azahar
 understated the copy cost as predicted (2-3×). Recorded, not deciding (user decision 2026-11-07). The SW `max` of
 a window is 40-50 ms; **every 1 s window of the C3D play runs holds one frame of 70-87 ms** (m4s-play20, with play
-checks every 30th frame: 165-215 ms). The user also reported a regular micro-stutter in play. **Likely cause, not
-verified:** `stats_tick()` (`back/context.cpp`) prints ~6 `[c3d]` lines once a second, mirrored over 3dslink and
-written to the SD log. The M3 diff runs (no play mode) show no 1 s hitches (windows 40-55 ms after the 20 diff
-frames), so the busy figures above may include about one such frame per second; a build with the stats printing off
-would show it. Not changed in this session.
+checks every 30th frame: 165-215 ms). The user also reported a regular micro-stutter in play: **cause found in the follow-up below** (the once-a-second
+`[c3d]` stats printing); the busy figures above include it, and the L0 row is restated there.
 
 ### M4 (launches 10-13)
 
@@ -1881,3 +1878,27 @@ under float24 are not exact (97.84 % strict, as Azahar's software backend). Meas
 settled: static's look; the landscape part's `TextureCopy` when infravision toggles; sampling a part from FCRAM
 against VRAM (one blocked promotion seen, no timing); texcoord1 at LUT bin edges; A8 / clamp / non-square POT
 beyond what the diffs imply (no mismatch); the 2 MiB VRAM block (blocked once late in a long session).
+
+### Stutter follow-up: the once-a-second stats printing (New 3DS, 2026-11-07)
+
+The user reported a freeze about once a second in play. The G2-b logs showed one 65-93 ms frame in every 1 s
+profiler window (software: 40-50 ms). The suspect was `stats_tick()`: two once-a-second printers (`back/context.cpp`
+and `front/frame.cpp`, the latter with `fflush(stdout)`), about six `[c3d]` lines a second, mirrored over 3dslink
+and written to the SD log. A test-only key **`quiet 0|1`** (`core/config.h`; both printers return at once; the
+final stats and the profiler's own `[prof] window` line stay) was added; `stutter-base.cfg` / `stutter-quiet.cfg`
+(`scripts/3ds/tests/c3d/`), `debug-perf-L0` with `log 1`, HUD + Map @30, play mode, 20 s measured, a slow steady
+turn in place; transcripts `stut-base.txt`, `stut-quiet.txt` (not in git). Build `build-3ds-c3d-prof`, 0 warnings.
+
+| Run | Window maxima | BENCH `max` | `present` | idle | busy | C3D − SW (12.90) | Felt |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| G2-b earlier (`m5s-c3d-L0`) | 62-87 ms | 86.9 | 1.89 | 14.52 | 19.05 | +6.15 | stutter |
+| `stutter-base` (stats on) | 65-93 ms (28 windows, 36 stats lines) | 93.3 | 1.93 | 14.46 | 18.41 | +5.51 | stutter |
+| `stutter-quiet` (`quiet 1`) | **40-53 ms** (0 stats lines) | **52.9** | **0.49** | 16.25 | **16.36** | **+3.46** | **"much smoother"** |
+
+**Verified:** the stats printing was the stutter. With it off the windows fall to the software renderer's range, and
+the profiler's window line (still printed) is not the cause. Run 3 (`quiet 1` and no `log` line) was not needed.
+The printing also cost about 2 ms of busy time per frame, almost all in `present` (1.93 → 0.49 ms; the 3dslink
+mirror and the SD write), so **G2-b above is overstated for L0 by about 2 ms (+6.15 → +3.46 against SW)**. L6 and
+L20 were not re-run; the same ~2 ms is expected, not measured. A shipping build has none of these prints.
+Any later console busy comparison (M6) must use `quiet 1`. Not committed: the user decides whether `quiet` stays.
+

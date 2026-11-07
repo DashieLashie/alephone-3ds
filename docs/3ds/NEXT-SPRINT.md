@@ -1202,7 +1202,8 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    Close clean), M5 passed except the Look Up Test's strict gate (97.84 % against 98 %: PICA's float24 columns, as
    Azahar's software backend; the clip-at-cut fallback is the remedy if wanted) and static's look (not seen).
    **G2-b: readback costs +6.15 / +7.77 / +7.25 ms busy on L0 / L6 / L20** (Azahar +2.04 / +4.88 / +3.51).
-   A 1 Hz stutter in play (stats printing, unverified) is noted there. **Next: M6** (`KICKOFF_M6.md`).
+   The 1 Hz stutter in play was the stats printing (verified with `quiet 1`: window maxima 65-93 → 40-53 ms, L0 busy
+   −2 ms, C3D − SW +3.46; `PERF.md` "Stutter follow-up"); G2-b above is overstated by ~2 ms. **Next: M6** (`KICKOFF_M6.md`).
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.

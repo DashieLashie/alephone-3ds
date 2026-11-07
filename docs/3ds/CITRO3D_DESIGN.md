@@ -4603,10 +4603,10 @@ the 98 % gate: no non-edge coverage mismatch, `within_nb` 99.87 %; it is the flo
 backend showed (97.72 %), not a regression. The user's call whether to adopt the clip-at-cut fallback. It is not
 only a test path: the default-config L0 play run (`m5s-pres`, `land_cut 512`) drew `land_spans=827` in 827 frames,
 so the span path runs in ordinary play wherever a landscape polygon crosses the cut; that run had no landscape
-diff, so the default's exactness on L0 was not measured. **G2-b** (readback − SW busy): +6.15 / +7.77 / +7.25 ms,
+diff, so the default's exactness on L0 was not measured. **G2-b** (readback − SW busy, stats printing on; ~2 ms lower with `quiet 1`, L0 +3.46): +6.15 / +7.77 / +7.25 ms,
 2-3× Azahar: M6's direct mode is the way to remove it; the plan (user decision 2026-11-07) stands. **Two
 observations that need a follow-up, neither blocking:** (1) every 1 s window in play mode has one frame of 70-87 ms
-(SW: 40-50), and the user saw a regular micro-stutter; probable cause `stats_tick()`'s once-a-second printing over
-3dslink and to the SD log (unverified; M3's diff runs without play mode show none), which would also inflate G2-b's
-busy figures a little; (2) static's look was never seen (25 of 827 frames at the bench spot), so `MODULATE` on
+(SW: 40-50), and the user saw a regular micro-stutter; cause **found and verified the same day** (`PERF.md` "Stutter follow-up"): `stats_tick()`'s once-a-second printing over
+3dslink and to the SD log; with the test-only key `quiet 1` the windows fall to 40-53 ms, the user felt it "much
+smoother", and L0's busy time drops 18.41 → 16.36 ms (C3D − SW +5.51 → +3.46 ms), so G2-b is overstated by about 2 ms; (2) static's look was never seen (25 of 827 frames at the bench spot), so `MODULATE` on
 masked static rests on the counters alone. Not run: M3 step 3 (L08 film), M4's software rerun and Classic.

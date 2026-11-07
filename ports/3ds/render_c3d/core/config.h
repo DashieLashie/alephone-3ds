@@ -105,6 +105,9 @@
 	  landscape_tol N   0..255, default 0 = diff_tol: the tolerance printed on landscape DIFF lines
   land_cut N        64..512, default 512: the row a landscape texture is cut at; test only (m5-lookup.cfg: 300, just
                     above the horizon, so part 1 and the cut-crossing span path run; critic, M5 code review major 2)
+  quiet 0|1         default 0; test only: the two once-a-second stats printers (back and front) return without
+                    printing or flushing, to see whether that logging causes a play-mode hitch each second
+                    (console short checks 2026-11-07: one 70-87 ms frame per 1 s window)
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -171,6 +174,7 @@ struct Config
 	unsigned fail_every = 0;                // every N-th texture create() fails (0 = never)
 	unsigned landscape_tol = 0;             // the landscape class's DIFF tolerance (0 = diff_tol)
 	unsigned land_cut = 512;                // test only: the landscape texture's cut row (64..512)
+	bool quiet = false;                     // test only: no once-a-second [c3d] stats lines (the final ones stay)
 	std::string film;
 };
 

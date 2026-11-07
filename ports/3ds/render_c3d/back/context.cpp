@@ -655,6 +655,8 @@ void sample_drawing_time(GpuTime which)
 
 void stats_tick()
 {
+	if (s_cfg.quiet)
+		return;
 	const uint64_t now = svcGetSystemTick();
 	if (now - s_stats_tick < kTicksPerSecond)
 		return;
