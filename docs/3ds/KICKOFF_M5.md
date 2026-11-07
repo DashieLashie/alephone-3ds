@@ -9,8 +9,8 @@ unit-1 switch), `_solid` skipped, the play scan, `fail_every`, the cache audit, 
 all C3D). Films chosen: L01, L06, L10, L16, L21.
 
 **Decided by the user at the end of session 1 (2026-11-07):** the play check leaves SW's static coverage out (as
-built); and stage 10 **continues to M6 and M9 (stereo) whatever G2-a shows** — G2-a is still measured and reported, it
-no longer decides. **Session 2, in order:** (1) nothing to ask before starting;
+built); and stage 10 **builds every remaining milestone, M6 → M7 → M8 → M9 (stereo), whatever G2-a shows** — G2-a is still
+measured and reported, it no longer decides. **Session 2, in order:** (1) nothing to ask before starting;
 (2) write the remaining configs: `m5-vram512.cfg`, `m5-fail50.cfg` (play over the L01 film, gate `forced_fails ≥ 10`),
 `m5-fail1.cfg` (+ `--level-hop-test`, `--expect-offs 2`), `m5-present-diff.cfg` (play + a static film stretch:
 `static_sets > 0`), `m5-bench-c3d.cfg` / `m5-bench-sw.cfg` (copies of M4's); `c3d-diff.py play` should show `static_px`;

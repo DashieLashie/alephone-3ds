@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M7, M8, M9 | Supersampling, preference, stereo — **all optional** | — |
+| M7, M8, M9 | Supersampling, preference, stereo — **all to be built** (user, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -127,9 +127,9 @@ Order: the fixes, then the zero-copy present, then M0-M6, M7, M9 (open questions
 3 and 9).
 
 **User decisions (2026-11-07, during M5, before G2-a is measured):** **continue until stereoscopic 3D (M9)**
-whatever G2-a's result: M5 → M6 (direct mode, which M9 needs: section 6) → M9; M7 and M8 stay optional, decided when
-reached. G2-a is still measured and recorded at the end of M5 (and G2-b on the console when it runs), but its outcome no
-longer decides whether M6 is built. Also: play checks leave SW's static coverage out (Review log "M5, play check and
+whatever G2-a's result: M5 → M6 (direct mode, which M9 needs: section 6) → M9. **Amended the same day: M7 and M8 are
+not optional either** ("I want to try all possibilities"): the order is section 7's, **M5 → M6 → M7 → M8 → M9**. Every gate
+(G2-a, G2-b, G3-a, G3-b) is still measured and recorded, but none decides whether the next milestone is built. Also: play checks leave SW's static coverage out (Review log "M5, play check and
 static, user decision").
 
 **Status, 2026-10-26:** G0 and G1 are behind us. The fixes (plan A, 5.6.0 pieces 0-5 and
@@ -1764,7 +1764,7 @@ VBlank wait (zone `c3d_vblank` shows it) without changing busy (rule 1).
   zero-copy path selection (5.7.5), `zero_copy` (5.7.7); B-a's `two_frame` becomes the zero-copy
   present's structure (zero-copy presents are always two-frame).
 
-## 6. Stereoscopic 3D (M9, optional, last; direct mode only)
+## 6. Stereoscopic 3D (M9, last; direct mode only)
 
 Two view targets, two linked screen targets (`GFX_LEFT`/`GFX_RIGHT`),
 `gfxSet3D(true)` (`gfx.h`:79; `particles/source/main.c`:175-183), slider
@@ -3513,19 +3513,19 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
 - Prerequisite from M4 (commit review minor 4): the texture cache's lookup scans all 512 slots per new draw key
   (`core/texcache.cpp` `lookup`); a hash on `(bitmap, tables)` before direct mode, measured.
 
-### M7 — 2x2 supersampling (optional, after G3)
+### M7 — 2x2 supersampling (to be built, after M6; user 2026-11-07, G3 measured but not deciding)
 - View at 800x480 (texture 1024x512), halved by `GX_TRANSFER_SCALE_XY`
   (`gx.h`:33-38, readback) or bilinear composite (direct); cache cap lowered
   (9.1).
 - Accept: output vs CPU 2x2 box of the same 800x480 render read back
   ≤ 1/channel.
 
-### M8 — Renderer preference (optional)
+### M8 — Renderer preference (to be built; user 2026-11-07)
 - Touch `preferences.cpp/.h` ("Renderer: Software / GPU (experimental)",
   default Software, `<graphics c3d_renderer="0|1">`), `PATCHES.md` 48.
 - Accept: switches at the next frame; persisted.
 
-### M9 — stereo 3D (optional; only if open question 9 says yes)
+### M9 — stereo 3D (to be built; open question 9 answered yes 2026-10-19, user 2026-11-07)
 - Accept: section 6 tests.
 
 ## 8. Verification without hardware
@@ -4476,3 +4476,6 @@ Asked with the first L01 play run's numbers (9 of 155 play checks had static; 2 
 SW's static coverage), the user chose to **leave SW's static coverage out of the play checks**, as 8.3 already does
 for the frame check; static is gated by its own density check. In the same answer the user decided that stage 10
 **continues until stereoscopic 3D (M9)** whatever G2-a shows (0.5).
+
+**Amended the same day (user):** M7 (2x2 supersampling) and M8 (the Renderer preference) are to be built too: stage 10
+builds every milestone, M5 → M6 → M7 → M8 → M9; the gates are measured and reported, they no longer decide.
