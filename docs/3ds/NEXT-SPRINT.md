@@ -1188,6 +1188,14 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    of this file).
    **Next (user decision 2026-11-07): M5**, kickoff `KICKOFF_M5.md`. It ends at G2-a ("busy(readback) ≤
    busy(SW) + 1 ms"), which M4's L20 bench already misses by 2.5 ms: what to do then is the user's call.
+   **M5 done (2026-11-07**, tag `port-stage10-M5`; `PERF.md` "Stage 10 M5", Azahar — non-authoritative):
+   landscapes (two texture parts, cut at row 512), static (LFSR noise on unit 1), eviction hardening (a promotion
+   allocates before it evicts, blocks for its generation when the heap refuses, landscapes evicted last), the play
+   scan, `fail_every`, the cache audit. Every play frame is now C3D (no landscape or static frame goes to SW);
+   landscapes exact on the host GPU, static within ±2 points, all 5 films pass on both Azahar backends.
+   **G2-a fails** (busy +2.04 / +4.88 / +3.51 ms on L0 / L6 / L20 against +1 ms; `R_est` passes). **Next (user
+   decision 2026-11-07, whatever G2-a showed): M6**, kickoff `KICKOFF_M6.md`. Console: "M5 console check, short
+   version" at the end of this file (not run).
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1702,3 +1710,47 @@ under ~2 s, the log ends with `[c3d] play final …` and `real gfxExit returned`
 `PERF.md` ("Stage 10 M4 — console, short check") per launch the class table, the `[c3d] cmdbuf final` and
 `[c3d] play final` lines and the BENCH lines; then the design's M4 status, section 10 item 6 ("M4:") and the
 Review log.
+
+## M5 console check, short version (25-35 min; when the user is at the console)
+
+**Not run yet.** Written 2026-11-07 for `port-stage10-M5`. Azahar cannot answer M5's hardware questions (design
+section 10 item 6, "M5:"): **the landscape span path's columns under PICA's float24** (Azahar's software backend
+misses the strict 98 % by one column on the look-up; host GPU exact), **the 2 MiB landscape part** (its conversion
+and `TextureCopy` at level start, whether VRAM finds a contiguous 2 MiB block, the cost of sampling it from FCRAM
+when the promotion is blocked), **`MODULATE` on masked static draws**, and **G2-b** (readback vs SW busy on the
+console). It can follow the M3/M4 short checks in the same session. Setup, driving and the `$H/m1/run.sh` helper as
+in "M1 console check, short version" (HUD + Map @30; `cmake --build build-3ds-c3d-prof` at `port-stage10-M5`).
+**Press A at once at the menu.**
+
+**1. Landscapes on L6** (~5 min). ftpd: put `$H/sprint8/debug-perf-L6` as `/3ds/alephone/debug-perf` and
+`scripts/3ds/tests/c3d/m5-diff.cfg` as `/3ds/alephone/debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m5s-l6`; then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m5s-l6.txt --colour landscape --shading lit --strict landscape --nonedge-pct 0.1 --within 98 --tol 2 --mean 255 --min-checks 20 --min-covered 2000 --min-covered-checks 10`
+and `… --colour frame --shading lit --within 97 --tol 4 --mean 255 --min-checks 20`. **Pass:** both exit 0,
+`sentinel=0`, 0 discards, restore counters 0. Azahar (host GPU): 254 700 landscape pixels, strict **100 %**; frame
+99.58 %. **Record** the `[c3d] tex: level start gen 1: …` line (Azahar: 2 MiB part converted in frame 0) and the
+log's timestamps around it (the conversion's time), and the last `tex: entries` line (`promo done/deferred/blocked
+(land n)`: a blocked landscape part is sampled from FCRAM).
+
+**2. The cut on screen: Look Up Test on L0** (~5 min). ftpd: put the folder `scripts/3ds/tests/plugins/Look Up Test`
+into the scenario's `Plugins/` folder (as M4's Invisibility Test), `debug-perf-L0` as `debug-perf`,
+`m5-lookup.cfg` as `debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m5s-look`; the landscape gate as in 1 with
+`--min-checks 60`. **Pass:** exit 0 and `c3d_land_spans > 0` in the DIFF summary. Azahar: host GPU strict 100 %,
+software backend 97.72 % (each miss one column late). **Reading it:** 97-98 % with misses one column late = PICA's
+float24 behaves like Azahar's software backend: record (design section 10, the clip-at-cut fallback is the remedy);
+lower or holes = stop and record.
+
+**3. Static and the present** (~5 min). ftpd: remove the plugin folder; `debug-perf-L0`; `m5-present-diff-l0.cfg`
+as `debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m5s-pres`. **Pass:** `present_diff final: N checks, 0 with RGB
+differences`, `static_sets` = `static_restores` + `static_frames_ended` (> 0), `[c3d] play final` with `sw=0`.
+Look at the static on screen (the wall pattern near the start): noise, not a flat or striped area (`MODULATE`).
+
+**4. G2-b bench** (~10 min). Per level N in 0, 6, 20: `debug-perf-L<N>` as `debug-perf`; `m5-bench-c3d.cfg` as
+`debug-c3d` → `$H/m1/run.sh build-3ds-c3d-prof m5s-c3d-L<N>`; then `m5-bench-sw.cfg` → `m5s-sw-L<N>`. **Record** the
+BENCH lines (`busy`, `render`, `c3d_draw`, `c3d_readback`). Azahar: busy +2.04 / +4.88 / +3.51 ms (C3D − SW); Azahar
+understates copies, so expect worse. Recorded, not deciding (user decision 2026-11-07).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d` and the plugin folder. **Record** in
+`PERF.md` ("Stage 10 M5 — console, short check") per launch the class table, the `[c3d] cmdbuf final`, `[c3d] play
+final` and `tex:` lines and the BENCH lines; then the design's M5 status, section 10 item 6 ("M5:") and the Review
+log.
+

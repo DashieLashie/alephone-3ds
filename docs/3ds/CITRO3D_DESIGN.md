@@ -3503,6 +3503,19 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     draw restored; L01 film in play mode: 4 650 frames, **all C3D** (M4: 2 915 to SW), 361 with static, 155 play checks,
     worst 98.63 %, 0 discards, `sentinel` 0; the level-start line logs (2 MiB in frame 0, `audit ok`, GX high-water 11).
   - *Not in M5:* direct mode (M6), the texture-cache hash (an M6 prerequisite), supersampling, stereo.
+- **Status (2026-11-07): M5 implemented and accepted** (`PERF.md` "Stage 10 M5", Azahar — non-authoritative;
+  commits `13910b169` session 1, `663d05820` and `9d6fde66f` review fixes, then the record; critic: spec REVISE then
+  APPROVE round 2, code REVISE then APPROVE round 2). Host tests 2 654 258 checks, 0 failures. On both Azahar
+  backends: landscapes **exact** on the host GPU wherever they are on screen (L0, L6, films L01, L10, L16; strict
+  ≥ 98.99 % under the software backend), the cut between the two parts on screen with the test-only `land_cut 400`
+  and the Look Up Test (exact on the host GPU; 97.72 % strict under the software backend, every miss one column late:
+  Review log "M5 code review, round 1"); static density **+0.37 points** on the L06 film (host GPU, ΣC 81 730; software backend +0.49 points on ΣC 35 820, under the minimum, read by hand); sprites, weapons and the full frame (with
+  landscapes) pass on all 5 films; play mode draws every frame with C3D (`scan` 0: no landscape or static frame to
+  SW; the L01 film 13 431 C3D frames, M4 sent 2 915 to SW); `vram_cap 512`, `fail_every 50` (43 forced failures, audit
+  ok) and `fail_every 1` (`offs 2 ons 1`) pass; present diff 0; M1-M4 gates unchanged. **G2-a fails** as predicted:
+  `R_est` passes (≤ 0.62 ms), busy(readback) − busy(SW) = +2.04 / +4.88 / +3.51 ms on L0 / L6 / L20 against +1 ms;
+  recorded, not deciding (user decision 2026-11-07): M6 next. Console: `NEXT-SPRINT.md` "M5 console check, short
+  version" (the span path's float24 columns, `promotions_blocked` and FCRAM sampling, the level-start conversion).
 
 ### M6 — direct mode (HUD + Map)
 - Touch: `screen.cpp` hook 3 (`PATCHES.md` 47).
@@ -4543,3 +4556,16 @@ production landscape gate stays strict at 98 on both backends; section 10 keeps 
 non-blocking minor applied: at the cap, the real heap can refuse a promotion only because the victims still hold their
 blocks, so `alloc_promotion` now evicts for the cap and retries once before it blocks; the blocked landscape parts are
 counted (`promo done/deferred/blocked(land n)`). Host test: a FakeAlloc whose VRAM heap equals the cap.
+
+### M5 acceptance (coordinator, 2026-11-07)
+
+The series (`build/m5/tools/series.sh`, on `9d6fde66f`) passed every gate whose class was on screen. Gates that fail
+only on `--min-covered` (no landscape at L20 or in the L06 / L21 films, 1 858 pixels in L16; per-film static under
+40 000) were read by hand: every check with sky was exact on the host GPU. Two harness fixes, no renderer change:
+`m5-static-film(-swbe).cfg` asked for 800 checks of a film that lasts ~488 (the summary line never came; now
+`diff_frames 450`), and the L06 present-diff run is killed at the film's end before its final line (added
+`m5-present-diff-l0.cfg`, L0's bench spot, which shows static and exits cleanly: 46 checks, 0 differences). After the fix the host-GPU static gate passes
+(+0.37 points, ΣC 81 730); under the software backend the 450 checks hold ΣC 35 820 (+0.49 points), under the
+40 000 minimum because the film's last static stretch comes after check 450 (the first run reached 63 426 at −0.35
+points): read by hand, no tolerance change. G2-a as in `PERF.md` "Stage 10 M5".
+

@@ -1,3 +1,9 @@
+# Done (2026-11-07, tag `port-stage10-M5`)
+
+Session 2 ran the critic (code REVISE, then APPROVE in round 2), the acceptance series on both Azahar backends and G2-a:
+`PERF.md` "Stage 10 M5", design 7 M5 "Status" and Review log "M5 acceptance". G2-a fails (busy +2.04 / +4.88 / +3.51 ms
+on L0 / L6 / L20; `R_est` passes); per the user's decision the next milestone is M6: `KICKOFF_M6.md`.
+
 # Session 2 (written 2026-11-07 at the end of session 1)
 
 Session 1 did more than planned: the **spec** (`8566bdc5b`, critic REVISE then APPROVE in round 2) and the **whole M5 code**

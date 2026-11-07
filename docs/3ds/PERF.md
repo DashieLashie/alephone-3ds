@@ -1722,3 +1722,89 @@ fps 30.3 everywhere, `gaps` 0. As designed (0.5), readback mode is no speedup: o
 readback + copy cost more than SW's span loop in Azahar (which understates copies; the console decides). The
 end-of-run captures: L0 and L6 identical to SW (SW frames), L20 925 of 96 000 pixels differ by more than 4.
 Classic L20 with play on: 29.03 fps, `max` 366 ms (one hitch; no SW Classic run in this series).
+
+## Stage 10 M5: landscapes, static, eviction and fallback hardening; G2-a (Azahar — non-authoritative)
+
+Recorded 2026-11-07 on `stage10-c3d` (`13910b169` session 1, `663d05820` and `9d6fde66f` review fixes; the record
+commit adds the series' config fixes). Design section 7 "M5 specification"; the series ran on `9d6fde66f`
+(`build-3ds-c3d-prof`, `build/m5/tools/series.sh`). Builds 0 warnings; no engine edit; OFF builds' `objdump -d`
+identical to the session start, `nm` 0. Host tests **2 654 258 checks, 0 failures** (the landscape sweep at cut 512
+and 300, the promotion-pressure test, `land_cut`, the cut-300 conversion of both parts).
+
+**Gates** (design 7 M5 "Colour and density gates"; M4's sprite, frame and play gates unchanged): landscape
+`--colour landscape --shading lit --strict landscape --nonedge-pct 0.1 --within 98 --tol 2 --mean 255` (gated on the
+strict figures; `--min-covered 2000 --min-covered-checks 10`, films 20 000); static `--static --min-covered 40000`
+(density within ±2 points of SW, pooled); the full frame with landscapes **included** `--colour frame --shading lit
+--within 97 --tol 4 --mean 255`. A run whose bench spot or film shows no landscape (L20, films L06 and L21) or too
+little (L16: 1 858 pixels) fails `--min-covered` by construction: read by hand (every check that had sky was exact
+on the host GPU). Per-film static covers 0-30 164 pixels, under 40 000: the static gate is the dedicated film below.
+
+| Run (checks) | Backend | Landscape pixels / strict | Sprites within (weapons 100 %) | Frame within (strict) | Gate |
+| --- | --- | --- | --- | --- | --- |
+| `m5-diff` L0 (20) | host GPU / software | 308 940 / **100 %**; sw 99.58 % | — | 99.72 % (99.21); sw 99.71 % | pass, both |
+| L6 (20) | host GPU / software | 254 700 / **100 %**; sw 99.93 % | — | 99.58 % (98.91); sw 99.55 % | pass, both |
+| L20 (20) | host GPU / software | (none) | — | 99.52 % (98.81); sw 99.52 % | frame pass |
+| look-up L0 `m5-lookup` cut 400 (60) | host GPU / software | 2 186 532 / **100 %**; sw 2 037 763 / 97.72 % (gate 97) | — | 99.80 %; sw 99.59 % | pass, both |
+| look-up L6 (60) | host GPU / software | 2 222 713 / **100 %**; sw 2 202 728 / 99.26 % | — | 99.55 %; sw 99.52 % | pass, both |
+| film L01 `m5-film` (120) | host GPU / software | 61 134 / 100 %; sw 168 296 / 98.99 % | 99.97 %; sw 99.86 % | 99.70 %; sw 99.78 % | pass, both |
+| film L06 (120) | host GPU / software | (none) | 99.95 %; sw 99.73 % | 99.63 %; sw 99.60 % | sprites, frame pass |
+| film L10 (120) | host GPU / software | 173 906 / 100 %; sw 170 458 / 99.91 % | 99.92 %; sw 99.78 % | 99.58 %; sw 99.59 % | pass, both |
+| film L16 (120) | host GPU / software | 1 858 / 100 %; sw 1 392 / 99.49 % (by hand) | 99.96 %; sw 99.89 % | 99.75 %; sw 99.74 % | sprites, frame pass |
+| film L21 (120) | host GPU / software | (none) | 99.85 %; sw 99.60 % | 99.57 %; sw 99.59 % | sprites, frame pass |
+
+The look-up runs (`--look-up-test`: a Lua plugin tilts the view to 28° and sways 14-28°) use the test-only `land_cut
+400` so that the cut between the two texture parts is on screen (Marathon 2's visible sky is rows 302-500: row 512
+never is): 306 / 236 landscape spans on L0 / L6, both parts drawn. Under the software backend every strict miss is
+one column late (the span path's one-line quads under float24, design Review log "M5 code review, round 1": gated
+at 97 there, a console item). Worst single checks: frame 97.50 % (L10, both backends); sprites 98.41 % (host GPU),
+76.24 % under the software backend on a few-dozen-pixel check (M4 had 62.5 %).
+
+**Static** (`m5-static-film(-swbe).cfg`, the L06 film, every 2nd frame; the first run asked for 800 checks of a film
+that lasts ~488 and never reached its summary line, rerun at `diff_frames 450`): host GPU **pass**, 450 checks, 33 with static, ΣC 81 730, density 56.89 / 57.26 %
+(**+0.37 points**), B outside C 2 non-edge pixels (0.002 %); its frame gate 99.70 % within (worst check 97.85 %).
+Software backend: density 75.80 / 76.28 % (+0.49 points) but ΣC 35 820, under the 40 000 minimum: the film's last
+static stretch falls after check 450 (the first run's 487 checks reached ΣC 63 426 at −0.35 points, with no summary
+line); read by hand as within ±2 on both runs; frame 99.67 % (worst 98.26 %). Per-film static (the 5 films, per check
+≥ 4 096 pixels printed, not gated): deltas −1.47 … +1.94 points.
+
+**Play mode** (`m5-play(-swbe).cfg` etc.: `play 1`, `play_check 30`; landscapes and static now drawn by C3D):
+
+| Run | C3D / SW frames | Play checks: pooled / worst | Notes |
+| --- | --- | --- | --- |
+| L01 film `m5-play-film`, host GPU / software | 13 431 / 0; sw 8 568 / 0 | 447: 99.68 % / 98.59 %; sw 285: 99.60 % / 98.15 % | M4: 2 915 to SW; 588 static frames; killed at the film's end |
+| script 12, host GPU / software | 2 849 / 0; sw 1 391 / 0 | 94: 99.66 % / 98.50 %; sw 46: 99.56 % / 99.22 % | |
+| L0 / L6 / L20 bench spots | 930 / 940 / 988, 0 SW | 31 / 31 / 32: 99.73 / 99.58 / 99.57 % | L0 and L6 all landscape (M4: 0 C3D frames) |
+| `vram_cap 512` L0 / L6 / L20 | 903 / 942 / 990, 0 SW | 30 / 31 / 33: 99.72 / 99.58 / 99.57 % | L0: 166 conversions, 122 evictions, 0 allocation failures, 0 discards |
+| script 06 / 07 / 13 / 14 | 676 / 2 711 / 799 / 150, 0 SW | 22 / 90 / 26 / 5: worst 99.72 / 98.50 / 99.72 / 99.74 % | 14: M4 had 0 C3D frames (all landscape) |
+| Classic L20 (perf-bench) | 840 / 0 | 28: 99.70 % / 99.69 % | |
+| `fail_every 50`, L01 film | 13 890 / 43 | 463: 99.72 % / 98.63 % | 43 forced texture failures, never 10 in a row (`offs 0`); 393 audits, all `ok` |
+| `fail_every 1` + `--level-hop-test`, L20 | 0 / 1 611 | — | 10 `tex` discards → off; level hop → on; 10 more → off: **offs 2, ons 1** |
+
+Every play run: `scan` 0 for every reason (no landscape or static frame goes to SW any more), discards 0 except the
+forced ones, skips 0, `overflow` 0, `sentinel` 0. **Texture cache** (L01 play film, host GPU): 1 924 conversions,
+1 740 evictions, 16 promotions blocked for their generation (2 landscape parts), 16 allocation failures, 1 burst, 0
+discards, audit ok (session 1 before the promotion fix: 1 732 allocation failures, 3 bursts). The level-start line:
+`audit ok`, up to 3 008 KiB converted in the first frame (L20), GX high-water 13. **Present diff** with play on:
+script 08 116 checks, L0's bench spot (`m5-present-diff-l0.cfg`: 59 static frames, `static_sets=121
+static_restores=121`) 46 checks, **0 with RGB differences** (the L06 film run is killed at the film's end before its
+final line: its 3 logged checks were 0). **Regression:** M3's lit gate L0 unchanged on both backends (walls 99.69 %, floors
+99.87 %, `view_frame_words=1304`), M2's full-bright gate unchanged (walls 99.68 / 99.69 %, floors 99.85 %),
+`m1-diff-walls.cfg` `--coverage walls` exit 0, `m0-readback-cal.cfg` and P1 script 22 (`real gfxExit returned`).
+Restore counters 0 everywhere; `static_sets` = `static_restores` + `static_frames_ended`. Command words up to 4 888
+per view frame (L01 film; buffer 131 072 words, `usage_max` 0.0428); ring high-water 1 440 / 2 154 (host GPU), 1 549
+/ 2 331 (software backend) of 2 048 / 4 096.
+
+**G2-a** (design 0.5; design 7 M5 "G2-a": final binary, host-GPU backend, HUD + Map @30, `m5-bench-c3d.cfg` = play
+on vs `m5-bench-sw.cfg` = `renderer sw`; recorded, not deciding: user decision 2026-11-07):
+
+| Level | SW busy / render | C3D busy / render + c3d_draw + c3d_readback | C3D play frames | Busy (limit +1 ms) |
+| --- | --- | --- | --- | --- |
+| L0 | 17.72 / 11.20 | 19.76 / 0.80 + 10.21 + 2.18 | 865 of 865 | **+2.04 ms** (+11.5 %) |
+| L6 | 15.44 / 8.98 | 20.32 / 1.06 + 10.20 + 2.18 | 868 of 868 | **+4.88 ms** (+31.6 %) |
+| L20 | 15.62 / 8.63 | 19.13 / 1.08 + 8.41 + 2.18 | 869 of 869 | **+3.51 ms** (+22.5 %) |
+
+(1) `R_est ≤ 3 ms`: **passes** (M0's table: 0.34 / 0.62 / 0.33 ms). (2) busy(readback) ≤ busy(SW) + 1 ms:
+**fails on all three**, as predicted (L20 +3.51 ms: M4 measured +3.49). L0 and L6 now run C3D frames (M4's bench
+spots were all SW): their landscapes cost `c3d_draw` 10.2 ms against SW's `render` 11.2 / 9.0. fps 30.3 everywhere,
+`gaps` 0. G2-a fails; per the user's decision M6 (direct mode, which removes the readback and the copy) is next all
+the same. Azahar understates copies (~40 %), so G2-b on the console is likely worse.
