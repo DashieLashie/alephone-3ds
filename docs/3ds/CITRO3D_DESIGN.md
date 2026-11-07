@@ -702,7 +702,8 @@ by M0's calibration (**UNVERIFIED** until then).
 1. **View frame** inside `render_frame()`: `C3D_FrameBegin(0)`, draws into a
    texture-backed target (`C3D_RenderTargetCreateFromTex`, `renderqueue.h`:63),
    `C3D_FrameEnd(GX_CMDLIST_FLUSH)` — the GPU starts now (work only starts at
-   `C3D_FrameEnd`, 0.3), while the CPU draws overlays and the bottom screen.
+   `C3D_FrameEnd`, 0.3), while the CPU draws overlays and the bottom screen (M6 specification, hook 3c: on a
+   direct frame the bottom screen is drawn before the present, which comes first in `render_screen`).
 2. Hook 3 sends CPU overlays to `overlay_surface()` (400x240 ARGB8888 **with
    alpha**; SDL blending yields premultiplied colour, 0.1) and skips the
    world-view blit.
@@ -3544,6 +3545,302 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   07, 13, 14 pass. Gate **G3-a**.
 - Prerequisite from M4 (commit review minor 4): the texture cache's lookup scans all 512 slots per new draw key
   (`core/texcache.cpp` `lookup`); a hash on `(bitmap, tables)` before direct mode, measured.
+- **M6 specification (revision 1 of 2026-11-07, before code; critic round 1 applied: Review log "M6 pre-implementation", round 1).** Where the lines
+  above, 1.3, 1.5, 5.3, 5.4, 9.1, 9.2 and the code disagree, this block rules. Citations are the code as of `02c6319d9`
+  (the merge of `stage10-bb`, below). Kickoff `KICKOFF_M6.md`. **One engine edit, `PATCHES.md` 47** (`screen.cpp` and
+  `screen_shared.h`). Two sessions: (1) the spec, the hash, the direct view frame and the composite on direct frames;
+  (2) overlays, eligibility, calibration, configs, the acceptance, G3-a and the bench.
+  - *B-b, decided by the user (2026-11-07): option (b).* `stage10-bb` is merged into `stage10-c3d` (`02c6319d9`;
+    `PATCHES.md` 55; `zero_copy` defaults to 1): `main_surface` is a 512 KiB linear buffer that the present uploads
+    without a fill (5.7). In M6 a direct frame never presents `main_surface` (below), so B serves the frames M6 leaves to
+    readback (ineligible, discarded, Classic is not native and keeps the staging path). Option (a) (M6 without B) was
+    rejected by the user; its cost would have been the conflict in `present.cpp` landing on whoever merged second.
+  - *Checked against the kickoff and the code at HEAD.* (a) Every CPU overlay is drawn into **`world_pixels`**, not
+    `main_surface`: the crosshair (`Crosshairs_Render(world_pixels)`, `screen.cpp`:1734-1741), then FPS, position,
+    scores, messages and the input line into `disp_pixels = world_pixels` (:1743-1757), all **before** the world-view
+    blit `update_screen()` (:1793-1804), which copies `world_pixels` (through the gamma table when
+    `!using_default_gamma`, :2002-2005) into `main_surface`. So hook 3 redirects those two surfaces and skips the blit.
+    (b) `DisplayText` maps its colours with **`world_pixels->format`** (`screen_shared.h`:509-510), and so does
+    `DisplayTextCursor`'s fill (:541-542): drawn into a surface with alpha, a bitmap font (`sdl_font_info`, which stores
+    the raw pixel, `screen_drawing.cpp`:441-445) and the cursor would get **alpha 0**. The TTF path converts back to
+    RGB (`SDL_GetRGB`) and blends a glyph surface (`screen_drawing.cpp`:534-587), which over transparent black yields
+    premultiplied colour (SDL's blend: `dstRGB = srcRGB·srcA + dstRGB·(1 − srcA)`, `dstA = srcA + dstA·(1 − srcA)`;
+    from 0 that is "over" in premultiplied form, layer after layer). Patch 47 therefore also maps the colour with the
+    overlay surface's format when the destination is the overlay surface (below); every other destination is unchanged.
+    (c) The crosshair is **not a fixed 64x64 box**: its size comes from the preferences (`Crosshairs_SDL.cpp`:55-91:
+    `FromCenter`, `Length`, `Thickness`, the circle bounded by `Length`); the band is computed from `GetCrosshairData()`.
+    (d) Since M4 a play frame copies only covered pixels (`view_end_play`, `back/draw.cpp`); SW never clears
+    `world_pixels`, so an uncovered pixel keeps the previous frame (the "smear"/HOM case). Measured on the merge's
+    sanity run (L0 bench spot, 1 374 play frames): `copied` = 131 902 626 = exactly 96 000 = 400 × 240 per frame, so
+    uncovered pixels are an edge case, but direct mode keeps the same semantics (below) rather than clear the view.
+    (e) `render_frame` has no direct path (`front/frame.cpp`: `mode direct` logs "play frames are software (mode
+    direct: M6)" and returns false). (f) 5.3's overlay surface "400x240 ARGB8888" becomes **RGBA8888 in linear memory,
+    pitch 512 pixels**: its 32-bit word is the GPU's RGBA8 texel (`0xRRGGBBAA`, the present's staging word, 5.1), so the
+    band upload reads the surface itself (no copy, no channel reorder) and SDL draws into it with alpha. (g) 9.1's
+    direct column drops the unlinked 400x240 view target and adds the texture-backed one; both cannot coexist at the
+    full pool cap (375 + 512 + 512 + 512 + 375 + 320 + 3 584 = 6 190 > 6 144 KiB), so in `mode direct` every 400x240
+    view frame uses the texture-backed target (below). (h) There is no render-to-texture example under
+    `/opt/devkitpro/examples/3ds/graphics/gpu/`; `C3D_RenderTargetCreateFromTex(tex, face, level, depthFmt)` is
+    `renderqueue.h`:63 and `C3D_FrameBufTex` `framebuffer.h`:30. The orientations below are **UNVERIFIED** until the
+    calibrations pass. (i) The present (`MainScreenUpdateRects`, :1852) comes **before** `a1_3ds::bottom_frame` (:1859),
+    so in today's order only the crosshair and the text would run while the GPU draws the view (critic round 1, major 1):
+    on a direct frame hook 3 calls `bottom_frame` before the present (below), so the bottom screen's CPU work (2-3 ms on
+    the console, 5.7.1) hides the view frame's GPU time.
+  - *The texture-cache hash (prerequisite, M4 commit review minor 4).* `TexCache::lookup` scans all 512 slots per new
+    draw key (`core/texcache.cpp`:215-229). New: a chained index inside `TexCache`: `uint16_t head_[kTexBuckets]`
+    (1 024 buckets, `kNone` = 0xFFFF) and `uint16_t next_[kTexSlots]`; hash = a mix of the bitmap and tables pointers,
+    kind, wrap and part; a slot is inserted when `create()` makes it Live and removed wherever a Live slot stops being
+    Live (`evict`, `forget`, and the whole index is reset by `bump_generation` and `release_all`). `lookup` walks the
+    one chain and applies today's full test (state, generation, the five key fields). `audit()` also checks the index
+    (every Live slot of the current generation is found from its bucket, every chained slot is Live; chain length max
+    logged in `stats_line`). Host tests: a random sequence of create / lookup / evict / forget / bump against a linear
+    scan reference (same answers, every step), and a micro-benchmark (lookups per second, full cache, old vs new) that
+    prints its numbers. **Measured (rule 1)** on the M5 bench (`m5-bench-c3d.cfg`, L0/L6/L20 @30, `build-3ds-c3d-prof`)
+    before and after, `c3d_draw` and `c3d_tex`; kept only with a gain in Azahar's instruction-cost proxy and the host
+    benchmark and no change in any gate (it changes no pixel: the same slot is returned). The authoritative figure is a
+    deterministic counter (critic round 1, minor 15): `probes` (slots examined by the index walk) against `probes_old`
+    (what the scan would have examined: the matching slot's index + 1 for a hit, 512 for a miss, computed in O(1)), both
+    in `stats_line`. *Measured before the spec's review* (`build/perf/m6-hash-{before,after}.txt`, Azahar): `c3d_draw`
+    10.21 / 10.20 / 8.41 → 10.19 / 10.21 / 8.41 ms on L0 / L6 / L20, i.e. no change within the noise: the bench spots
+    make ~71 lookups a frame (L0: 64 563 over ~909 frames). Host, full cache of 512 slots, half misses: 292 → 3.5 ns per
+    lookup. The hash bounds the worst case (a full cache of sprite frames, every miss scanning 512 slots); it is kept as
+    the prerequisite the M4 review asked for, with the counters as its record, not as a speedup.
+  - *The view target in `mode direct`.* A 512x256 `GPU_RGBA8` texture in VRAM (`C3D_TexInitVRAM`) and a target on it
+    (`C3D_RenderTargetCreateFromTex(&tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(-1))`), never linked. Used for every
+    view of at most 512x256 in the run (direct, readback, diff, calibration): HUD + Map's 400x240 and Classic's
+    **480x240** (`view.cpp`:198; revision 0 said 640x320, wrong), so `mode direct` never needs M0's unlinked target next to
+    it (critic round 1, major 4: Classic's 450 KiB target on top of the texture target and the overlay texture would be
+    6 265 KiB > 6 144 at the full pool cap, and `view_ensure` never retries a failed size); `mode readback` is unchanged
+    (the M1-M5 code path). Made and deleted **out of frame** as M0's
+    (`C3D_RenderTargetDelete` panics inside one, 0.3); `C3D_Fini` destroys targets but not textures, so `view_free()`
+    calls `C3D_TexDelete` after it. A failed VRAM allocation is logged once and `mode direct` falls back to `mode
+    readback` for the run (`direct_off=vram`). The projection is `Mtx_Ortho(0, 512, 256, 0, …)` (the target's size;
+    the view occupies pixels 0-399 × 0-239, i.e. the top-left corner in M0's convention). **Readback of the texture
+    target**: the same transfer as M0's (`kReadbackFlags`, no flip) with both dimensions 512x256 into a 512x256 linear
+    staging; rows 0-239, columns 0-399 are the view (M0's calibrated orientation, expected to hold because both are
+    colour buffers: `readback_cal 1` with `mode direct` checks it, 30/30 orientation and current-frame ok; **Azahar,
+    first probe on the implementation: 30/30 orientation, current frame, channels and alpha, 0 mismatched pixels**, and the
+    `frame` diff of the same run 99.2 % within 2, as M5's). Staging 512 KiB linear instead of 375.
+  - *No clear in direct mode, and what the texture holds.* `mode direct` never clears the view texture: a pixel no
+    primitive covers keeps the last view, exactly SW's `world_pixels` behaviour (d). Two flags in the front end:
+    `tex_view` (the texture holds the last view) and `dest_view` (`dest` = `world_pixels` holds it). Rules (host-tested
+    as a transition table, `core/direct_state.*`):
+    - a **direct** frame needs `tex_view`; draws, no clear, **no readback, no retirement wait, no sentinel fill**;
+      leaves `tex_view` true, `dest_view` false;
+    - a **readback** frame in `mode direct` draws without a clear and copies **all** 400 × 240 pixels into `dest`
+      (alpha forced 0xFF, the form of SW's pixels, 5.2): `tex_view` and `dest_view` true;
+    - a frame that will draw into the texture **without a clear** (direct, or readback in `mode direct`) while
+      `!tex_view` is **seeded** first (diff and calibration frames clear the target and are never seeded: critic round
+      1, minor 6): `dest` (then `dest_view`, by
+      construction) is copied by the CPU into the staging as `(argb << 8) | 0xFF`, flushed, and transferred linear →
+      tiled into the target's colour buffer as the frame's first GX operation (flags: `kReadbackFlags` with
+      `OUT_TILED(1)`, the inverse of the readback; **UNVERIFIED**, checked by `seed_check` below); counted `seeds`.
+      A seeded frame skips the staging's sentinel fill (the staging holds the seed);
+    - a frame drawn by **SW** into `dest` while `!dest_view` is preceded by a **sync** — one readback of the texture
+      into `dest` without draws (frame_begin, transfer, frame_end, retirement pair, full copy), counted `syncs` — **only
+      when citro3d is up, the gate is open and the texture holds a complete view** (`tex_view`); otherwise no citro3d call
+      is made (5.6.1 a) and the skip is counted `sync_skipped_gate` / `_off` (citro3d down or released, **or play off with citro3d up**: no C3D frame is
+      wanted then) /
+      `_discard` (the texture holds a partial frame): `dest` then stays stale where SW leaves pixels uncovered (critic
+      round 1, major 3). After any SW frame `tex_view` is false and `dest_view` true;
+    - a **discarded direct** frame (ring, cmdbuf, gx, tex) has left a partial frame in the texture: the frame is redrawn
+      by SW as today (`dest` was not in sync if the previous frame was direct: counted `discard_stale`; only uncovered
+      pixels can differ), `tex_view` false, `dest_view` true;
+    - a new `dest` (`row_addresses[0]` or size changed: `reallocate_world_pixels`, `screen.cpp`:653-686), a diff or
+      calibration frame (both clear the target), a target re-creation or a citro3d release: `tex_view` false.
+    `seed_check` (test key): after the first seed of a run, the seeded texture is read back without draws and compared
+    with `dest`: 0 differences expected (the seed and readback orientations agree).
+  - *Hook 3 (`PATCHES.md` 47), exact text.* (Revision 1 adds 3c.) Fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)`;
+    `screen.cpp` includes `a1_c3d.h` under the fence (as `render.cpp`, `PATCHES.md` 45). **3a**, just before
+    `render_view` (:1701): `a1_c3d::direct_policy(a1_c3d_direct_blocks(ViewRect, BufferRect, HighResolution,
+    DrawEveryOtherLine))`, a static helper in `screen.cpp` returning a bit mask of the eligibility conditions that fail
+    (5.4, below; 0 = eligible). **3b**, after `render_view` at the crosshair (:1734): `SDL_Surface *a1_ov = NULL; if
+    (a1_c3d::direct_frame()) a1_ov = a1_c3d::overlay_begin(a1_c3d_overlay_bands(bands), bands);` — the second static
+    helper fills up to 4 `{y0, y1}` bands (below) from the overlay state this TU sees; the crosshair renders into `a1_ov
+    ? a1_ov : world_pixels`; `disp_pixels` starts as `a1_ov ? a1_ov : world_pixels` (:1743; the map case is excluded by
+    eligibility); the world-view `update_screen(...)` (:1793-1804) is skipped when `a1_ov`. In `screen_shared.h`,
+    `DisplayText` and `DisplayTextCursor` map with `DisplayTextDest->format` / `s->format` **only when the destination
+    is `a1_c3d::overlay_target()`** (else `world_pixels->format`, as today). **3c** (critic round 1, major 1): when
+    `a1_ov`, `a1_3ds::bottom_frame(...)` (with its `Bottom` zone) is called right after the darken test (:1840-1843, a
+    no-op on a direct frame) and **before** `MainScreenUpdateRect(s)` (:1846-1853), and the call at :1855-1861 is
+    skipped; its arguments (`hud_to_bottom`, `update_full_screen`) are final by then (:1822-1828, :1640). Side effect
+    (critic round 2, minor 1): `present_bottom`'s own VBlank wait when a bottom swap is still pending
+    (`video_3ds.cpp`:277-278) now comes before the composite and its VBlank guard; at @60 it could push the composite
+    past a VBlank. Counted: `bottom_pending` = direct frames whose bottom swap was still pending at hook 3b (an upper
+    bound on those waits), in `[c3d] direct final`, reported with the @60 bench. `direct_frame()` is true only when this
+    frame's world view is on the GPU (a direct view frame was drawn and not discarded); `overlay_begin` returns the
+    surface ready to draw. No other line changes; the OFF objects must stay byte-identical (`objdump -d` of both OFF
+    builds against the copies saved at the start, `build/m6/start/`), and `ppcheck.sh` IDENTICAL or 0 normalised lines.
+  - *Engine-facing API* (`include/a1_c3d.h`, plain): `enum DirectBlock : unsigned` (the mask bits below);
+    `void direct_policy(unsigned blocks)`; `bool direct_frame()`; `struct OverlayBand { short y0, y1; }`;
+    `SDL_Surface* overlay_begin(int n, const OverlayBand* bands)` (forward-declared `struct SDL_Surface`);
+    `const SDL_Surface* overlay_target()` (nullptr when none). `direct_policy` is called every frame; a frame
+    without a call (none expected) is not direct. With a 0 mask, `direct_policy` also makes sure the overlay buffer,
+    surface and texture exist (made there, out of frame), and the front end decides a direct frame only if they do, so
+    `direct_frame()` implies `overlay_begin` returns non-null, with 0 bands too (critic round 1, minor 5: a null would
+    make hook 3b blit a stale `world_pixels`).
+  - *Eligibility (5.4), every condition with its line* (mask bit: condition that blocks; the first set bit is the
+    logged reason). `not_native`: `!native_screen()` (:128-131: Classic, menus, dialogs, and a Lua HUD through
+    `bottom_mode` :115-120). `view_rect`: `ViewRect` not `{0, 0, 400, 240}` or `BufferRect` smaller (`!HighResolution`
+    halves it, :1596, :1618-1622) or `DrawEveryOtherLine` (:1611) — `update_screen` would scale or interlace. `accel`:
+    `screen_mode.acceleration != _no_acceleration` (the blit is in the other branch, :1768; never on 3DS). `map`:
+    `world_view->overhead_map_active` (:1528-1538; the map replaces or overlays the view, :1744-1745, :1806-1809).
+    `terminal`: `world_view->terminal_mode_active` (:1540-1550, :1748, :1831-1838). `gamma`: `!using_default_gamma`
+    (:152; set by `animate_screen_clut`, :2128-2135, i.e. every fade: damage and pickup flashes, teleport, liquid
+    tints, and a non-default brightness; applied in the blit :2002-2005). `darken`: `!get_keyboard_controller_status()`
+    (`interface.h`:368; `darken_world_window`, :1840-1843). `network`: `game_is_networked || is_network_pregame`
+    (scores, `screen_shared.h`:786-788; the pregame screen, :1712-1731). `lua_hud`: `Screen::instance()->lua_hud()`
+    (implied by `not_native`, kept as its own bit). `movie`: `Movie::instance()->IsRecording()` (the recorder reads
+    `main_surface`; film export is stubbed, `STAGE3.md`). Nothing else writes the world view after `render_view`
+    (checked: :1701-1863; the HUD goes to the bottom screen in native mode, :1822-1824; `clear_screen_margin` touches
+    `main_surface`'s margins only). The state cannot change between 3a and the blit: nothing in between calls
+    `animate_screen_clut` or changes the map, terminal or keyboard status. The front end decides a **direct** frame
+    when the mask is 0, `mode direct`, play mode would draw the frame with C3D (5.2/M4 preconditions), the view is
+    400x240 and the texture target exists; otherwise the frame takes the readback (or SW) path and the reason is
+    counted. Per-frame mode: `direct=` / `readback=` with reasons `(not_native/view_rect/accel/map/terminal/gamma/darken/
+    network/lua_hud/movie/play)` / `sw=` in the once-a-second `[c3d] direct ...` line and in `[c3d] direct final`;
+    every change of mode is logged once with its reason (at most 20 lines, then counted).
+  - *Overlay bands.* The helper (in `screen.cpp`, which sees the state) adds, in surface rows: **crosshair** when
+    `!map && !terminal && NetAllowCrosshair() && Crosshairs_IsActive()`: rows `[ycen − r, ycen + r + 1)`, `ycen = h/2 −
+    1`, `r = FromCenter + Length + Thickness + 1` (circle: `Length + Thickness + 1`); **top** when `ShowPosition`, any
+    script HUD text, or any unexpired message (`Messages`, `screen_shared.h`:169-170): rows `[0, top + LineSpacing ·
+    (lines + 1) + icon_drop + 2)`, `top = lua_text_margins.top`, `lines = (ShowPosition ? 6 : 0) + (script HUD ? 1 :
+    0) + unexpired messages` (the layout of `DisplayPosition`/`DisplayMessages`, :603-777; `+ 2` covers the shadow and
+    descent, the next baseline being a full `LineSpacing` below); **bottom** when FPS is shown (`displaying_fps &&
+    !terminal && !chat_input_mode`, :550-552) or the input line (`input_active() && !displayBuffer().empty()`,
+    :646-648): rows `[h − bottom − 2·LineSpacing − Ascent − 2, h)`. A message that expires between the helper and the
+    drawing only removes rows. The back end (`core/overlay_bands.*`, host-tested) clamps to `[0, 240)`, rounds `y0`
+    down and `y1` up to multiples of 8, sorts, merges overlapping or touching bands, and while more than 4 remain
+    merges the pair with the smallest gap. **Dirty tiles:** a 30-bit mask of 8-row tiles written since they were last
+    cleared; `overlay_begin` clears (memset of columns 0-399) **every dirty tile**, then `dirty = current` — 5.3's "last
+    frame's bands are cleared" — so the surface is transparent outside the current bands on every frame and the audit
+    and `direct_check` can be exact (critic round 1, major 2: clearing only `current & dirty` left an expired message's
+    rows behind). Host test: a band that shrinks leaves 0 pixels outside the new bands. `overlay_audit N` (test): every N-th direct
+    frame the present scans the surface for non-zero pixels outside the current bands: `overlay_leaks` must stay 0.
+  - *Overlay surface and texture.* 512x256 RGBA8 linear buffer (512 KiB, zeroed and flushed at creation) wrapped by
+    `SDL_CreateRGBSurfaceWithFormatFrom(buf, 400, 240, 32, 2048, SDL_PIXELFORMAT_RGBA8888)` (blend mode NONE: it is
+    a destination); created by `direct_policy` before the first direct frame (above), freed at the release; it stays
+    allocated in Classic (9.1's direct total holds with it, view target 512 included). Texture 512x256 RGBA8 in VRAM
+    (`C3D_TexInitVRAM`, nearest, clamp); if VRAM refuses it, a linear texture (counted `overlay_linear`); if both fail,
+    `direct_off=overlay`. **Band upload** in the composite frame, before any draw: per band, `GSPGPU_FlushDataCache`
+    of its rows, then one `gx_op(C3D_SyncDisplayTransfer)` from `buf + y0·512` (`GX_BUFFER_DIM(512, y1 − y0)`) into
+    `tex.data + d·512·4` with `d = 256 − y1` (**from the end**: the present's upload flips (`kUploadTransferFlags`), and
+    P1 found a 240-row transfer 16 rows off, 5.1, which is what a flip within the transfer's own height predicts) and
+    the same flags. `band_from_end 0|1` (default 1) selects `d = y0` instead; **UNVERIFIED**, settled by the
+    calibration below. At most 4 transfers, each one GX entry (the command buffer is empty until the first draw, 0.3).
+  - *The composite frame* (`a1_c3d_present`, when hook 3b handed out the overlay for this frame and the surface given
+    is 400x240; otherwise the present as today, B's zero-copy included). (1) `frame_begin` (zone `c3d_wait`: the view
+    frame's GPU time not hidden by the CPU's overlays and bottom screen); `sample_drawing_time(View)` = the view frame
+    (G3-b's `C3D_GetDrawingTime`, `gpu_ms view=` in the stats line); (2) the band uploads; (3) the composite VBO (linear,
+    5 quads × 4 vertices, written after (1), flushed): the view quad with the view texture on unit 0, `Swizzle::Plain`,
+    blend `ONE, ZERO` (colour and alpha), positions 0-400 × 0-240 (`Mtx_OrthoTilt`, as the present), texcoords `u = x /
+    512`, `v = 1 − y / 256` (`view_v_flip 1`, the default: the colour buffer's rows run opposite to an uploaded
+    texture's, by the two transfers' flip flags; **UNVERIFIED**, `view_v_flip 0` gives `v = y / 256`); then, if any
+    band, the overlay texture, blend `ONE, ONE_MINUS_SRC_ALPHA` (colour and alpha), one quad per band (`v` as the
+    present's: `y / 256`); the view and overlay textures are bound through `__real_C3D_TexBind` (not the recording wrapper, so the record
+    keeps the present's texture whatever path returns early: critic round 1, minor 10); (4) unit 0 back with
+    `__real_C3D_TexBind(0, tex_recorded())`, blend back to `ONE, ZERO`; (5) the VBlank guard (5.1 step 5), `frame_end(1)`. No staging
+    fill, no upload of `main_surface`. GX entries ≤ 4 + 2. The present's `present_diff` counts a direct present as
+    `not checkable: direct`. `present_close_frame` and the gate are unchanged; two stale-picture cases follow and are accepted: the forced
+    close frame draws the present texture (the last non-direct picture), and a composite whose `frame_begin` fails
+    releases citro3d and the CPU present then shows the stale `main_surface` for that one frame.
+  - *Calibration (the frame-indexed test in direct mode).* With `calibrate 1` and `mode direct`, a direct view frame
+    draws no world: it clears the view texture to present 5.1's frame-indexed colour of the present that will show it
+    (`n = present_counter() + 1`), draws M0's four 16x16 corner quads (`core/calibrate.h`, the same colours) at the
+    view's corners and fills rows 240-255 with a fifth colour, so a mirrored or shifted view shows (critic round 1,
+    minor 8), and `overlay_begin` writes one opaque white 8-row band at rows `8·(n mod 30)` …
+    `+ 7` (all other overlay rows transparent; bands = that tile only). The captures of 5.1's bursts then show the
+    colour of N or N − 1 and the band at the row of the same frame; a band at **any other row** means `band_from_end`
+    is wrong (with `d = y0` under a flipping transfer it lands at `248 − 8k`, off screen for k = 0); swapped corner
+    colours or the fifth colour on screen mean `view_v_flip` is wrong.
+    Run at Framerate Target 30 and 60 with `alt_load 1` (5.1's light/heavy frames).
+  - *`direct_check N` (in-frame equivalence, test).* Every N-th direct frame: the composite frame also reads the view
+    texture back (gx_split + transfer behind the composite's draws, as M0's readback) and, after `frame_end`, waits
+    for it (the empty retirement pair, as readback mode); the CPU builds the reference = the read-back view (400x240)
+    with the overlay surface's **band rows** composited over it (`ref = ov + view·(255 − A)/255`, rounded to nearest;
+    outside the bands the surface is transparent by the dirty-tile rule, so this equals the whole surface), converts it with
+    `present_reference` (the CPU present's own code, 5.1) and compares the framebuffer (`gfxGetFramebuffer` at the
+    composite's `frame_end`, as `present_diff`) with it: a `[c3d] direct_check:` line per check (pixels with RGB Δ > 1,
+    max |Δ| per channel), summary in `direct final`. It proves the view orientation, the band placement and the blend;
+    the reference's overlay arithmetic is the formula, so the engine's own drawing is checked by the captures below.
+  - *Suspend, HOME, `error_screen()` with two frames in flight.* The view frame is ended at render time and the composite
+    at the present, so a frame can be in flight across the gate exactly as a P1 present is across the next one.
+    `view_begin` checks the gate as today (`skip=gate`: the frame is SW, `direct_frame()` false). If the gate closes
+    between the view frame and the present, the present skips (5.6.1 a, no citro3d call); the overlay hand-out is
+    dropped at the next `direct_policy` (counted `composite_skipped`); the queued view frame retires at the next
+    `frame_begin` (citro3d's ONSUSPEND hook drains the queue, 5.6.4 item 1) or in the release's bounded wait. The
+    release (`release_and_fini`) deletes the view and overlay textures after `C3D_Fini`, frees the overlay buffer and
+    surface, and sets `tex_view` false; `overlay_target()` returns nullptr from then on. `error_screen()` off the main
+    thread is 5.6's hand-off, unchanged (no citro3d call off main). Counted at exit: view frames begun/ended, composite
+    frames, targets created/deleted, binds restored.
+  - *Profiler zones* (`a1_3ds_profile.h`): `c3d_overlay` (hook 3b's `overlay_begin`: rounding, merging, the dirty-tile
+    clear; top level) and `c3d_composite` (the composite frame's CPU part, nested in `present`; its wait stays in
+    `c3d_wait`, the VBlank in `c3d_vblank`). A direct view frame is `c3d_draw` without `c3d_readback`; a seed is inside
+    `c3d_draw`, a sync is `c3d_readback`. So the bench can say: `render` (= `c3d_draw`, no GPU wait) + `blit` (0 on a
+    direct frame) + `present` (`c3d_wait` = the unhidden GPU time, `c3d_composite`, `c3d_vblank`) + `bottom`.
+  - *Test-only keys* (`core/config.h`): `overlays 0|1|2` (1: FPS, position, crosshair and a constant message every 2 s,
+    set from the front end through the engine's own globals `displaying_fps`, `ShowPosition`, `Crosshairs_SetActive`,
+    `screen_printf`; 2: position and crosshair only, deterministic for the capture comparison), `direct_check N`,
+    `overlay_audit N`, `seed_check 0|1`, `band_from_end 0|1`, `view_v_flip 0|1`, `g3a 0|1` (below), `sw_every N`
+    (every N-th play frame is drawn by SW as a forced fallback, counted `forced_sw`, so the sync and the seed after it
+    run in Azahar: critic round 1, minor 7).
+  - *Configs* (`scripts/3ds/tests/c3d/`): `m6-direct(-swbe).cfg` (direct play, `overlays 1`, `direct_check 30`,
+    `overlay_audit 30`, `seed_check 1`), `m6-cal(-60).cfg` (`calibrate 1`, `alt_load 1`), `m6-readback-cal.cfg`
+    (`readback_cal 1`, `mode direct`), `m6-capture-direct.cfg` / `m6-capture-readback.cfg` (`overlays 2`, the bench
+    spots), `m6-bench-direct.cfg` (= `m5-bench-c3d.cfg` + `mode direct`), `m6-g3a.cfg`, and `m6-ineligible.cfg` for
+    scripts 20 (map), 14 (terminal), 13 (bottom screen, both settings: Classic must log `not_native`).
+  - *Host tests:* band rounding, clamping, merging and the ≤ 4 rule; the eligibility mask → reason table; the
+    `tex_view`/`dest_view` transition table (seed, sync, discard, new dest, and the three `sync_skipped` rows); the
+    dirty-tile rule (a shrinking band leaves nothing outside the new bands); the hash (above); the GX accounting of a
+    composite frame (4 bands + end + 1 linked ≤ 24; with `direct_check` + 2) and of a direct view frame with its seed
+    (+ 1).
+  - *Acceptance (Azahar, non-authoritative; both backends where marked).* (1) `direct_check 30` on L0/L6/L20 and the
+    L01 film, overlays on: every check ≥ 99.9 % of pixels Δ ≤ 1 (8.3's M6 tolerance) **and 0 pixels with Δ > 32** (a
+    dropped or misplaced crosshair is ~0.1 % of the frame: critic round 1, minor 9), `overlay_leaks` 0, `seed_check` 0
+    differences; a `sw_every 50` run with `syncs` > 0 whose direct checks after each seed still pass — both backends. (2) Captures: `--perf` end-of-run top screens (`screen-perf-L<n>-top.png`), `mode
+    direct` vs `mode readback`, `overlays 2`, L0/L6/L20: ≥ 99.9 % Δ ≤ 1 and 0 pixels Δ > 32 (the engine's overlay
+    drawing itself, through patch 47's colour mapping); the frame's mode at the capture is logged (a non-direct last frame
+    would pass silently). (3) Ineligible frames: scripts 20, 14 and 13 with `m6-ineligible.cfg`: `readback=`
+    with the reasons `map`, `terminal`, `not_native` and no direct frame while they hold; a damage flash or a liquid
+    (a film or the L0 spot's first frames) logged as `gamma`. (4) The frame-indexed test, `m6-cal.cfg` @30 and @60:
+    every burst capture shows N or N − 1, colour and band agreeing. (5) `readback_cal 1` in `mode direct`: 30/30. (6) GX
+    high-water ≤ 24. (7) Scripts 07, 13, 14 pass with `mode direct`. (8) The M1-M5 gates on the final binary: M5's
+    series (diff, play, look-up, present diff, fail_every, vram_cap) in `mode readback`, both backends, unchanged;
+    `present_diff` 0 on every presented `main_surface`. (9) OFF builds: `objdump -d` identical to `build/m6/start/`,
+    `nm` 0; four builds, 0 warnings.
+  - *G3-a, how it is measured* (0.5: VRAM 9.1, command-buffer and queue budgets at 800x480, Azahar). `g3a 1` (test only):
+    the direct view target is **1024x512** (2 048 KiB VRAM) and the view is drawn with the same `Mtx_Ortho(0, 512, 256,
+    0)`, i.e. at 800x480 in the target's pixels; the composite's normalised texcoords are unchanged (nearest, so the
+    picture is a 2x decimation, not M7's filter); `vram_cap 2048` (9.1's M7 column); readback, seed and sync frames
+    halve through `GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY)` (`gx.h`:33-38) into the same 512x256 staging, the seed
+    is a clear (test-only deviation). Recorded on L0/L6/L20 and the L01 film: VRAM in use (allocator figures, the
+    targets, the pool's high-water, `vramSpaceFree` at the end), the pool's evictions and `promotions_blocked` (the
+    2 MiB landscape part against a 2 048 KiB cap: whether M7 must drop the part to RGB8 or FCRAM), `cmdbuf_usage` and
+    `gx_high_water` (resolution-independent: the same draws, so G3-a's new information is the **VRAM part**; the
+    other two are the direct-mode figures, recorded alongside). G3-a "holds" if every allocation succeeds with the M7
+    caps and the queue/command-buffer high-waters stay within 2.4's limits; recorded, not deciding (0.5).
+  - *M7's landscape budget (decided here, built in M7).* M7's pool cap is 9.1's 2 048 KiB; Marathon 2's part 0 is
+    2 048 KiB as RGBA8 (9.1 M5 note). M7 converts landscape parts to **`GPU_RGB8`** (1 536 KiB) if its host test shows
+    the landscape texel's alpha is constant (then RGB8 is lossless: RGB565 is rejected, its 5-bit steps alone break
+    8.3's Δ ≤ 2), else keeps RGBA8 and lets the part fall back to FCRAM sampling as M5 does (`promotions_blocked`);
+    G3-a's numbers (above) and the console's FCRAM-sampling cost (section 10) inform it. The VRAM total stays 9.1's
+    5 815 KiB.
+  - *The bench* (the first that can show a speedup). `perf-bench.sh`, `build-3ds-c3d-prof`, HUD + Map, L0/L6/L20,
+    `RUNS=1`, at `fps_target=30` and `60`, three configs on the same binary: `m5-bench-sw.cfg` (SW), `m5-bench-c3d.cfg`
+    (readback), `m6-bench-direct.cfg` (direct); the stats printing as in M5 (not `quiet`, for comparability with M5's
+    numbers; one extra `quiet 1` direct series @60 if time allows). Reported: `frame + overlay`, busy, `render`,
+    `blit`, `present` with `c3d_wait`/`c3d_composite`/`c3d_vblank`, the direct-frame share (valid only if ≥ 95 % of
+    world frames are direct on the spot), `gpu_ms view`. 9.3's direct column gets these Azahar figures and the
+    console's `bottom` (2.3-2.9 ms, 5.7.1) as the CPU work now overlapping the view frame. Azahar overstates `render` and understates copies (`PERF.md`
+    "How to read these numbers"): the console's M6 short check decides.
+  - *Known limitations (recorded, not fixed in M6).* Persistent tints (under a liquid) and a non-default brightness
+    keep `using_default_gamma` false on every frame (`screen.cpp`:2135), so those frames are readback, slower than SW
+    (G2-a): the bench reports the direct share per spot so this is not read as a regression (critic round 1, minor 14).
+    `DisplayTextCursor`'s mapping (patch 47) runs only with the console's input line, which no config opens: untested
+    in Azahar. Script-HUD icons (`Image_Blitter::Draw`, `screen_shared.h`:718, Lua only) blitted from a source with
+    partial alpha but no blending would write non-premultiplied texels; Marathon 2 has none.
+  - *Not in M6:* supersampling (M7; `g3a` is only a budget probe), the preference (M8), stereo (M9), the clip-at-cut
+    landscape fallback (a console decision pending since the M3-M5 checks), Classic in direct mode (5.4).
 
 ### M7 — 2x2 supersampling (to be built, after M6; user 2026-11-07, G3 measured but not deciding)
 - View at 800x480 (texture 1024x512), halved by `GX_TRANSFER_SCALE_XY`
@@ -3652,9 +3949,11 @@ hold in every mode with the default caps.
 | zero-copy `main_surface` 512x256 (plan B, 5.7.8; from the first HUD + Map game) | 512 |
 | vertex ring 2 × 2 048 × 32 B (M0: 2 × max 387, rounded up to 1 024; M1 re-measured over the menu demo and a film: unchanged; **M3: 2 048**, the L08 film's span quads overflowed 1 024) | 128 |
 | index ring 2 × 4 096 × 2 B (M0: 2 × max 597; M3: 4 096) | 16 |
-| readback staging 480x240 | 450 |
+| readback staging 480x240 (M6 `mode direct`: 512x256 for the texture target, 512) | 450 / 512 |
+| M6 overlay buffer 512x256 RGBA8 (the SDL surface's pixels; made by `direct_policy`, out of frame, before the first direct frame) | 512 |
+| M6 overlay texture, linear fallback only when VRAM refuses it | (512) |
 | linear texture pool (cap; holds promotions pending; M5: a landscape part that found no VRAM block, 2 048) | 4 096 |
-| **total** | ≤ 6 738 |
+| **total** | ≤ 6 738 (M6 `mode direct`: ≤ 7 312, ≤ 7 824 with the overlay's linear fallback) |
 
 No change to `__ctru_linear_heap_size` needed on the New 3DS
 (`a1_3ds_platform.cpp`:43-50 "revisit then": revisited). Azahar's split is
@@ -4622,3 +4921,39 @@ observations that need a follow-up, neither blocking:** (1) every 1 s window in 
 3dslink and to the SD log; with the test-only key `quiet 1` the windows fall to 40-53 ms, the user felt it "much
 smoother", and L0's busy time drops 18.41 → 16.36 ms (C3D − SW +5.51 → +3.46 ms), so G2-b is overstated by about 2 ms; (2) static's look was never seen (25 of 827 frames at the bench spot), so `MODULATE` on
 masked static rests on the counters alone. Not run: M3 step 3 (L08 film), M4's software rerun and Classic.
+
+### M6 pre-implementation (coordinator, 2026-11-07)
+
+The M6 specification (section 7, revision 0) written against `02c6319d9`. Before it, the user decided the B-b question
+(option (b)): `stage10-bb` merged into `stage10-c3d` (`02c6319d9`; after the merge 4 builds 0 warnings, host tests
+2 654 263 checks 0 failures, `present_diff` 49 checks 0 differences on L0 with play mode and zero-copy). Findings that
+change the design: overlays are drawn into `world_pixels` before the blit (hook 3 redirects two surfaces, not
+`main_surface`); `DisplayText`/`DisplayTextCursor` map colours with `world_pixels->format`, so patch 47 also touches
+`screen_shared.h`; the crosshair band comes from the preferences, not a 64x64 box; direct mode never clears the view
+texture (SW's uncovered-pixel semantics) with seed/sync rules; the unlinked view target and the texture target cannot
+coexist at the full pool cap, so `mode direct` uses the texture target for every 400x240 view frame; the overlay surface
+is RGBA8888 in linear memory (the band upload reads it directly). Tolerance: 8.3's existing M6 row (≥ 99.9 % Δ ≤ 1); no
+change requested.
+
+### M6 pre-implementation, round 1 (critic: REVISE, 4 major, 11 minor; applied)
+
+On revision 0. (1, major) the present precedes `bottom_frame` (`screen.cpp`:1852, :1859), so nothing but the text hid the
+view frame's GPU time: hook 3c draws the bottom screen first on a direct frame. (2, major) clearing only `current & dirty`
+left expired rows outside the bands (audit and `direct_check` would fail by design): every dirty tile is cleared,
+`dirty = current`. (3, major) the sync rule called citro3d with the gate closed or citro3d down: sync only when up, open and
+`tex_view`, else counted `sync_skipped_{gate,off,discard}`. (4, major) Classic is 480x240, not 640x320, and its unlinked
+target next to the texture target and the overlay texture overflows VRAM at the full pool cap: every view ≤ 512x256 uses the
+texture target in `mode direct`. Minors: (5) the overlay exists before a frame is decided direct; (6) frames that clear are
+not seeded; (7) `sw_every N` exercises the sync; (8) the direct calibration draws corner quads and fills rows 240-255, and a
+wrong band row is "any other row"; (9) 0 pixels Δ > 32 added to the check and capture gates, the capture's mode logged;
+(10) composite binds through `__real_C3D_TexBind`, two stale-picture cases recorded; (11) the cursor mapping untested and
+the icon path recorded as limitations; (12) 9.2 rows added; (13) G3-a's new information is VRAM only, the seed's GX entry
+in the host test; (14) persistent tints recorded as a limitation; (15) the hash's record is a deterministic probe counter
+(Azahar's `c3d_draw` showed no change; host 292 → 3.5 ns).
+
+### M6 pre-implementation, round 2 (critic: APPROVE, 2 minor + 1 nit, folded)
+
+On revision 1: all round-1 findings fixed. Folded: (1) hook 3c moves `present_bottom`'s VBlank wait before the composite:
+counted as `bottom_pending` (upper bound) and reported with the @60 bench; (2) 9.2's wording on when the overlay buffer is
+made aligned with the spec; (3) `sync_skipped_off` also counts play off with citro3d up (noted). Console items unchanged,
+plus whether the bottom screen's VBlank wait ever happens at @60.
