@@ -126,6 +126,12 @@ the target on the console). **Try the zero-copy present** (critic P1 finding 3).
 Order: the fixes, then the zero-copy present, then M0-M6, M7, M9 (open questions
 3 and 9).
 
+**User decisions (2026-11-07, during M5, before G2-a is measured):** **continue until stereoscopic 3D (M9)**
+whatever G2-a's result: M5 → M6 (direct mode, which M9 needs: section 6) → M9; M7 and M8 stay optional, decided when
+reached. G2-a is still measured and recorded at the end of M5 (and G2-b on the console when it runs), but its outcome no
+longer decides whether M6 is built. Also: play checks leave SW's static coverage out (Review log "M5, play check and
+static, user decision").
+
 **Status, 2026-10-26:** G0 and G1 are behind us. The fixes (plan A, 5.6.0 pieces 0-5 and
 A6/A7) are done and verified on the console; the next piece is the zero-copy present (plan B),
 then M0 onwards. The user's go for B is the 2026-10-19 decision above.
@@ -3364,8 +3370,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     only on such frames; `diff_images` gains an optional exclude mask; counted `static_px` on the line): the
     noise differs per pixel by design. **This widens what the play gate excludes** (M4's play checks covered every
     pixel; their static frames were SW): it applies 8.3's "full frame: static excluded", which the user already set
-    for the frame check, to the play check; **the user's decision** (round 1 minor 3), asked with the `static_px`
-    counts of the first runs.
+    for the frame check, to the play check. **Decided by the user 2026-11-07** (round 1 minor 3; asked with the first
+    L01 run's counts: 9 of 155 checks, 2 795 of 14.5 M pixels left out).
   - *Colour and density gates.* **landscape**: 8.3's row **as written** (coverage non-edge ≤ 0.1 % of A's covered;
     **strict** ≥ 98 % within Δ ≤ 2, no mean gate; the neighbourhood figure printed): the texel choice is SW's to the
     exact 1/65536 (host test: 100 % in double and float32), full bright, so the strict figure should hold; a new key
@@ -3469,9 +3475,8 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     holds the traversal, which SW also pays, and per-polygon work: L0 71, L6 89, L20 41 polygons at most, M0), so L0
     and L6 are **expected at or above L20's +3.49 ms** (round 1 minor 7); Azahar understates copies ~40 % (`PERF.md`
     "How to read these numbers"), so G2-b on the console is likely worse. **The prediction is a G2-a failure on its
-    second half.** The outcome and what follows are the **user's decision** (M6 removes the readback and the copy,
-    where the extra time is; or stop at readback; or measure G2-b on the console first), presented at the end of the
-    session in plain language with the numbers; the gate itself is not changed.
+    second half.** The gate itself is not changed. **What follows was decided by the user in advance (2026-11-07):
+    continue to M6 and M9 whatever the result** (0.5); G2-a is measured and recorded all the same.
   - ***Implementation, session 1 (2026-11-07): corrections found in Azahar*** (Review log "M5 implementation, landscape
     size"). (1) **Marathon 2's landscape bitmaps are 540 rows × 1 024 texels** in this data (logged by the front end:
     `landscape bitmap 540 x 1024`), not 270 × 512 as 3.2, the kickoff and the bullets above say: padded to a power of two
@@ -4464,3 +4469,10 @@ kickoff, revision 1 of the spec). Not a tolerance or gate change: the mapping, t
 the texture is cut at row 512 into two cache entries and a polygon crossing the cut goes through the span path
 already built for VertRepeat (section 7, M5, "Implementation, session 1"). Memory per landscape is 2 MiB, not 1;
 RGB8 is the recorded option. To be checked in the commit review.
+
+### M5, play check and static, user decision (2026-11-07)
+
+Asked with the first L01 play run's numbers (9 of 155 play checks had static; 2 795 of 14.5 M compared pixels were
+SW's static coverage), the user chose to **leave SW's static coverage out of the play checks**, as 8.3 already does
+for the frame check; static is gated by its own density check. In the same answer the user decided that stage 10
+**continues until stereoscopic 3D (M9)** whatever G2-a shows (0.5).

@@ -8,14 +8,15 @@ unit-1 switch), `_solid` skipped, the play scan, `fail_every`, the cache audit, 
 4 builds 0 warnings; OFF builds identical, `nm` 0. Smoke runs passed (L6 landscapes exact; L06 static +0.10 points; L01 play
 all C3D). Films chosen: L01, L06, L10, L16, L21.
 
-**Session 2, in order:** (1) **ask the user** the pending decision: the play check leaves SW's static coverage out
-(design 7 M5 "Diff checks", round 1 minor 3) — first L01 play run: 9 such checks, 2 795 pixels left out of 14.5 M;
+**Decided by the user at the end of session 1 (2026-11-07):** the play check leaves SW's static coverage out (as
+built); and stage 10 **continues to M6 and M9 (stereo) whatever G2-a shows** — G2-a is still measured and reported, it
+no longer decides. **Session 2, in order:** (1) nothing to ask before starting;
 (2) write the remaining configs: `m5-vram512.cfg`, `m5-fail50.cfg` (play over the L01 film, gate `forced_fails ≥ 10`),
 `m5-fail1.cfg` (+ `--level-hop-test`, `--expect-offs 2`), `m5-present-diff.cfg` (play + a static film stretch:
 `static_sets > 0`), `m5-bench-c3d.cfg` / `m5-bench-sw.cfg` (copies of M4's); `c3d-diff.py play` should show `static_px`;
 (3) `c3d-critic` (effort medium) on the session-1 commit + fixes, max 2 rounds; (4) the acceptance series
 (`build/m5/tools/`: copy M4's `series.sh` and adapt; `run1.sh` and `screen.sh` are there) on both backends; (5) the bench
-and **G2-a**; (6) the records, tag `port-stage10-M5`, bundle, memory; (7) report G2-a with the options and stop.
+and **G2-a**; (6) the records, tag `port-stage10-M5`, bundle, memory; (7) report G2-a's numbers and stop (next: M6's kickoff).
 
 ---
 
