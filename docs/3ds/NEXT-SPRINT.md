@@ -1186,6 +1186,8 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    L20 bench +22 % busy (no speedup expected before M6). **Next: the user's choice** — M5 (landscapes, static,
    eviction hardening), or the M3/M4 short console checks first ("M4 console check, short version" at the end
    of this file).
+   **Next (user decision 2026-11-07): M5**, kickoff `KICKOFF_M5.md`. It ends at G2-a ("busy(readback) ≤
+   busy(SW) + 1 ms"), which M4's L20 bench already misses by 2.5 ms: what to do then is the user's call.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.

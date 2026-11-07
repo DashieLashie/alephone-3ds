@@ -33,8 +33,9 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   samples FCRAM and VRAM textures together, so under it run films with `gxq_budget 3`: design Review log "M3
   acceptance, software-backend films"); **M4 done** (2026-11-06, tag `port-stage10-M4`, `PERF.md` "Stage 10 M4", Azahar only,
   no engine edit: sprites/weapons as one quad per rectangle, A8 mask, tinted constant-colour blend, **play mode on**
-  in readback mode; passes on both Azahar backends; sprites gated on L0 and the films, user decision); **next: the
-  user's choice**, M5 or the "M3/M4 console check, short version" runbooks (`NEXT-SPRINT.md`, both open). Another session may run Azahar on the same emulated card: take
+  in readback mode; passes on both Azahar backends; sprites gated on L0 and the films, user decision); **next (user
+  decision 2026-11-07): M5** (kickoff `KICKOFF_M5.md`; ends at gate G2-a, which M4's L20 bench already misses); the
+  "M3/M4 console check, short version" runbooks (`NEXT-SPRINT.md`) are open. Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
