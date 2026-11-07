@@ -47,6 +47,8 @@
 #                  invisible, two invisible compilers ahead; CITRO3D_DESIGN.md, M4); without it it is removed
 #   --level-hop-test  install scripts/3ds/tests/plugins/Level Hop Test (solo Lua: the next level 10 s
 #                  into an even-numbered one; CITRO3D_DESIGN.md, M4 m4-off.cfg); without it it is removed
+#   --look-up-test  install scripts/3ds/tests/plugins/Look Up Test (solo Lua: the view pitches up and
+#                  sways near the maximum; CITRO3D_DESIGN.md, M5 m5-lookup.cfg); without it it is removed
 #   --negative-light-test  install scripts/3ds/tests/plugins/Negative Light Test (solo Lua: every light
 #                  state at intensity -0.5; CITRO3D_DESIGN.md, M3); without it it is removed
 #   --load-test    install scripts/3ds/tests/plugins/Load Test (solo Lua: saves 5 s into
@@ -101,6 +103,7 @@ infravision_test=0
 negative_light_test=0
 invisibility_test=0
 level_hop_test=0
+look_up_test=0
 load_test=0
 perf_level=
 fatal_file=
@@ -125,6 +128,7 @@ while [ $# -gt 0 ]; do
 		--negative-light-test) negative_light_test=1 ;;
 		--invisibility-test) invisibility_test=1 ;;
 		--level-hop-test) level_hop_test=1 ;;
+		--look-up-test) look_up_test=1 ;;
 		--load-test) load_test=1 ;;
 		--fatal) shift; fatal_file=${1:?--fatal needs a file} ;;
 		--perf) shift; perf_level=${1:?--perf needs a level number} ;;
@@ -313,6 +317,12 @@ if [ "$copy_data" = 1 ]; then
 	if [ "$level_hop_test" = 1 ]; then
 		cp -R "$repo/scripts/3ds/tests/plugins/Level Hop Test" "$plugin"
 		echo "run-azahar: installed the Level Hop Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Look Up Test"
+	rm -rf "$plugin"
+	if [ "$look_up_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Look Up Test" "$plugin"
+		echo "run-azahar: installed the Look Up Test plugin"
 	fi
 	plugin="$userdir/$name/Plugins/Load Test"
 	rm -rf "$plugin"

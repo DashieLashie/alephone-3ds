@@ -58,6 +58,12 @@ struct LandParams
 };
 
 constexpr int kLandPartRows = 512;
+// The row the texture is cut at: kLandPartRows, or another for the test key land_cut (critic, M5 code review major 2:
+// Marathon 2's pitch never shows rows past 512, so the test moves the cut into the sky just above the horizon, row 269
+// of 540, to run part 1 and the cut-crossing span path on the GPU). Part 0 is padded to pot8(cut) rows. Set once,
+// before any landscape texture exists.
+int landscape_part_rows();
+void landscape_set_part_rows(int rows);   // 64..512; anything else is ignored
 
 constexpr double kLandEps = 1.0 / 131072.0;
 

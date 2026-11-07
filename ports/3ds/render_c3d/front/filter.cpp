@@ -15,6 +15,8 @@
 #include "../core/landscape.h"
 #include "../core/tex_convert.h"
 
+#include "ViewControl.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <climits>
@@ -69,11 +71,32 @@ RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures
 	return RectSupport::Ok;
 }
 
-bool landscape_supported(const polygon_definition& p, bool textures)
+bool landscape_params(const polygon_definition& p, const view_data& view, LandParams& out)
 {
 	const bitmap_definition* t = p.texture;
+	if (!t)
+		return false;
+	const LandscapeOptions* lo = View_GetLandscapeOptions(p.ShapeDesc);
+	LandOpts o;
+	o.horiz_exp = lo->HorizExp;
+	o.vert_exp = lo->VertExp;
+	o.asp_rat_exp = lo->OGL_AspRatExp;
+	o.azimuth = lo->Azimuth;
+	o.vert_repeat = lo->VertRepeat;
+	const LandView lv{view.half_screen_height, view.dtanpitch, view.landscape_yaw, view.half_cone,
+	                  view.standard_screen_width};
+	return landscape_setup(lv, o, t->width, t->height, t->bytes_per_row == NONE, out);
+}
+
+bool landscape_supported(const polygon_definition& p, const view_data* view, bool textures)
+{
+	const bitmap_definition* t = p.texture;
+	if (!textures || !t)
+		return false;
+	LandParams lp;
 	unsigned S = 0;
-	return textures && t && landscape_tex_size(t->width, t->height, t->bytes_per_row == NONE, S, nullptr, nullptr);
+	return view ? landscape_params(p, *view, lp)
+	            : landscape_tex_size(t->width, t->height, t->bytes_per_row == NONE, S, nullptr, nullptr);
 }
 
 bool static_supported(Entry e, const polygon_definition& p, bool textures, bool lit)
@@ -97,7 +120,7 @@ bool FilterRasterizer::c3d_excluded(Entry e, const polygon_definition& p) const
 	// needs lit: the diff configs of M5 are lit.)
 	if (p.transfer_mode == _big_landscaped_transfer)
 	{
-		const bool no = !landscape_supported(p, textures_);
+		const bool no = !landscape_supported(p, view_, textures_);
 		static bool logged = false;
 		if (no && !logged)
 		{

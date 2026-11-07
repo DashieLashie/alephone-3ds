@@ -34,6 +34,9 @@ bool TexCache::protected_slot(const TexSlot& s, uint32_t frame)
 
 TexSlot* TexCache::lru_victim(bool any_pool, TexPool pool, uint32_t last_used_below)
 {
+	// M5: a landscape part (up to 2 MiB, a mid-play re-conversion if lost) goes only when nothing else can (critic, M5
+	// code review major 1).
+	auto land = [](const TexSlot& s) { return s.key.wrap == TexWrap::Landscape; };
 	TexSlot* best = nullptr;
 	for (TexSlot& s : slots_)
 	{
@@ -41,8 +44,9 @@ TexSlot* TexCache::lru_victim(bool any_pool, TexPool pool, uint32_t last_used_be
 			continue;
 		if (s.last_used_frame >= last_used_below || protected_slot(s, frame_))
 			continue;
-		if (!best || s.last_used_frame < best->last_used_frame ||
-		    (s.last_used_frame == best->last_used_frame && s.seq < best->seq))
+		if (!best || land(s) < land(*best) ||
+		    (land(s) == land(*best) && (s.last_used_frame < best->last_used_frame ||
+		                                (s.last_used_frame == best->last_used_frame && s.seq < best->seq))))
 			best = &s;
 	}
 	return best;
@@ -112,6 +116,46 @@ void* TexCache::alloc_with_eviction(TexPool pool, const TexSlot& shape, uint32_t
 			return nullptr;
 		evict(*victim);
 	}
+}
+
+void* TexCache::alloc_promotion(TexSlot& s)
+{
+	// M5 (critic, M5 code review major 1): the allocation first, the evictions after it and only for the cap. A
+	// failed allocation (fragmentation or the real heap: a 2 MiB landscape part next to the render targets) evicts
+	// nothing and leaves the slot linear for the rest of its generation, instead of emptying the pool every frame.
+	constexpr int V = static_cast<int>(TexPool::Vram);
+	const uint32_t bytes = s.bytes;
+	if (bytes > cap_[V])
+		return nullptr;
+	// A VRAM slot is evicted for this one only if it was used less recently (no thrashing): enough of them first.
+	const uint32_t below = std::min(frame_, s.last_used_frame);
+	if (used_[V] + bytes > cap_[V])
+	{
+		uint64_t freeable = 0;
+		for (const TexSlot& c : slots_)
+			if (c.state == TexSlotState::Live && c.pool == TexPool::Vram && c.last_used_frame < below &&
+			    !protected_slot(c, frame_))
+				freeable += c.bytes;
+		if (used_[V] + bytes > cap_[V] + freeable)
+			return nullptr;
+	}
+	void* h = alloc_.alloc(TexPool::Vram, s.S, s.T, s.key.kind, s.key.wrap, bytes);
+	if (!h)
+	{
+		++stats_.alloc_failed_free;
+		++stats_.promotions_blocked;
+		s.promote_pending = false;
+		return nullptr;
+	}
+	while (used_[V] + bytes > cap_[V])
+	{
+		TexSlot* victim = lru_victim(false, TexPool::Vram, below);
+		if (!victim)
+			break;   // never: the freeable sum above covered it
+		evict(*victim);
+	}
+	used_[V] += bytes;
+	return h;
 }
 
 unsigned TexCache::on_retired()
@@ -260,12 +304,10 @@ bool TexCache::next_promotion(GxQueue& gx, bool command_buffer_not_empty, TexPro
 			++stats_.promotions_deferred;
 			return false;
 		}
-		// A VRAM slot is evicted for this one only if it was used less recently (no thrashing).
-		void* dst = alloc_with_eviction(TexPool::Vram, *s,
-		                                std::min(frame_, s->last_used_frame));
+		void* dst = alloc_promotion(*s);
 		if (!dst)
 		{
-			s->tried_frame = frame_;   // stays linear and pending; the next waiting slot may fit
+			s->tried_frame = frame_;   // stays linear (pending, or blocked for the generation); the next slot may fit
 			continue;
 		}
 		if (!gx.take(command_buffer_not_empty))
@@ -379,9 +421,9 @@ std::string TexCache::stats_line() const
 		n += std::snprintf(buf + n, sizeof buf - n, " %u", stats_.gen_window_bytes[i] / 1024);
 	if (n > 0 && n < static_cast<int>(sizeof buf))
 		std::snprintf(buf + n, sizeof buf - n,
-		              " promo %u/%u evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u creates %u "
+		              " promo %u/%u/%u evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u creates %u "
 		              "forced %u bursts %u audit %s",
-		              stats_.promotions_done, stats_.promotions_deferred, stats_.evictions, stats_.deferred_frees,
+		              stats_.promotions_done, stats_.promotions_deferred, stats_.promotions_blocked, stats_.evictions, stats_.deferred_frees,
 		              stats_.generation, stats_.alloc_failed_free, stats_.discards_tex, stats_.hits, stats_.misses,
 		              stats_.creates, stats_.forced_fails, stats_.burst_frames, audit() ? "ok" : "MISMATCH");
 	return std::string(buf);

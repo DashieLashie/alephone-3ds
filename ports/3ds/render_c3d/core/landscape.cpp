@@ -39,18 +39,33 @@ int floor_div(int a, int b)
 	return a >= 0 ? a / b : -((-a + b - 1) / b);
 }
 
+int s_part_rows = kLandPartRows;
+
 } // namespace
+
+int landscape_part_rows()
+{
+	return s_part_rows;
+}
+
+void landscape_set_part_rows(int rows)
+{
+	if (rows >= 64 && rows <= kLandPartRows)
+		s_part_rows = rows;
+}
 
 bool landscape_tex_size(int width, int height, bool rle, unsigned& S, unsigned* T, int* parts)
 {
-	if (rle || width < 1 || width > 1024 || height < 8 || height > 1024 || (height & (height - 1)) != 0)
+	const int cut = s_part_rows;
+	if (rle || width < 1 || width > 1024 || height < 8 || height > 1024 || (height & (height - 1)) != 0 ||
+	    width - cut > 512)
 		return false;
 	S = static_cast<unsigned>(height);
-	const int n = width > kLandPartRows ? 2 : 1;
+	const int n = width > cut ? 2 : 1;
 	if (T)
 	{
-		T[0] = pot8(width < kLandPartRows ? width : kLandPartRows);
-		T[1] = n == 2 ? pot8(width - kLandPartRows) : 0;
+		T[0] = pot8(width < cut ? width : cut);
+		T[1] = n == 2 ? pot8(width - cut) : 0;
 	}
 	if (parts)
 		*parts = n;
@@ -123,7 +138,7 @@ int landscape_sw_row(const LandParams& p, int y)
 
 int landscape_part(const LandParams& p, int y)
 {
-	return p.parts == 2 && landscape_sw_row(p, y) >= kLandPartRows ? 1 : 0;
+	return p.parts == 2 && landscape_sw_row(p, y) >= s_part_rows ? 1 : 0;
 }
 
 int landscape_band(const LandParams& p, int y)
@@ -166,7 +181,7 @@ TexResult landscape_attrs(const LandParams& p, const Point2* pts, int n, double 
 {
 	if (part < 0 || part >= p.parts)
 		return TexResult::NonFinite;
-	const double base = static_cast<double>(kLandPartRows) * part;
+	const double base = static_cast<double>(s_part_rows) * part;
 	double u[16], v[16];
 	if (n < 1 || n > 16)
 		return TexResult::NonFinite;

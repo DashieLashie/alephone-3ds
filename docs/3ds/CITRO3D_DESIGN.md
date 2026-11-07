@@ -3285,13 +3285,13 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     `n = (k + h2) div 2h2` (`landscape_bands`), each with `v = (R − (R >> 1)) − (f − 2h2·n) − ε + δ`; a polygon with one band is
     drawn as above, one with more is drawn as **SW's own spans** (M2's span path, `sw_spans`), its merged quads split at
     the band rows, so the coverage stays SW's exactly and no clip vertex is computed. Supported landscape bitmaps
-    (`landscape_tex_size`): not RLE, `height` a power of two in [8, 1024], `width` in [1, 1024], `S·T·4 ≤ 1 MiB`;
+    (`landscape_tex_size`): not RLE, `height` a power of two in [8, 1024], `width` in [1, 1024], `S·T·4 ≤ 1 MiB` (**corrected in the implementation**: `T` ≤ 512 per part, 2 MiB per part; Review log "M5 implementation, landscape size");
     anything else is unsupported (counted `c3d_land_unsupported`, a scan reason `landscape` in play).
   - *Landscape texture.* New `TexSource::landscape`; conversion `tex_convert_landscape(bitmap, tables, kind, S, T, out)`:
     memory row `t < R` = `row_addresses[t]`'s first `S` texels, rows `t ≥ R` = row `R − 1`, tiled by `tile_index` /
     `tile_memory_row` (M4: any S, T). Kinds **`Normal`** (top table RGB, A as 3.2) and **`Shadeless`** (table 0:
     infravision); both RGBA8. **Not RGB565**: 5-bit red/blue round by up to 4 (`255/31 ≈ 8.2` per step), which fails
-    8.3's Δ ≤ 2 by itself. A Marathon 2 landscape (270 × 512 → 512 × 512) is **1 024 KiB**: one per level, plus its
+    8.3's Δ ≤ 2 by itself. A Marathon 2 landscape (270 × 512 → 512 × 512) is **1 024 KiB** (**corrected**: 540 × 1 024, two parts of 2 048 + 128 KiB): one per level, plus its
     infravision copy while the player uses infravision. Beside ≤ 26 (texture, table) pairs at L0's spot (M0's null
     table: walls 64 KiB each, sprite frames up to ~32 KiB) the working set can pass the VRAM cap (3 584 KiB) with the
     infravision copy (round 1 minor 9: ~3.7 MiB), so evictions happen there, as designed (LRU; the LUT and the noise
@@ -3599,6 +3599,14 @@ KiB) are authoritative in Azahar; `C3D_GetDrawingTime/ProcessingTime`
 | texture cache VRAM pool (cap) | — | 3 584 | 3 584 | 2 048 |
 | **total** | 887 | ≤ 5 166 / 5 241 | 5 815 | 5 815 |
 
+**M5 (critic, M5 code review major 1):** a Marathon 2 landscape's part 0 is **2 048 KiB** (1 024 × 512 RGBA8; part 1
+128 KiB), inside the pool's cap but not always one contiguous `vramAlloc` block. A promotion allocates first and
+evicts only for the cap; a failed allocation leaves the part in the linear pool for its generation (sampled from
+FCRAM, cost in section 10) and evicts nothing; a landscape is the last LRU victim. M7's 2 048 KiB cap is the whole of
+part 0: M7's spec decides between RGB8 (1 536 KiB, `GPU_RGB8`, a new kind) and FCRAM sampling, with the console's
+numbers. Cutting at 256 rows is not an option: the cut would sit 13 rows from the horizon (row 269 of 540), on
+screen in nearly every outdoor frame.
+
 In direct mode a dialog switches to the 640x480 menu surface, presented
 through the same 512x256 texture; the overlay texture is idle then. Totals
 hold in every mode with the default caps.
@@ -3613,7 +3621,7 @@ hold in every mode with the default caps.
 | vertex ring 2 × 2 048 × 32 B (M0: 2 × max 387, rounded up to 1 024; M1 re-measured over the menu demo and a film: unchanged; **M3: 2 048**, the L08 film's span quads overflowed 1 024) | 128 |
 | index ring 2 × 4 096 × 2 B (M0: 2 × max 597; M3: 4 096) | 16 |
 | readback staging 480x240 | 450 |
-| linear texture pool (cap; holds promotions pending) | 4 096 |
+| linear texture pool (cap; holds promotions pending; M5: a landscape part that found no VRAM block, 2 048) | 4 096 |
 | **total** | ≤ 6 738 |
 
 No change to `__ctru_linear_heap_size` needed on the New 3DS
@@ -3679,8 +3687,12 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    and HOME/suspend in play mode (`NEXT-SPRINT.md` "M4 console check, short version").
    **M5:** landscape texel choice under PICA's float24 texcoords (host model: rows 98.16 % with the per-polygon row
    offset δ, columns 99.04 %; pre-stated fallback: δ per band of 16 lines, 99.81 % rows in the model); how TEV's
-   `MODULATE` rounds `255·(hi + 1)/255` on masked static draws (the alpha test's step); the 1 MiB landscape conversion
-   and its `TextureCopy` at level start and when infravision toggles (with item 10); the G2-b bench (readback vs SW
+   `MODULATE` rounds `255·(hi + 1)/255` on masked static draws (the alpha test's step); the 2 MiB landscape
+   part's conversion (+ 128 KiB part 1) and its `TextureCopy` at level start and when infravision toggles (with item
+   10; Azahar's level start: `level start gen 1: KiB 2944`); the GPU cost of sampling the part from FCRAM against VRAM;
+   whether a 2 MiB contiguous VRAM block is available next to the render targets (M6's targets too); the
+   landscape span path's columns under float24 (`m5-lookup.cfg`: Azahar's software backend 97.72 % strict, every miss one
+   column late; host GPU exact; Review log "M5 code review, round 1"); the G2-b bench (readback vs SW
    busy on L0/L6/L20) (`NEXT-SPRINT.md` "M5 console check, short version").
 7. Perspective-correct interpolation and large-UV precision on hardware.
 8. Readback-target orientation/flags; GX tiling minimum sizes (SPECULATIVE).
@@ -4477,5 +4489,49 @@ SW's static coverage), the user chose to **leave SW's static coverage out of the
 for the frame check; static is gated by its own density check. In the same answer the user decided that stage 10
 **continues until stereoscopic 3D (M9)** whatever G2-a shows (0.5).
 
+The play check's mask is SW's static primitives drawn alone (over clear 0), so it also leaves out static pixels
+that later geometry hides in the real frame: conservative, counted (`static_px`; critic, M5 code review minor 6).
+
 **Amended the same day (user):** M7 (2x2 supersampling) and M8 (the Renderer preference) are to be built too: stage 10
 builds every milestone, M5 → M6 → M7 → M8 → M9; the gates are measured and reported, they no longer decide.
+
+### M5 code review, round 1 (critic REVISE, 2026-11-07)
+
+On `13910b169` (+ the docs commits). Ruling: the row-512 cut is sound for the mapping (part membership is monotonic
+in y within a band; clamp on T is safe either side of the cut); its memory side was not. **Major 1** (a 2 MiB part
+that cannot get a VRAM block drained the VRAM pool every frame and was re-converted mid-play: L01 play `evict 1359
+alloc-fail 1659`, bursts at frames 200/571/3836): fixed in `core/texcache.cpp`: `alloc_promotion` checks that
+older victims cover the cap, allocates **before** evicting, and on a failed allocation evicts nothing and blocks the
+slot's promotion for its generation (`promotions_blocked`, the third `promo` figure); `lru_victim` takes a landscape
+only when nothing else qualifies. Host test `test_m5_promotion_pressure` (a FakeAlloc that refuses VRAM blocks over
+1 MiB: 30 frames, 0 evictions, one block; the cap-eviction path; the landscape last). 9.1, 9.2 and section 10 updated;
+RGB8 vs FCRAM is M7's decision (9.1). **Major 2** (part 1 and the cut-crossing span path never ran on the GPU): a first
+Look Up Test run (`run-azahar.sh --look-up-test`: the view pitches up to 28° and sways) on L6 created no part 1 and
+`c3d_land_spans=0`: at Marathon 2's pitch limit (~30°) rows past 512 never reach the screen (rows 512-539 need the
+top line's `k′ ≤ −243`, far beyond `dtanpitch` at 30°), which is why no film shows them. So part 1 is reachable only
+through a pinned or VertRepeat case in other scenarios, and a test key does the GPU coverage: **`land_cut N`** (test
+only, 64..512, `core/config.h`; `landscape_set_part_rows`) moves the cut. A first try at 256 showed the direction: the
+sky above the horizon is rows 269 → 539, so a cut at 256 (below the horizon) put the whole visible sky in part 1 and
+crossed nothing. **`land_cut 300`** sits 31 rows above the horizon, inside the visible sky from level to 28°; part 0
+is padded to 512 rows (row 299 repeated), part 1 holds rows 300-539 (240 → 256); a part 1 over 512 rows is refused.
+Host: the whole landscape-vs-SW sweep runs at both cuts (cut 300: rows 99.987 % float32, 98.20 % float24) and the
+cut-300 conversion of both parts is checked (the cut-256 version caught part 1's row count capped at the cut).
+`m5-lookup(-swbe).cfg` (`land_cut 300` + the plugin) on L0/L6, both backends, in the acceptance series
+(`c3d_land_spans` > 0, part-0 and part-1 creates, the strict landscape gate, `ring_hw_v`). The rows were measured
+first (new `c3d_land_rows`: the visible sky is rows 319-500 on L6, 302-500 on L0 while the view sways; a cut at 256
+lies below the horizon and one at 300 under L6's lowest sky row, both tried), so **`land_cut 400`**. Results (Azahar,
+non-authoritative): host GPU L6 / L0: `c3d_land_spans` 236 / 300, both parts created (2 048 + 1 024 KiB), the strict
+landscape figure **100.000 %**, `ring_hw_v` 1 017 of 2 048, 0 discards. **Software backend L0: strict 97.72 %**
+(neighbourhood 100 %), against 99.88 % for the same look-up at cut 512 (60 spans) and 99.58 % for the plain L0 diff:
+every differing pixel of the dumped check is **one column late** (SW's pixel = C3D's left neighbour; 12 distinct x),
+i.e. the column texcoord under float24 on the span path's one-line quads (290 span polygons), which the host GPU draws
+exactly. This is section 10's open item "landscape texel choice under float24" (columns get no help from δ) with a
+measured case; **recorded exception**: the software-backend look-up is gated at 97 %, the host-GPU one strict at 98, and
+the console decides (if it shows the same, the pre-stated remedy is the critic's: clip a convex polygon at the cut's
+line instead of SW's spans, so it keeps the polygon path's precision). In Marathon 2 at the real cut (512) the span path
+carries only VertRepeat / non-convex landscape polygons (40-60 per 60 checks), which pass at 99.58-99.88 %.
+**Minors:** 3, an unmasked static's key carries no texture (it never merges with a masked draw of the same bitmap);
+4, the audit is tested with a promotion in flight through `forget`, `bump_generation` and `on_retired`; 5,
+`landscape_params` (filter.cpp) is the one landscape rule of the filter, the play scan and the rasterizer; 6, recorded
+in "M5, play check and static, user decision". Also: `c3d-diff.py play --off-reason` (`m5-fail1.cfg` goes off on
+`tex`, not `cmdbuf`).

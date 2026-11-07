@@ -187,9 +187,10 @@ bool tex_convert_landscape(const TexBitmap& bitmap, const uint32_t* tables, TexK
 	for (unsigned i = 0; i < 256; ++i)
 		palette[i] = tex_palette_word(tables, kind, i);
 	uint8_t* dst = static_cast<uint8_t*>(out);
-	const unsigned base = static_cast<unsigned>(kLandPartRows) * static_cast<unsigned>(part);
+	const unsigned cut = static_cast<unsigned>(landscape_part_rows());
+	const unsigned base = cut * static_cast<unsigned>(part);
 	const unsigned R = static_cast<unsigned>(bitmap.width);
-	const unsigned count = R - base < static_cast<unsigned>(kLandPartRows) ? R - base : static_cast<unsigned>(kLandPartRows);
+	const unsigned count = part ? R - base : (R < cut ? R : cut);   // part 1 holds the rest (<= 512 rows)
 	for (unsigned j = 0; j < T; ++j)
 	{
 		const uint8_t* row = bitmap.rows[base + (j < count ? j : count - 1)];

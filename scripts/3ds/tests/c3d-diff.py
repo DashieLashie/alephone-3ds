@@ -44,13 +44,14 @@
 #       classes frame and play have no band (Coverage::All); their `empty` pixels are printed. The summary's
 #       rectangle counters (c3d_rects ...) are printed whenever they are present.
 #
-#   python3 -I scripts/3ds/tests/c3d-diff.py play LOG [--min-play-checks N] [--min-c3d N] [--expect-offs N] [--within P --tol T]
+#   python3 -I scripts/3ds/tests/c3d-diff.py play LOG [--min-play-checks N] [--min-c3d N] [--expect-offs N [--off-reason R]] [--within P --tol T]
 #       M4 play mode (design 7 "M4 specification", "c3d-diff.py"): prints the "[c3d] play final" line and the
 #       "DIFF ... class=play" checks; exit 1 if the final line is missing, c3d=0 (no C3D play frame), sentinel > 0,
 #       fewer than N play checks (default 0), any play check's neighbourhood within (A's covered or B's drawn pixels,
 #       Coverage::All) under P % at Delta <= T (defaults 97, 4; each check on its own, the pooled figure is printed;
 #       the DIFF lines' "(tol T)" must equal --tol), or, with --expect-offs N, offs != N or ons != N - 1 (a run that
-#       ends off); with --expect-offs the "C3D frame" rule becomes c3d == 0 and cmdbuf discards > 0 (m4-off.cfg).
+#       ends off); with --expect-offs the "C3D frame" rule becomes c3d == 0 and discards for reason R > 0 (R one of
+#       unsup ring cmdbuf gx begin tex; default cmdbuf: m4-off.cfg; tex: m5-fail1.cfg).
 #
 #   python3 -I scripts/3ds/tests/c3d-diff.py bmp A.bmp B.bmp [--class C]
 #       Reads two 32-bit BMPs (c3d-diff-<frame>-<class>-{sw,c3d}.bmp) and recomputes the metric of
@@ -452,7 +453,10 @@ def cmd_bmp(pa, pb, cls):
     return 0
 
 
-def cmd_play(path, min_checks, expect_offs, within, tol, min_c3d):
+OFF_REASONS = ("unsup", "ring", "cmdbuf", "gx", "begin", "tex")
+
+
+def cmd_play(path, min_checks, expect_offs, within, tol, min_c3d, off_reason="cmdbuf"):
     final, last, rows, lines = None, None, [], []
     with open(path, "r", errors="replace") as f:
         for line in f:
@@ -489,11 +493,13 @@ def cmd_play(path, min_checks, expect_offs, within, tol, min_c3d):
         if final and num("c3d") < min_c3d:
             problems.append("%d C3D play frame(s), fewer than --min-c3d %d" % (num("c3d"), min_c3d))
     else:
-        # m4-off.cfg: every C3D frame discards on cmdbuf, so none completes (critic M4 code review, minor 2).
-        m = re.search(r"discard=(\d+)/(\d+)/(\d+)/", final or "")
-        if num("c3d") != 0 or not m or int(m.group(3)) <= 0:
-            problems.append("--expect-offs: c3d %d (must be 0) and cmdbuf discards %s (must be > 0)" % (
-                num("c3d"), m.group(3) if m else "?"))
+        # m4-off.cfg: every C3D frame discards on cmdbuf, so none completes (critic M4 code review, minor 2);
+        # m5-fail1.cfg: on tex (every texture create fails).
+        m = re.search(r"discard=(\d+)/(\d+)/(\d+)/(\d+)/(\d+)/(\d+)", final or "")
+        k = OFF_REASONS.index(off_reason) + 1
+        if num("c3d") != 0 or not m or int(m.group(k)) <= 0:
+            problems.append("--expect-offs: c3d %d (must be 0) and %s discards %s (must be > 0)" % (
+                num("c3d"), off_reason, m.group(k) if m else "?"))
     if num("sentinel") > 0:
         problems.append("sentinel %d" % num("sentinel"))
     common = sum(r["common"] for r in rows)
@@ -525,7 +531,8 @@ def cmd_play(path, min_checks, expect_offs, within, tol, min_c3d):
 
 def main(argv):
     if len(argv) >= 3 and argv[1] == "play":
-        o = {"--min-play-checks": "0", "--expect-offs": None, "--within": "97", "--tol": "4", "--min-c3d": "1"}
+        o = {"--min-play-checks": "0", "--expect-offs": None, "--within": "97", "--tol": "4", "--min-c3d": "1",
+             "--off-reason": "cmdbuf"}
         rest = argv[3:]
         i = 0
         while i < len(rest):
@@ -535,10 +542,14 @@ def main(argv):
             else:
                 print("c3d-diff: unknown or incomplete option %s" % rest[i], file=sys.stderr)
                 return 2
+        if o["--off-reason"] not in OFF_REASONS:
+            print("c3d-diff: --off-reason must be one of %s" % " ".join(OFF_REASONS), file=sys.stderr)
+            return 2
         try:
             return cmd_play(argv[2], int(o["--min-play-checks"]),
                             int(o["--expect-offs"]) if o["--expect-offs"] is not None else None,
-                            float(o["--within"]), int(o["--tol"]), int(o["--min-c3d"]))
+                            float(o["--within"]), int(o["--tol"]), int(o["--min-c3d"]),
+                            o["--off-reason"])
         except ValueError:
             print("c3d-diff: play options need numbers", file=sys.stderr)
             return 2

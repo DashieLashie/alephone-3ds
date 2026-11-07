@@ -180,7 +180,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	const bool transparent = tex && (tex->flags & _TRANSPARENT_BIT) != 0;
 	bool supported = view_ && tex;
 	if (supported && landscape)
-		supported = landscape_supported(p, textures_);
+		supported = landscape_supported(p, view_, textures_);
 	else if (supported && stat)
 		supported = static_supported(e, p, textures_, lit_);
 	else if (supported)
@@ -224,16 +224,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	bool multi_band = false;
 	if (landscape)
 	{
-		const LandscapeOptions* lo = View_GetLandscapeOptions(p.ShapeDesc);
-		LandOpts o;
-		o.horiz_exp = lo->HorizExp;
-		o.vert_exp = lo->VertExp;
-		o.asp_rat_exp = lo->OGL_AspRatExp;
-		o.azimuth = lo->Azimuth;
-		o.vert_repeat = lo->VertRepeat;
-		const LandView lv{view_->half_screen_height, view_->dtanpitch, view_->landscape_yaw, view_->half_cone,
-		                  view_->standard_screen_width};
-		if (!landscape_setup(lv, o, tex->width, tex->height, tex->bytes_per_row == NONE, lp))
+		if (!landscape_params(p, *view_, lp))
 		{
 			++land_unsupported_;
 			back::view_discard(back::DiscardReason::Unsupported);
@@ -241,6 +232,13 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		}
 		// Several pieces (VertRepeat bands, or the two texture parts of a bitmap over 512 rows) go through SW's spans.
 		multi_band = landscape_piece(lp, ymin) != landscape_piece(lp, ymax - 1);
+		// The SW rows the landscapes span (monotonic in y within a band): where a cut (land_cut) would fall.
+		for (int y : {ymin, ymax - 1})
+		{
+			const int r = landscape_sw_row(lp, y);
+			land_row_min_ = std::min(land_row_min_, r);
+			land_row_max_ = std::max(land_row_max_, r);
+		}
 	}
 	const double delta = uv_half_ ? -0.5 : 0.0;
 	// A static polygon samples its bitmap only when it is transparent (the Mask: SW's check_transparent); otherwise
@@ -344,7 +342,9 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	const back::TexSource* tsp = with_tex ? &ts : nullptr;
 	const Rgb col = textures_ ? Rgb{0xFF, 0xFF, 0xFF} : shape_colour(static_cast<uint16_t>(p.ShapeDesc));
 	const Transfer key_xfer = landscape || stat ? xfer : Transfer::Textured;
-	DrawKey key{classify(e, key_xfer, foreground_), p.texture, p.shading_tables,
+	// An unmasked static samples no bitmap: its key has no texture, so it never merges with a masked draw of the same
+	// bitmap (back/draw.cpp mode_of reads the mask from `tex`; critic, M5 code review minor 3).
+	DrawKey key{classify(e, key_xfer, foreground_), stat && !masked ? nullptr : p.texture, p.shading_tables,
 	            p.transfer_mode, p.transfer_data, static_cast<uint16_t>(p.flags & _SHADELESS_BIT)};
 	// M5: a landscape's texture part is part of the draw (one bitmap, two textures).
 	auto set_part = [&](int piece) {

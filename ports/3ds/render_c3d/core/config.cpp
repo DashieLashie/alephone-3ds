@@ -181,6 +181,8 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 0, 100000, cfg.fail_every);
 	if (key == "landscape_tol")
 		return parse_unsigned(value, 0, 255, cfg.landscape_tol);
+	if (key == "land_cut")
+		return parse_unsigned(value, 64, 512, cfg.land_cut);
 	if (key == "film")
 	{
 		if (value.empty())

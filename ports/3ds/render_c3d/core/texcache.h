@@ -129,6 +129,7 @@ struct TexStats
 	uint32_t gen_window_bytes[kTexGenWindow] = {};   // bytes converted in the first view frames after a generation change
 	uint32_t promotions_done = 0;
 	uint32_t promotions_deferred = 0;     // next_promotion() stopped on the GX rule with a slot waiting
+	uint32_t promotions_blocked = 0;      // M5: a promotion's allocation failed: the slot stays linear this generation
 	uint32_t evictions = 0;
 	uint32_t deferred_frees = 0;          // blocks and retired slots freed by on_retired()
 	uint32_t generation = 0;
@@ -223,6 +224,7 @@ private:
 	void free_slot_memory(TexSlot& s);
 	TexSlot* take_free_slot();
 	void* alloc_with_eviction(TexPool pool, const TexSlot& shape, uint32_t victims_used_below);
+	void* alloc_promotion(TexSlot& s);
 
 	TexAllocator& alloc_;
 	TexCacheConfig cfg_;

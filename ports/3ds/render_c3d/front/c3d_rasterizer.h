@@ -23,6 +23,7 @@
 #include "Rasterizer.h"
 #include "scottish_textures.h"
 
+#include <climits>
 #include <cstdint>
 #include <vector>
 
@@ -95,6 +96,8 @@ public:
 	// statics C3D cannot draw; _solid polygons skipped (SW draws nothing for them).
 	unsigned land_polys() const { return land_polys_; }
 	unsigned land_spans() const { return land_spans_; }
+	int land_row_min() const { return land_row_min_ == INT_MAX ? -1 : land_row_min_; }
+	int land_row_max() const { return land_row_max_; }
 	unsigned land_unsupported() const { return land_unsupported_; }
 	unsigned static_polys() const { return static_polys_; }
 	unsigned static_rects() const { return static_rects_; }
@@ -126,6 +129,7 @@ private:
 	bool lit_ = true;
 	unsigned rect_bias_ = 1;   // 1/131072 texel
 	unsigned rects_ = 0, tinted_rects_ = 0, rect_skipped_ = 0, rect_unsupported_ = 0;
+	int land_row_min_ = INT_MAX, land_row_max_ = -1;   // SW rows of the landscapes drawn (M5)
 	unsigned land_polys_ = 0, land_spans_ = 0, land_unsupported_ = 0, static_polys_ = 0, static_rects_ = 0;
 	unsigned static_unsupported_ = 0, solid_skipped_ = 0;
 	uint32_t noise_state_ = 0x9E3779B9u;   // M5: the static noise offsets' xorshift32 (never 0)

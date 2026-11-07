@@ -2352,6 +2352,7 @@ public:
 	std::map<void*, Rec> live;
 	uintptr_t next = 0x1000;
 	int fail_next = 0;            // fail the next N allocations
+	uint32_t max_vram_block = 0;  // M5: refuse VRAM blocks over this many bytes (fragmentation); 0 = no limit
 	unsigned bad_release = 0, allocs = 0, releases = 0;
 	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, TexWrap, uint32_t bytes) override
 	{
@@ -2362,6 +2363,8 @@ public:
 			--fail_next;
 			return nullptr;
 		}
+		if (pool == TexPool::Vram && max_vram_block && bytes > max_vram_block)
+			return nullptr;
 		void* h = reinterpret_cast<void*>(next);
 		next += 0x100;
 		live[h] = Rec{pool, bytes};
@@ -4028,8 +4031,15 @@ static void test_landscape_vs_sw()
 								o.vert_repeat = rep != 0;
 								o.asp_rat_exp = rep ? (ve & 1) : 0;
 								LandParams p;
-								CHECK(landscape_setup(v, o, R, ht, false, p));
-								CHECK(p.parts == (R > 512 ? 2 : 1));
+								const int cut = landscape_part_rows();
+								const bool set = landscape_setup(v, o, R, ht, false, p);
+								if (R - cut > 512)
+								{
+									CHECK(!set);   // part 1 would pass 512 rows (land_cut 256 with R 1024)
+									continue;
+								}
+								CHECK(set);
+								CHECK(p.parts == (R > cut ? 2 : 1));
 								// One polygon per piece (band, part): the screen's lines of that piece, its own row offset.
 								auto piece = [&](int yy) { return landscape_band(p, yy) * 2 + landscape_part(p, yy); };
 								for (int y = 0; y < H; ++y)
@@ -4041,9 +4051,9 @@ static void test_landscape_vs_sw()
 									while (b1 < H && piece(b1) == piece(y))
 										++b1;
 									const double off = landscape_row_offset(p, b0, b1, band, part);
-									const double base = kLandPartRows * part;
+									const double base = cut * part;
 									const unsigned TT = p.T[part];
-									const int rows_in = part ? R - kLandPartRows : std::min(R, kLandPartRows);
+									const int rows_in = part ? R - cut : std::min(R, cut);
 									double ud, va, vb;
 									landscape_uv(p, 0, b0 - 0.5, band, ud, va, off);
 									landscape_uv(p, 0, b1 - 0.5, band, ud, vb, off);
@@ -4063,24 +4073,25 @@ static void test_landscape_vs_sw()
 									}
 								}
 							}
-	std::printf("landscape texel agreement (double / float32 / float24): columns %.5f / %.5f / %.5f %% of %llu, rows "
+	std::printf("landscape (cut %d) texel agreement (double / float32 / float24): columns %.5f / %.5f / %.5f %% of %llu, rows "
 	            "%.5f / %.5f / %.5f %% of %llu\n",
-	            100.0 * (n_col - bad_col[0]) / n_col, 100.0 * (n_col - bad_col[1]) / n_col,
+	            landscape_part_rows(), 100.0 * (n_col - bad_col[0]) / n_col, 100.0 * (n_col - bad_col[1]) / n_col,
 	            100.0 * (n_col - bad_col[2]) / n_col, static_cast<unsigned long long>(n_col),
 	            100.0 * (n_row - bad_row[0]) / n_row, 100.0 * (n_row - bad_row[1]) / n_row,
 	            100.0 * (n_row - bad_row[2]) / n_row, static_cast<unsigned long long>(n_row));
 	CHECK(bad_col[0] == 0 && bad_row[0] == 0);
 	CHECK(bad_col[1] * 10000 <= n_col && bad_row[1] * 2000 <= n_row);   // >= 99.99 % / 99.95 % in float32
 
-	// Sizes.
+	// Sizes (at the default cut; land_cut has its own in test_m5_cache_and_convert).
 	unsigned S = 0, T[2] = {0, 0};
 	int parts = 0;
-	CHECK(landscape_tex_size(540, 1024, false, S, T, &parts) && S == 1024 && T[0] == 512 && T[1] == 32 && parts == 2);
-	CHECK(landscape_tex_size(270, 512, false, S, T, &parts) && S == 512 && T[0] == 512 && parts == 1);
+	const bool cut512 = landscape_part_rows() == 512;
+	CHECK(!cut512 || (landscape_tex_size(540, 1024, false, S, T, &parts) && S == 1024 && T[0] == 512 && T[1] == 32 && parts == 2));
+	CHECK(!cut512 || (landscape_tex_size(270, 512, false, S, T, &parts) && S == 512 && T[0] == 512 && parts == 1));
 	CHECK(!landscape_tex_size(270, 512, true, S, T, &parts));
 	CHECK(!landscape_tex_size(270, 500, false, S, T, &parts));
 	CHECK(!landscape_tex_size(1025, 1024, false, S, T, &parts));
-	CHECK(landscape_tex_size(1024, 1024, false, S, T, &parts) && T[1] == 512);
+	CHECK(!cut512 || (landscape_tex_size(1024, 1024, false, S, T, &parts) && T[1] == 512));
 	CHECK(landscape_tex_size(1, 8, false, S, T, &parts) && S == 8 && T[0] == 8 && parts == 1);
 	// Bands: without VertRepeat always 0; with it the fold matches k' = k - 2 h2 n.
 	LandParams p;
@@ -4267,6 +4278,125 @@ static void test_m5_cache_and_convert()
 	Config c;
 	CHECK(config_apply(c, "fail_every", "50") && c.fail_every == 50 && !config_apply(c, "fail_every", "x"));
 	CHECK(config_apply(c, "landscape_tol", "2") && c.landscape_tol == 2 && !config_apply(c, "landscape_tol", "300"));
+	CHECK(c.land_cut == 512 && config_apply(c, "land_cut", "300") && c.land_cut == 300 && !config_apply(c, "land_cut", "600") &&
+	      !config_apply(c, "land_cut", "32") && c.land_cut == 300);
+	// land_cut 300 on Marathon 2's 540 x 1024: part 0 = rows 0..299 (padded to 512, row 299 repeated), part 1 = rows
+	// 300..539 (240 -> 256).
+	landscape_set_part_rows(300);
+	{
+		unsigned S2 = 0, T2[2] = {0, 0};
+		int n2 = 0;
+		CHECK(landscape_tex_size(540, 1024, false, S2, T2, &n2) && n2 == 2 && T2[0] == 512 && T2[1] == 256);
+		CHECK(!landscape_tex_size(1024, 1024, false, S2, T2, &n2));   // part 1 would be 724 rows
+		std::vector<std::vector<uint8_t>> big(540, std::vector<uint8_t>(8));
+		std::vector<const uint8_t*> br(540);
+		for (int r = 0; r < 540; ++r)
+		{
+			for (int x = 0; x < 8; ++x)
+				big[r][x] = static_cast<uint8_t>((r * 5 + x) & 0xFF);
+			br[r] = big[r].data();
+		}
+		TexBitmap bb;
+		bb.width = 540;
+		bb.height = 8;
+		bb.rows = br.data();
+		CHECK(landscape_tex_size(540, 8, false, S2, T2, &n2) && n2 == 2 && T2[0] == 512 && T2[1] == 256);
+		for (int part = 0; part < 2; ++part)
+		{
+			std::vector<uint8_t> o2(tex_bytes(S2, T2[part], TexKind::Normal));
+			CHECK(tex_convert_landscape(bb, tables, TexKind::Normal, part, S2, T2[part], o2.data()));
+			bool ok3 = true;
+			for (unsigned j = 0; j < T2[part]; ++j)
+				for (unsigned x = 0; x < S2; ++x)
+				{
+					const uint8_t* q = o2.data() + tile_index(S2, tile_memory_row(T2[part], j), x) * 4;
+					const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+					const int src = part ? (j < 240 ? 300 + static_cast<int>(j) : 539) : (j < 300 ? static_cast<int>(j) : 299);
+					ok3 = ok3 && w == tex_palette_word(tables, TexKind::Normal, big[src][x]);
+				}
+			CHECK(ok3);
+		}
+	}
+	landscape_set_part_rows(512);
+}
+
+// Critic, M5 code review major 1 and minor 4: a 2 MiB landscape part whose VRAM allocation fails (fragmentation)
+// must not drain the VRAM pool frame after frame; a landscape is the last LRU victim; the audit holds with a
+// promotion in flight through forget, bump_generation and on_retired.
+static void test_m5_promotion_pressure()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 3584, 8));
+	GxQueue gx;
+	uint32_t f = 1;
+	run_frame(c, gx, f++);
+	for (int i = 0; i < 20; ++i)
+		CHECK(c.create(K(i), 128));
+	for (int k = 0; k < 4; ++k)
+		run_frame(c, gx, f++);
+	CHECK(c.live_count(TexPool::Vram) == 20 && c.used_bytes(TexPool::Vram) == 20u * 65536u);
+	fa.max_vram_block = 1024 * 1024;
+	const TexKey land{&bm[100], &bm[4095], TexKind::Normal, TexWrap::Landscape, 0};
+	run_frame(c, gx, f);
+	TexSlot* L = c.create(land, 1024, 512);
+	CHECK(L && L->bytes == 2u * 1024u * 1024u && L->promote_pending);
+	const uint32_t ev0 = c.stats().evictions;
+	for (int k = 0; k < 30; ++k)
+	{
+		run_frame(c, gx, ++f);
+		CHECK(c.lookup(land) == L);
+	}
+	CHECK(c.stats().evictions == ev0 && c.stats().promotions_blocked == 1 && c.stats().alloc_failed_free == 1);
+	CHECK(L->pool == TexPool::Linear && !L->promote_pending && c.live_count(TexPool::Vram) == 20);
+	CHECK(c.audit());
+	// Over the cap with enough older victims: the allocation first, then exactly the evictions the cap needs.
+	{
+		FakeAlloc fb;
+		TexCache d(fb, cfg_of(4096, 1024, 8));
+		GxQueue g2;
+		uint32_t h = 1;
+		run_frame(d, g2, h++);
+		for (int i = 0; i < 16; ++i)
+			CHECK(d.create(K(i), 128));
+		for (int k = 0; k < 4; ++k)
+			run_frame(d, g2, h++);
+		CHECK(d.used_bytes(TexPool::Vram) == 1024u * 1024u);
+		run_frame(d, g2, h++);
+		TexSlot* big = d.create(K(50), 512);   // 1 MiB: the whole cap
+		CHECK(big);
+		run_frame(d, g2, h++);
+		CHECK(d.lookup(K(50)) == big && big->vram_handle && d.stats().evictions == 16 && d.audit());
+		// The audit with the promotion in flight: forget while copying, then the retire.
+		d.forget(big);
+		CHECK(d.audit());
+		run_frame(d, g2, h++);
+		CHECK(d.audit() && d.used_bytes(TexPool::Vram) == 0 && fb.bad_release == 0);
+		// bump_generation while copying.
+		TexSlot* m = d.create(K(51), 256);
+		run_frame(d, g2, h++);
+		CHECK(m->vram_handle && d.audit());
+		d.bump_generation();
+		CHECK(d.audit());
+		run_frame(d, g2, h++);
+		CHECK(d.audit() && d.used_bytes(TexPool::Vram) == 0 && d.used_bytes(TexPool::Linear) == 0);
+		d.release_all();
+		CHECK(d.audit() && fb.live.empty() && fb.bad_release == 0);
+	}
+	// A landscape goes last: linear only (promote_max 0), the landscape older than the others.
+	{
+		FakeAlloc fc;
+		TexCache e(fc, cfg_of(2048 + 256, 3584, 0));
+		e.begin_frame(1);
+		TexSlot* l2 = e.create(land, 1024, 512);
+		e.begin_frame(2);
+		CHECK(l2 && e.create(K(1), 128) && e.create(K(2), 128) && e.create(K(3), 128) && e.create(K(4), 128));
+		e.begin_frame(3);
+		CHECK(e.create(K(5), 128));        // evicts K(1), the oldest that is not a landscape
+		CHECK(e.lookup(land) == l2 && !e.lookup(K(1)) && e.stats().evictions == 1 && e.audit());
+		e.release_all();
+	}
+	c.release_all();
+	CHECK(c.audit() && fa.bad_release == 0);
 }
 
 static void test_m5_diff()
@@ -4303,8 +4433,12 @@ static void test_m5_core()
 {
 	test_m5_diff();
 	test_landscape_vs_sw();
+	landscape_set_part_rows(300);   // the land_cut test key (critic, M5 code review major 2)
+	test_landscape_vs_sw();
+	landscape_set_part_rows(512);
 	test_noise();
 	test_m5_cache_and_convert();
+	test_m5_promotion_pressure();
 }
 
 int main()

@@ -23,6 +23,7 @@
 #include "scottish_textures.h"
 
 #include "../core/classify.h"
+#include "../core/landscape.h"
 #include "../core/stats.h"
 
 #include <cstdint>
@@ -43,9 +44,13 @@ enum class RectSupport { Ok, Static, Other, Bitmap, Wrap };
 // M4; M5: a static rectangle is Ok when its bitmap is (the Mask kind), Static when it is not (the play scan's reason).
 RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures, int* level = nullptr);
 // M5 (design 7, M5 specification "Landscapes on the GPU", "Static on the GPU"): what C3D draws of the two classes.
-// A landscape: textures and a bitmap landscape_tex_size takes. A static polygon: textures and lit (unit 1), a
-// texture, and when the bitmap is transparent a wall (the vertical entry) whose bitmap is M2's square kind (the Mask).
-bool landscape_supported(const polygon_definition& p, bool textures);
+// A landscape: textures and landscape_params true (with no view yet, a bitmap landscape_tex_size takes). A static
+// polygon: textures and lit (unit 1), a texture, and when the bitmap is transparent a wall (the vertical entry) whose
+// bitmap is M2's square kind (the Mask).
+// landscape_params: core/landscape.h landscape_setup for `p` under `view` with the shape's LandscapeOptions; one rule
+// for the filter, the play scan and the rasterizer (critic, M5 code review minor 5).
+bool landscape_params(const polygon_definition& p, const view_data& view, LandParams& out);
+bool landscape_supported(const polygon_definition& p, const view_data* view, bool textures);
 bool static_supported(Entry e, const polygon_definition& p, bool textures, bool lit);
 
 // Forwards the primitives of class `cls` (kFrame: all of them) to `inner`. Every forwarded

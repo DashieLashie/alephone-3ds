@@ -217,7 +217,7 @@ void diff_summary()
 	       "c3d_span_polygons=%u c3d_span_quads=%u c3d_span_quads_max=%d c3d_span_ring_refused=%u "
 	       "c3d_lit_polys=%u c3d_shadeless_polys=%u c3d_neg_ambient_polys=%u c3d_flash_checks=%u c3d_m_max=%ld "
 	       "c3d_flash_over=%u c3d_ambient_wrap=%u c3d_rects=%u c3d_tinted_rects=%u c3d_rect_skipped=%u "
-	       "c3d_rect_unsupported=%u c3d_land_polys=%u c3d_land_spans=%u c3d_land_unsupported=%u c3d_static_polys=%u "
+	       "c3d_rect_unsupported=%u c3d_land_polys=%u c3d_land_spans=%u c3d_land_rows=%d-%d c3d_land_unsupported=%u c3d_static_polys=%u "
 	       "c3d_static_rects=%u c3d_static_unsupported=%u c3d_solid_skipped=%u\n", s_diff_done,
 	       s_diff_checks, static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped, s_c3d_compared,
 	       s_c3d_discarded, s_c3d_skipped, s_c3d_drawn, s_c3d_accept_skips[1], s_c3d_accept_skips[2],
@@ -226,7 +226,8 @@ void diff_summary()
 	       s_c3d_rast.lit_polys(), s_c3d_rast.shadeless_polys(), s_c3d_rast.neg_ambient_polys(),
 	       s_c3d_rast.flash_checks(), s_c3d_rast.m_max(), s_c3d_rast.flash_over(), s_c3d_ambient_wrap,
 	       s_c3d_rast.rects(), s_c3d_rast.tinted_rects(), s_c3d_rast.rect_skipped(), s_c3d_rast.rect_unsupported(),
-	       s_c3d_rast.land_polys(), s_c3d_rast.land_spans(), s_c3d_rast.land_unsupported(), s_c3d_rast.static_polys(),
+	       s_c3d_rast.land_polys(), s_c3d_rast.land_spans(), s_c3d_rast.land_row_min(), s_c3d_rast.land_row_max(),
+	       s_c3d_rast.land_unsupported(), s_c3d_rast.static_polys(),
 	       s_c3d_rast.static_rects(), s_c3d_rast.static_unsupported(), s_c3d_rast.solid_skipped());
 	fflush(stdout);
 }
@@ -468,7 +469,7 @@ private:
 		// textures 1 and lit 1).
 		if (t == Transfer::BigLandscaped)
 		{
-			if (!landscape_supported(p, true) || p.vertex_count > MAXIMUM_VERTICES_PER_SCREEN_POLYGON)
+			if (!landscape_supported(p, view_, true) || p.vertex_count > MAXIMUM_VERTICES_PER_SCREEN_POLYGON)
 				reason = ScanReason::Landscape;
 			return;
 		}
