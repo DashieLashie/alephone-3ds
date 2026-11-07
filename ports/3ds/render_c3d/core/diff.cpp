@@ -33,16 +33,23 @@ inline unsigned channel_delta(uint32_t a, uint32_t b)
 	return d;
 }
 
-// Coverage::All (see diff.h).
-DiffResult diff_all(const Image32& a, const Image32& b, uint32_t clear, int tol, int w, int h)
+// Coverage::All (see diff.h); `exclude` (M5, optional): pixels not compared and not used as neighbours.
+DiffResult diff_all(const Image32& a, const Image32& b, uint32_t clear, int tol, int w, int h,
+                    const uint8_t* exclude = nullptr, unsigned* excluded = nullptr)
 {
 	DiffResult r;
+	unsigned nex = 0;
 	for (int y = 0; y < h; ++y)
 	{
 		const uint32_t* pa = a.px + static_cast<size_t>(y) * a.pitch;
 		const uint32_t* pb = b.px + static_cast<size_t>(y) * b.pitch;
 		for (int x = 0; x < w; ++x)
 		{
+			if (exclude && exclude[static_cast<size_t>(y) * w + x])
+			{
+				++nex;
+				continue;
+			}
 			const bool ea = ((pa[x] ^ clear) & 0x00FFFFFFu) == 0, eb = ((pb[x] ^ clear) & 0x00FFFFFFu) == 0;
 			r.covered_a += !ea;
 			r.covered_b += !eb;
@@ -70,6 +77,8 @@ DiffResult diff_all(const Image32& a, const Image32& b, uint32_t clear, int tol,
 					const int nx = x + dx;
 					if ((dx == 0 && dy == 0) || nx < 0 || nx >= w)
 						continue;
+					if (exclude && exclude[static_cast<size_t>(ny) * w + nx])
+						continue;
 					const uint32_t an = a.px[static_cast<size_t>(ny) * a.pitch + nx];
 					// One side empty (a pixel only one renderer drew): an empty A-neighbour must not match B's
 					// clear and hide the miss (M4 critic round 2, minor 2).
@@ -84,10 +93,76 @@ DiffResult diff_all(const Image32& a, const Image32& b, uint32_t clear, int tol,
 				++r.within_nb;
 		}
 	}
+	if (excluded)
+		*excluded = nex;
 	return r;
 }
 
 } // namespace
+
+DiffResult diff_images_excluding(const Image32& a, const Image32& b, uint32_t clear, int tol, const uint8_t* exclude,
+                                 unsigned* excluded)
+{
+	const int w = std::min(a.width, b.width);
+	const int h = std::min(a.height, b.height);
+	if (excluded)
+		*excluded = 0;
+	if (w <= 0 || h <= 0)
+		return DiffResult();
+	return diff_all(a, b, clear, tol, w, h, exclude, excluded);
+}
+
+StaticResult diff_static(const Image32& a, const Image32& b, const Image32& c)
+{
+	StaticResult r;
+	const int w = std::min(std::min(a.width, b.width), c.width);
+	const int h = std::min(std::min(a.height, b.height), c.height);
+	auto in_c = [&](int x, int y) { return c.px[static_cast<size_t>(y) * c.pitch + x] != 0; };
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+		{
+			const bool cc = in_c(x, y);
+			const bool wa = a.px[static_cast<size_t>(y) * a.pitch + x] != 0;
+			const bool wb = b.px[static_cast<size_t>(y) * b.pitch + x] != 0;
+			r.cover += cc;
+			if (cc)
+			{
+				r.written_a += wa;
+				r.written_b += wb;
+				continue;
+			}
+			r.a_out += wa;
+			if (!wb)
+				continue;
+			bool edge = false;
+			for (int dy = -1; dy <= 1 && !edge; ++dy)
+				for (int dx = -1; dx <= 1; ++dx)
+				{
+					const int nx = x + dx, ny = y + dy;
+					if ((dx || dy) && nx >= 0 && nx < w && ny >= 0 && ny < h && in_c(nx, ny))
+					{
+						edge = true;
+						break;
+					}
+				}
+			if (edge)
+				++r.out_edge;
+			else
+				++r.out_nonedge;
+		}
+	return r;
+}
+
+std::string static_line(unsigned frame, const StaticResult& r, unsigned excluded, unsigned sentinel)
+{
+	char buf[256];
+	const double da = r.cover ? 100.0 * r.written_a / r.cover : 0.0, db = r.cover ? 100.0 * r.written_b / r.cover : 0.0;
+	std::snprintf(buf, sizeof buf,
+	              "[c3d] DIFF frame=%u class=static cover=%u written=%u/%u density=%.3f/%.3f out=%u/%u a_out=%u b=c3d "
+	              "excluded=%u sentinel=%u",
+	              frame, r.cover, r.written_a, r.written_b, da, db, r.out_edge, r.out_nonedge, r.a_out, excluded, sentinel);
+	return std::string(buf);
+}
 
 DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32_t clear, int tol,
                        const uint8_t* tie_mask)

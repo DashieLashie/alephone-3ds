@@ -64,6 +64,27 @@ struct DiffResult
 DiffResult diff_images(const Image32& a, const Image32& b, Coverage mode, uint32_t clear, int tol,
                        const uint8_t* tie_mask = nullptr);
 
+// M5 (design 7, M5 specification "Diff checks"): Coverage::All over the pixels whose `exclude` byte is 0 (row stride =
+// the common width); excluded pixels are not compared, not used as neighbours and counted in *excluded (if
+// non-null). The play check of a frame with static (the noise differs per pixel by design).
+DiffResult diff_images_excluding(const Image32& a, const Image32& b, uint32_t clear, int tol, const uint8_t* exclude,
+                                 unsigned* excluded);
+
+// M5 "static": A = SW's static draws, B = C3D's, C = SW's with every drop forced to 0 (SW's coverage), all over a
+// clear 0 (a written pixel is != 0: SW's static value is never 0, its top byte is). written_b counts B's pixels inside
+// C; B's pixels outside C are `out`, split by C's edge band (a pixel with an 8-neighbour of the other C coverage).
+struct StaticResult
+{
+	unsigned cover = 0;                 // |C|
+	unsigned written_a = 0;             // |A| (inside C by construction; A outside C counted in a_out)
+	unsigned written_b = 0;             // |B inside C|
+	unsigned out_edge = 0, out_nonedge = 0;
+	unsigned a_out = 0;                 // A outside C (never, by construction: a check of the harness)
+};
+StaticResult diff_static(const Image32& a, const Image32& b, const Image32& c);
+// "[c3d] DIFF frame=F class=static cover=C written=A/B density=DA/DB out=E/N a_out=X b=c3d excluded=X sentinel=S".
+std::string static_line(unsigned frame, const StaticResult& r, unsigned excluded, unsigned sentinel);
+
 // "[c3d] DIFF frame=F class=C covered=A/B cov_mismatch=E/N common=K within_tol=P% (tol T) mean=M max=X
 // differ=D band=N", no newline.
 std::string diff_line(unsigned frame, const char* cls, const DiffResult& r, int tol);

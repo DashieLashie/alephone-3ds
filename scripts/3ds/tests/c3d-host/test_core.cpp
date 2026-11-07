@@ -19,6 +19,8 @@
 #include "gate.h"
 #include "geometry.h"
 #include "gx_queue.h"
+#include "landscape.h"
+#include "noise.h"
 #include "rect.h"
 #include "ring.h"
 #include "shade_lut.h"
@@ -2351,7 +2353,7 @@ public:
 	uintptr_t next = 0x1000;
 	int fail_next = 0;            // fail the next N allocations
 	unsigned bad_release = 0, allocs = 0, releases = 0;
-	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, bool, uint32_t bytes) override
+	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, TexWrap, uint32_t bytes) override
 	{
 		if (bytes != tex_bytes(S, T, kind))
 			++bad_release;   // the size the caps count must be the texture's
@@ -3913,11 +3915,11 @@ static void test_m4_misc()
 	FakeAlloc fa;
 	TexCache cache(fa, TexCacheConfig{});
 	cache.begin_frame(1);
-	TexSlot* s = cache.create(TexKey{&fa, nullptr, TexKind::Mask, true}, 128, 64);
+	TexSlot* s = cache.create(TexKey{&fa, nullptr, TexKind::Mask, TexWrap::Clamp}, 128, 64);
 	CHECK(s && s->S == 128 && s->T == 64 && s->bytes == 8192 && fa.bad_release == 0);
-	TexSlot* r = cache.create(TexKey{&fa, &fa, TexKind::NormalKeyed, true}, 16, 256);
-	CHECK(r && r->bytes == 16384 && cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, true}) == r);
-	CHECK(!cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, false}));   // the wrap is part of the key
+	TexSlot* r = cache.create(TexKey{&fa, &fa, TexKind::NormalKeyed, TexWrap::Clamp}, 16, 256);
+	CHECK(r && r->bytes == 16384 && cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, TexWrap::Clamp}) == r);
+	CHECK(!cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, TexWrap::Repeat}));   // the wrap is part of the key
 	cache.release_all();
 }
 
@@ -3956,6 +3958,355 @@ static void test_m4_core()
 	test_m4_misc();
 }
 
+// --- M5 (design 7, M5 specification "Host tests") ---
+
+// The GPU's texel column / source row of a landscape at pixel centres: the attribute evaluated at two corners
+// (stored per `model`: 0 double, 1 float32, 2 float32 then float24), interpolated, floored; the row clamped to
+// [0, T - 1] and the padded rows read row R - 1.
+static void test_landscape_vs_sw()
+{
+	uint64_t n_col = 0, n_row = 0, bad_col[3] = {0, 0, 0}, bad_row[3] = {0, 0, 0};
+	auto store = [](double v, int model) {
+		return model == 2 ? f24(static_cast<float>(v)) : model == 1 ? static_cast<double>(static_cast<float>(v)) : v;
+	};
+	const int screens[2][2] = {{400, 240}, {640, 320}};
+	const int cones[3] = {40, 64, 80};
+	const int heights[2] = {256, 512};
+	// Columns: yaw, azimuth, half_cone, screen, height, HorizExp.
+	for (int sc = 0; sc < 2; ++sc)
+		for (int hc : cones)
+			for (int ht : heights)
+				for (int he = 0; he <= 2; ++he)
+					for (int az : {0, 100})
+						for (int yaw = 0; yaw < 512; yaw += 7)
+						{
+							const int W = screens[sc][0];
+							LandView v{screens[sc][1] / 2, 0, yaw, hc, W};
+							LandOpts o;
+							o.horiz_exp = he;
+							o.azimuth = az;
+							LandParams p;
+							CHECK(landscape_setup(v, o, 540, ht, false, p));
+							const Point2 q[2] = {{0, 0}, {W, 0}};
+							TexAttr at[2];
+							CHECK(landscape_attrs(p, q, 2, -0.5, 0, 0, 0.0, at) == TexResult::Ok);
+							// double corners: recompute without the float of TexAttr
+							double u0d, u1d, vd;
+							landscape_uv(p, -0.5, 0, 0, u0d, vd);
+							landscape_uv(p, W - 0.5, 0, 0, u1d, vd);
+							const double period = static_cast<double>(1u << p.bits);
+							const double sh = std::floor(std::fmin(u0d, u1d) / period) * period;
+							const double c0 = (u0d - sh + kLandEps) / p.S, c1 = (u1d - sh + kLandEps) / p.S;
+							for (int x = 0; x < W; ++x)
+							{
+								const int sw = landscape_sw_col(p, x);
+								++n_col;
+								for (int m = 0; m < 3; ++m)
+								{
+									const double a = store(c0, m), b = store(c1, m);
+									const double s = a + (b - a) * (x + 0.5) / W;
+									long t = static_cast<long>(std::floor(s * p.S)) % static_cast<long>(p.S);
+									if (t < 0)
+										t += p.S;
+									bad_col[m] += t != sw;
+								}
+							}
+						}
+	// Rows: dtp, half_cone, screen, R, height, VertExp, AspRatExp, VertRepeat.
+	for (int sc = 0; sc < 2; ++sc)
+		for (int hc : cones)
+			for (int R : {540, 270, 135, 512, 1024})
+				for (int ht : heights)
+					for (int ve = 0; ve <= 2; ++ve)
+						for (int rep = 0; rep < 2; ++rep)
+							for (int dtp : {-60, -13, 0, 25, 60})
+							{
+								const int W = screens[sc][0], H = screens[sc][1];
+								LandView v{H / 2, dtp, 0, hc, W};
+								LandOpts o;
+								o.vert_exp = ve;
+								o.vert_repeat = rep != 0;
+								o.asp_rat_exp = rep ? (ve & 1) : 0;
+								LandParams p;
+								CHECK(landscape_setup(v, o, R, ht, false, p));
+								CHECK(p.parts == (R > 512 ? 2 : 1));
+								// One polygon per piece (band, part): the screen's lines of that piece, its own row offset.
+								auto piece = [&](int yy) { return landscape_band(p, yy) * 2 + landscape_part(p, yy); };
+								for (int y = 0; y < H; ++y)
+								{
+									const int band = landscape_band(p, y), part = landscape_part(p, y);
+									int b0 = y, b1 = y;
+									while (b0 > 0 && piece(b0 - 1) == piece(y))
+										--b0;
+									while (b1 < H && piece(b1) == piece(y))
+										++b1;
+									const double off = landscape_row_offset(p, b0, b1, band, part);
+									const double base = kLandPartRows * part;
+									const unsigned TT = p.T[part];
+									const int rows_in = part ? R - kLandPartRows : std::min(R, kLandPartRows);
+									double ud, va, vb;
+									landscape_uv(p, 0, b0 - 0.5, band, ud, va, off);
+									landscape_uv(p, 0, b1 - 0.5, band, ud, vb, off);
+									va -= base;
+									vb -= base;
+									const int sw = landscape_sw_row(p, y);
+									++n_row;
+									for (int m = 0; m < 3; ++m)
+									{
+										const double a = store(va / TT, m), b = store(vb / TT, m);
+										const double t = a + (b - a) * (y + 0.5 - b0) / (b1 - b0);
+										long r = static_cast<long>(std::floor(t * TT));
+										r = r < 0 ? 0 : (r > static_cast<long>(TT) - 1 ? TT - 1 : r);
+										if (r >= rows_in)
+											r = rows_in - 1;
+										bad_row[m] += r + static_cast<long>(base) != sw;
+									}
+								}
+							}
+	std::printf("landscape texel agreement (double / float32 / float24): columns %.5f / %.5f / %.5f %% of %llu, rows "
+	            "%.5f / %.5f / %.5f %% of %llu\n",
+	            100.0 * (n_col - bad_col[0]) / n_col, 100.0 * (n_col - bad_col[1]) / n_col,
+	            100.0 * (n_col - bad_col[2]) / n_col, static_cast<unsigned long long>(n_col),
+	            100.0 * (n_row - bad_row[0]) / n_row, 100.0 * (n_row - bad_row[1]) / n_row,
+	            100.0 * (n_row - bad_row[2]) / n_row, static_cast<unsigned long long>(n_row));
+	CHECK(bad_col[0] == 0 && bad_row[0] == 0);
+	CHECK(bad_col[1] * 10000 <= n_col && bad_row[1] * 2000 <= n_row);   // >= 99.99 % / 99.95 % in float32
+
+	// Sizes.
+	unsigned S = 0, T[2] = {0, 0};
+	int parts = 0;
+	CHECK(landscape_tex_size(540, 1024, false, S, T, &parts) && S == 1024 && T[0] == 512 && T[1] == 32 && parts == 2);
+	CHECK(landscape_tex_size(270, 512, false, S, T, &parts) && S == 512 && T[0] == 512 && parts == 1);
+	CHECK(!landscape_tex_size(270, 512, true, S, T, &parts));
+	CHECK(!landscape_tex_size(270, 500, false, S, T, &parts));
+	CHECK(!landscape_tex_size(1025, 1024, false, S, T, &parts));
+	CHECK(landscape_tex_size(1024, 1024, false, S, T, &parts) && T[1] == 512);
+	CHECK(landscape_tex_size(1, 8, false, S, T, &parts) && S == 8 && T[0] == 8 && parts == 1);
+	// Bands: without VertRepeat always 0; with it the fold matches k' = k - 2 h2 n.
+	LandParams p;
+	LandOpts o;
+	o.vert_repeat = true;
+	CHECK(landscape_setup(LandView{120, 0, 0, 64, 400}, o, 270, 512, false, p) && p.h2 == 256);
+	for (int k = -2000; k <= 2000; ++k)
+	{
+		const int n = k + p.h2 >= 0 ? (k + p.h2) / (2 * p.h2) : -((-(k + p.h2) + 2 * p.h2 - 1) / (2 * p.h2));
+		CHECK(landscape_sw_kfold(p, k) == k - 2 * p.h2 * n);
+	}
+}
+
+static void test_noise()
+{
+	// SW's step: maximal period from 1.
+	uint16_t s = 1;
+	unsigned period = 0;
+	do
+	{
+		s = sw_lfsr_step(s);
+		++period;
+	} while (s != 1 && period < 70000);
+	CHECK(period == 65535);
+	CHECK(sw_static_pixel(0xABCD) == 0x00AB66CDu);   // R = AB, G = AB ^ CD, B = CD
+	CHECK(noise_word(0xABCD) == 0xAB66CDACu);
+	CHECK((noise_word(0x0105) & 0xFF) == 2 && (noise_word(0x0005) & 0xFF) == 1 && (noise_word(0xFF05) & 0xFF) == 255);
+	// Through the readback: the target pixel (RGBA from the texel word) as ARGB (calibrate.h rgba_to_argb_keep) = SW's
+	// pixel32 (low_level_textures.h:597-600) in RGB, for every state.
+	for (uint32_t st = 1; st < 65536; ++st)
+	{
+		const uint32_t w = noise_word(static_cast<uint16_t>(st));
+		const uint32_t argb = ((w & 0xFFu) << 24) | (w >> 8);
+		if ((argb & 0x00FFFFFFu) != sw_static_pixel(static_cast<uint16_t>(st)))
+		{
+			CHECK(false);
+			break;
+		}
+	}
+	CHECK(noise_ref(0) == 1 && noise_ref(0x80FF) == 0x81 && noise_ref(0x00FF) == 1 && noise_ref(0xFFFF) == 255);
+	double worst = 0.0, worst_top = 0.0;
+	unsigned worst_drop = 0;
+	for (unsigned d = 0; d < 65536; d += 1)
+	{
+		const double e = std::fabs(noise_density(noise_ref(static_cast<uint16_t>(d))) - sw_static_density(static_cast<uint16_t>(d)));
+		if (d >= 0xFF00)
+			worst_top = std::fmax(worst_top, e);
+		else if (e > worst)
+		{
+			worst = e;
+			worst_drop = d;
+		}
+		if (d >= 256 && d < 0xFF00)
+			d += 254;   // every 0x100 boundary and its neighbours
+	}
+	std::printf("static density, noise texture vs SW: worst |delta| %.3f points (drop 0x%04x), %.3f at drop >= 0xff00\n",
+	            100.0 * worst, worst_drop, 100.0 * worst_top);
+	CHECK(worst <= 0.004 && worst_top <= 0.008);
+	// Tiling: texel k at its tiled place.
+	std::vector<uint8_t> tex(kNoiseBytes);
+	noise_build(tex.data());
+	uint16_t seed = kNoiseSeed;
+	bool ok = true;
+	for (unsigned x = 0; x < kNoiseSide && ok; ++x)
+		for (unsigned j = 0; j < kNoiseSide; ++j)   // down columns, as SW walks
+		{
+			const uint8_t* q = tex.data() + tile_index(kNoiseSide, tile_memory_row(kNoiseSide, j), x) * 4;
+			const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+			ok = ok && w == noise_word(seed);
+			seed = sw_lfsr_step(seed);
+		}
+	CHECK(ok);
+}
+
+// M5: the landscape conversion (padding, kinds), the cache's wrap key, fail_every, audit, level-start counts.
+static void test_m5_cache_and_convert()
+{
+	// A 5-row x 8-texel landscape into 8 x 8: rows 5..7 repeat row 4; tiling through tile_index.
+	uint32_t tables[kShadingTableEntries];
+	for (unsigned i = 0; i < kShadingTableEntries; ++i)
+		tables[i] = 0xFF000000u | (i * 2654435761u >> 8);
+	uint8_t data[5][8];
+	const uint8_t* rows[5];
+	for (int r = 0; r < 5; ++r)
+	{
+		for (int x = 0; x < 8; ++x)
+			data[r][x] = static_cast<uint8_t>(r * 8 + x + 1);
+		rows[r] = data[r];
+	}
+	TexBitmap b;
+	b.width = 5;
+	b.height = 8;
+	b.rows = rows;
+	unsigned S = 0, TT[2] = {0, 0};
+	int parts = 0;
+	CHECK(landscape_tex_size(5, 8, false, S, TT, &parts) && S == 8 && TT[0] == 8 && parts == 1);
+	const unsigned T = TT[0];
+	std::vector<uint8_t> out(tex_bytes(S, T, TexKind::Normal));
+	CHECK(tex_convert_landscape(b, tables, TexKind::Normal, 0, S, T, out.data()));
+	CHECK(!tex_convert_landscape(b, tables, TexKind::Mask, 0, S, T, out.data()));
+	CHECK(!tex_convert_landscape(b, tables, TexKind::Normal, 1, S, T, out.data()));
+	CHECK(!tex_convert_landscape(b, tables, TexKind::Normal, 0, 8, 16, out.data()));
+	bool ok = true;
+	for (unsigned j = 0; j < T; ++j)
+		for (unsigned x = 0; x < S; ++x)
+		{
+			const uint8_t* q = out.data() + tile_index(S, tile_memory_row(T, j), x) * 4;
+			const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+			ok = ok && w == tex_palette_word(tables, TexKind::Normal, data[j < 5 ? j : 4][x]);
+		}
+	CHECK(ok);
+	// Two parts: 520 rows of 8 -> part 0 = rows 0..511 (T 512), part 1 = rows 512..519 (T 8, no padding).
+	{
+		std::vector<std::vector<uint8_t>> big(520, std::vector<uint8_t>(8));
+		std::vector<const uint8_t*> br(520);
+		for (int r = 0; r < 520; ++r)
+		{
+			for (int x = 0; x < 8; ++x)
+				big[r][x] = static_cast<uint8_t>((r * 7 + x) & 0xFF);
+			br[r] = big[r].data();
+		}
+		TexBitmap bb;
+		bb.width = 520;
+		bb.height = 8;
+		bb.rows = br.data();
+		CHECK(landscape_tex_size(520, 8, false, S, TT, &parts) && parts == 2 && TT[0] == 512 && TT[1] == 8);
+		for (int part = 0; part < 2; ++part)
+		{
+			std::vector<uint8_t> o2(tex_bytes(S, TT[part], TexKind::Normal));
+			CHECK(tex_convert_landscape(bb, tables, TexKind::Normal, part, S, TT[part], o2.data()));
+			bool ok2 = true;
+			for (unsigned j = 0; j < TT[part]; ++j)
+				for (unsigned x = 0; x < S; ++x)
+				{
+					const uint8_t* q = o2.data() + tile_index(S, tile_memory_row(TT[part], j), x) * 4;
+					const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+					ok2 = ok2 && w == tex_palette_word(tables, TexKind::Normal, big[512 * part + j][x]);
+				}
+			CHECK(ok2);
+		}
+	}
+	CHECK(sw_shade_index(65536, 0, 65536) == 255 && sw_shade_index(1 << 20, 0, 65536) == 255);
+
+	// The wrap is part of the key; fail_every; audit.
+	FakeAlloc fa;
+	TexCacheConfig cfg;
+	cfg.fail_every = 3;
+	TexCache cache(fa, cfg);
+	cache.begin_frame(1);
+	TexSlot* a = cache.create(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Landscape}, 512, 512);
+	CHECK(a && a->bytes == 1024u * 1024u);
+	CHECK(cache.lookup(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Landscape}) == a);
+	CHECK(!cache.lookup(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Landscape, 1}));   // the part is in the key
+	CHECK(!cache.lookup(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Repeat}));
+	CHECK(cache.create(K(3), 128));
+	CHECK(!cache.create(K(4), 128));   // the third create: forced
+	CHECK(cache.stats().forced_fails == 1 && cache.stats().discards_tex == 1 && cache.stats().creates == 3);
+	CHECK(cache.create(K(4), 128));    // retried: the counter moved on
+	CHECK(cache.audit());
+	uint32_t el = 0, ev = 0;
+	CHECK(cache.audit(&el, &ev) && el == cache.used_bytes(TexPool::Linear) && ev == 0);
+	// Level-start counts: the cache's first frames are a window too (the first level); reset by bump_generation.
+	CHECK(cache.stats().ls_textures[0] == 3);   // a, K(3), K(4) retried (the forced failure converts nothing)
+	cache.bump_generation();
+	CHECK(cache.audit());
+	cache.on_retired();
+	CHECK(cache.audit() && cache.used_bytes(TexPool::Linear) == 0);
+	cache.release_all();
+	CHECK(cache.audit());
+	TexCache c2(fa, TexCacheConfig{});
+	c2.bump_generation();
+	for (uint32_t f = 2; f < 14; ++f)
+	{
+		c2.begin_frame(f);
+		if (f == 2 || f == 5)
+			c2.create(K(static_cast<int>(10 + f)), 128);
+	}
+	CHECK(c2.stats().ls_textures[0] == 1 && c2.stats().ls_textures[3] == 1 && c2.stats().ls_bytes[0] == 65536 &&
+	      c2.stats().ls_pending[3] == 1);
+	CHECK(c2.frames_since_generation() >= static_cast<int>(kTexGenWindow));
+	c2.release_all();
+	CHECK(c2.audit());
+	// The keys.
+	Config c;
+	CHECK(config_apply(c, "fail_every", "50") && c.fail_every == 50 && !config_apply(c, "fail_every", "x"));
+	CHECK(config_apply(c, "landscape_tol", "2") && c.landscape_tol == 2 && !config_apply(c, "landscape_tol", "300"));
+}
+
+static void test_m5_diff()
+{
+	// diff_static on a 6 x 4 image: C covers x in [1, 5), A writes half of it, B writes 3 inside and 2 outside.
+	const int w = 6, h = 4;
+	std::vector<uint32_t> A(w * h, 0), B(w * h, 0), C(w * h, 0);
+	for (int y = 0; y < h; ++y)
+		for (int x = 1; x < 5; ++x)
+			C[y * w + x] = 0x00123456u;
+	A[0 * w + 1] = A[1 * w + 2] = A[2 * w + 3] = A[3 * w + 4] = 7;
+	A[0 * w + 2] = A[1 * w + 3] = A[2 * w + 4] = A[3 * w + 1] = 9;
+	B[0 * w + 1] = B[1 * w + 1] = B[2 * w + 2] = 0xFF000001u;
+	B[0 * w + 0] = 0x05000000u;   // outside, next to C: edge
+	const Image32 ia{A.data(), w, h, w}, ib{B.data(), w, h, w}, ic{C.data(), w, h, w};
+	StaticResult r = diff_static(ia, ib, ic);
+	CHECK(r.cover == 16 && r.written_a == 8 && r.written_b == 3 && r.out_edge == 1 && r.out_nonedge == 0 && r.a_out == 0);
+	const std::string line = static_line(5, r, 2, 0);
+	CHECK(line.find("class=static cover=16 written=8/3 density=50.000/18.750 out=1/0 a_out=0") != std::string::npos);
+	// diff_images_excluding: an excluded pixel is neither compared nor a neighbour.
+	std::vector<uint32_t> P(w * h, 0xFF101010u), Q(w * h, 0xFF101010u);
+	std::vector<uint8_t> ex(w * h, 0);
+	Q[2 * w + 2] = 0xFFF0F0F0u;
+	ex[2 * w + 2] = 1;
+	unsigned n = 0;
+	DiffResult d = diff_images_excluding(Image32{P.data(), w, h, w}, Image32{Q.data(), w, h, w}, 0, 4, ex.data(), &n);
+	CHECK(n == 1 && d.common == 23 && d.within_tol == 23 && d.within_nb == 23);
+	ex[2 * w + 2] = 0;
+	d = diff_images_excluding(Image32{P.data(), w, h, w}, Image32{Q.data(), w, h, w}, 0, 4, ex.data(), &n);
+	CHECK(n == 0 && d.common == 24 && d.within_tol == 23);
+}
+
+static void test_m5_core()
+{
+	test_m5_diff();
+	test_landscape_vs_sw();
+	test_noise();
+	test_m5_cache_and_convert();
+}
+
 int main()
 {
 	test_config();
@@ -3982,6 +4333,7 @@ int main()
 	test_m2_core();
 	test_m3_core();
 	test_m4_core();
+	test_m5_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

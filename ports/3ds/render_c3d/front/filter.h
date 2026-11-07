@@ -40,7 +40,13 @@ Transfer to_transfer(int16 engine_transfer_mode);
 // lit _textured rectangle (sw_shade_index of M = view->maximum_depth_intensity, (short)MIN(depth, SHRT_MAX) and
 // ambient_shade, scottish_textures.cpp:738-758), 255 for a shadeless or tinted one.
 enum class RectSupport { Ok, Static, Other, Bitmap, Wrap };
+// M4; M5: a static rectangle is Ok when its bitmap is (the Mask kind), Static when it is not (the play scan's reason).
 RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures, int* level = nullptr);
+// M5 (design 7, M5 specification "Landscapes on the GPU", "Static on the GPU"): what C3D draws of the two classes.
+// A landscape: textures and a bitmap landscape_tex_size takes. A static polygon: textures and lit (unit 1), a
+// texture, and when the bitmap is transparent a wall (the vertical entry) whose bitmap is M2's square kind (the Mask).
+bool landscape_supported(const polygon_definition& p, bool textures);
+bool static_supported(Entry e, const polygon_definition& p, bool textures, bool lit);
 
 // Forwards the primitives of class `cls` (kFrame: all of them) to `inner`. Every forwarded
 // primitive is a local copy, so neither the fullbright edit nor the inner rasterizer's in-place
@@ -61,6 +67,9 @@ public:
 	// (M5's classes; the frame check compares the rest).
 	FilterRasterizer(RasterizerClass* inner, int cls, bool fullbright, bool c3d_only = false, bool textures = false)
 		: inner_(inner), cls_(cls), fullbright_(fullbright), c3d_only_(c3d_only), textures_(textures) {}
+	// M5 "Diff checks": every static primitive is forwarded with its transfer_data (the drop) forced to 0, so SW
+	// writes every texel position it could: SW's coverage of the static class.
+	void set_static_cover(bool on) { static_cover_ = on; }
 
 	unsigned excluded() const { return excluded_; }
 	unsigned ambient_wrap() const { return ambient_wrap_; }
@@ -76,7 +85,8 @@ public:
 	void texture_rectangle(rectangle_definition& r) override;
 
 private:
-	bool frame_excluded(int cls) const { return c3d_only_ && cls_ == kFrame && (cls == kLandscape || cls == kStatic); }
+	// M4 excluded landscapes and static from the frame check; M5 draws landscapes, static stays excluded (8.3).
+	bool frame_excluded(int cls) const { return c3d_only_ && cls_ == kFrame && cls == kStatic; }
 	view_data* view_ = nullptr;
 	bool passes(int cls) const { return cls_ == kFrame || cls_ == cls; }
 	bool c3d_excluded(Entry e, const polygon_definition& p) const;
@@ -87,6 +97,7 @@ private:
 	bool fullbright_;
 	bool c3d_only_;
 	bool textures_;
+	bool static_cover_ = false;
 	unsigned excluded_ = 0;
 	unsigned ambient_wrap_ = 0;
 	bool foreground_ = false;

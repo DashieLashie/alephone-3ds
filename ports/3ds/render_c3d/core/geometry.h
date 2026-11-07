@@ -120,10 +120,12 @@ struct DrawKey
 	const void* shading_tables;
 	int16_t transfer_mode, transfer_data;
 	uint16_t shadeless;
+	uint8_t part = 0;   // M5: a landscape's texture part (one bitmap, two textures)
 	bool operator==(const DrawKey& o) const
 	{
 		return cls == o.cls && texture == o.texture && shading_tables == o.shading_tables &&
-		       transfer_mode == o.transfer_mode && transfer_data == o.transfer_data && shadeless == o.shadeless;
+		       transfer_mode == o.transfer_mode && transfer_data == o.transfer_data && shadeless == o.shadeless &&
+		       part == o.part;
 	}
 	bool operator!=(const DrawKey& o) const { return !(*this == o); }
 };

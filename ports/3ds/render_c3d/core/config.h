@@ -99,6 +99,10 @@
 	  play_check N      0..100000, default 0 = off: every N-th C3D play frame is compared with SW's replay
 	                    over the same previous frame ("DIFF ... class=play")
 	  rect_bias N       0..65536, default 1: the bias added to a rectangle's texcoords, in 1/131072 texel
+	M5 (design 7, M5 specification "fail_every", "Colour and density gates"):
+	  fail_every N      0..100000, default 0 = off: every N-th texture-cache create() fails before allocating
+	                    (counted forced; the frame is discarded `tex` and redrawn by SW)
+	  landscape_tol N   0..255, default 0 = diff_tol: the tolerance printed on landscape DIFF lines
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -161,6 +165,9 @@ struct Config
 	bool play = true;
 	unsigned play_check = 0;
 	unsigned rect_bias = 1;                 // 1/131072 texel
+	// M5
+	unsigned fail_every = 0;                // every N-th texture create() fails (0 = never)
+	unsigned landscape_tol = 0;             // the landscape class's DIFF tolerance (0 = diff_tol)
 	std::string film;
 };
 

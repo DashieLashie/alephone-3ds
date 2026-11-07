@@ -10,6 +10,7 @@
 
 #include "a1_c3d.h"
 #include "context.h"
+#include "../core/landscape.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -31,7 +32,7 @@ namespace {
 class C3dAllocator : public TexAllocator
 {
 public:
-	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, bool clamp, uint32_t bytes) override
+	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, TexWrap wrap, uint32_t bytes) override
 	{
 		C3D_Tex* t = static_cast<C3D_Tex*>(malloc(sizeof(C3D_Tex)));
 		if (!t)
@@ -55,10 +56,13 @@ public:
 			return nullptr;
 		}
 		// texture.h:157-173: nearest (SW samples whole texels); repeat for walls and floors (texcoords are shifted
-		// by whole repeats), clamp-to-edge for rectangles (M4: transparent padding, SW never reads outside).
+		// by whole repeats), clamp-to-edge for rectangles (M4: transparent padding, SW never reads outside); M5
+		// landscapes repeat along a row (s) and clamp across rows (t: the padded rows are SW's PIN). texture.h:169
+		// takes (wrapS, wrapT).
 		C3D_TexSetFilter(t, GPU_NEAREST, GPU_NEAREST);
-		const GPU_TEXTURE_WRAP_PARAM wrap = clamp ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
-		C3D_TexSetWrap(t, wrap, wrap);
+		const GPU_TEXTURE_WRAP_PARAM ws = wrap == TexWrap::Clamp ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
+		const GPU_TEXTURE_WRAP_PARAM wt = wrap == TexWrap::Repeat ? GPU_REPEAT : GPU_CLAMP_TO_EDGE;
+		C3D_TexSetWrap(t, ws, wt);
 		return t;
 	}
 	void release(TexPool, void* handle) override
@@ -86,6 +90,7 @@ TexCache& texcache()
 		c.linear_cap_kib = cfg.linear_cap;
 		c.vram_cap_kib = cfg.vram_cap;
 		c.promote_max = cfg.promote_max;
+		c.fail_every = cfg.fail_every;
 		s_cache = new TexCache(s_alloc, c);
 	}
 	return *s_cache;
@@ -98,6 +103,36 @@ void texcache_frame_start(uint32_t frame)
 #endif
 	TexCache& c = texcache();
 	c.on_retired();
+	// M5 "Level-start counts": the window of the last generation is complete once the frame after it starts; a
+	// mid-play burst (>= 512 KiB in one frame outside the window, e.g. an infravision toggle) is logged (first 8).
+	static int s_last_gen_logged = -1;
+	static uint32_t s_bursts_logged = 0;
+	const TexStats& st = c.stats();
+	if (c.frames_since_generation() == static_cast<int>(kTexGenWindow) - 1 &&
+	    s_last_gen_logged != static_cast<int>(st.generation))
+	{
+		s_last_gen_logged = static_cast<int>(st.generation);
+		char buf[512];
+		int n = snprintf(buf, sizeof buf, "[c3d] tex: level start gen %u: KiB", static_cast<unsigned>(st.generation));
+		for (unsigned i = 0; i < kTexGenWindow; ++i)
+			n += snprintf(buf + n, sizeof buf - n, " %u", static_cast<unsigned>(st.ls_bytes[i] / 1024));
+		n += snprintf(buf + n, sizeof buf - n, " textures");
+		for (unsigned i = 0; i < kTexGenWindow; ++i)
+			n += snprintf(buf + n, sizeof buf - n, " %u", static_cast<unsigned>(st.ls_textures[i]));
+		n += snprintf(buf + n, sizeof buf - n, " pending");
+		for (unsigned i = 0; i < kTexGenWindow; ++i)
+			n += snprintf(buf + n, sizeof buf - n, " %u", static_cast<unsigned>(st.ls_pending[i]));
+		snprintf(buf + n, sizeof buf - n, " gx_hw %d audit %s", gx_queue().high_water(), c.audit() ? "ok" : "MISMATCH");
+		printf("%s\n", buf);
+	}
+	if (st.burst_frames != s_bursts_logged)
+	{
+		if (s_bursts_logged < 8)
+			printf("[c3d] tex: burst frame %u: %u KiB converted outside the level start (%u bursts)\n",
+			       static_cast<unsigned>(st.last_burst_frame), static_cast<unsigned>(st.last_burst_bytes / 1024),
+			       static_cast<unsigned>(st.burst_frames));
+		s_bursts_logged = st.burst_frames;
+	}
 	c.begin_frame(frame);
 	// Oldest first, while promote_max and the GX rule allow (next_promotion took the entry). The source was
 	// flushed when it was converted; the copy is citro3d's own VRAM upload: libcitro3d.a texture.o
@@ -118,7 +153,9 @@ void texcache_frame_start(uint32_t frame)
 TexGet texcache_get(const TexSource& src, void** out)
 {
 	TexCache& c = texcache();
-	const TexKey key{src.id, src.tables, src.kind, src.rect};
+	const TexKey key{src.id, src.tables, src.kind,
+	                 src.rect ? TexWrap::Clamp : (src.landscape ? TexWrap::Landscape : TexWrap::Repeat),
+	                 static_cast<uint8_t>(src.landscape ? src.land_part : 0)};
 	if (TexSlot* s = c.lookup(key))
 	{
 		*out = s->handle;
@@ -133,9 +170,20 @@ TexGet texcache_get(const TexSource& src, void** out)
 		    (src.kind != TexKind::Mask && !src.tables))
 			return TexGet::Unsupported;
 	}
+	else if (src.landscape)
+	{
+		unsigned TT[2] = {0, 0};
+		int parts = 0;
+		if ((src.kind != TexKind::Normal && src.kind != TexKind::Shadeless) ||
+		    !landscape_tex_size(src.bitmap.width, src.bitmap.height, src.bitmap.rle, S, TT, &parts) ||
+		    src.land_part >= parts || !src.bitmap.rows || !src.tables)
+			return TexGet::Unsupported;
+		T = TT[src.land_part];
+	}
 	else
 	{
-		if (!tex_supported(src.bitmap) || !src.bitmap.rows || !src.tables || tex_texel_bytes(src.kind) != 4)
+		// M5: the Mask kind of a square wall bitmap (transparent static walls) needs no tables.
+		if (!tex_supported(src.bitmap) || !src.bitmap.rows || (src.kind != TexKind::Mask && !src.tables))
 			return TexGet::Unsupported;
 		S = T = static_cast<unsigned>(src.bitmap.width);
 	}
@@ -146,8 +194,9 @@ TexGet texcache_get(const TexSource& src, void** out)
 	if (!s)
 		return TexGet::Discard;
 	C3D_Tex* t = static_cast<C3D_Tex*>(s->handle);
-	const bool converted = src.rect ? tex_convert_rle(src.bitmap, src.tables, src.kind, S, T, t->data)
-	                                : tex_convert(src.bitmap, src.tables, src.kind, t->data);
+	const bool converted = src.rect        ? tex_convert_rle(src.bitmap, src.tables, src.kind, S, T, t->data)
+	                       : src.landscape ? tex_convert_landscape(src.bitmap, src.tables, src.kind, src.land_part, S, T, t->data)
+	                                       : tex_convert(src.bitmap, src.tables, src.kind, t->data);
 	if (!converted)
 	{
 		if (s_convert_failed++ == 0)

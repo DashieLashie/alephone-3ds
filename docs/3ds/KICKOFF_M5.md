@@ -1,3 +1,24 @@
+# Session 2 (written 2026-11-07 at the end of session 1)
+
+Session 1 did more than planned: the **spec** (`8566bdc5b`, critic REVISE then APPROVE in round 2) and the **whole M5 code**
+(committed as "stage10: M5 session 1", no tag): landscapes (cut at row 512: the bitmaps are 540 × 1 024, design 7 M5
+"Implementation, session 1" and Review log "M5 implementation, landscape size"), static (256² LFSR noise, the Lit/Static
+unit-1 switch), `_solid` skipped, the play scan, `fail_every`, the cache audit, level-start and burst logs, `c3d-diff.py
+--static`, the `m5-diff`, `m5-film`, `m5-static-film`, `m5-play`, `m5-play-film` configs (and `-swbe`). Host tests 0 failures;
+4 builds 0 warnings; OFF builds identical, `nm` 0. Smoke runs passed (L6 landscapes exact; L06 static +0.10 points; L01 play
+all C3D). Films chosen: L01, L06, L10, L16, L21.
+
+**Session 2, in order:** (1) **ask the user** the pending decision: the play check leaves SW's static coverage out
+(design 7 M5 "Diff checks", round 1 minor 3) — first L01 play run: 9 such checks, 2 795 pixels left out of 14.5 M;
+(2) write the remaining configs: `m5-vram512.cfg`, `m5-fail50.cfg` (play over the L01 film, gate `forced_fails ≥ 10`),
+`m5-fail1.cfg` (+ `--level-hop-test`, `--expect-offs 2`), `m5-present-diff.cfg` (play + a static film stretch:
+`static_sets > 0`), `m5-bench-c3d.cfg` / `m5-bench-sw.cfg` (copies of M4's); `c3d-diff.py play` should show `static_px`;
+(3) `c3d-critic` (effort medium) on the session-1 commit + fixes, max 2 rounds; (4) the acceptance series
+(`build/m5/tools/`: copy M4's `series.sh` and adapt; `run1.sh` and `screen.sh` are there) on both backends; (5) the bench
+and **G2-a**; (6) the records, tag `port-stage10-M5`, bundle, memory; (7) report G2-a with the options and stop.
+
+---
+
 # Paste this into a fresh Claude Code session started in the stage10-c3d worktree
 
 (`/Users/dashielashie/Desktop/Aleph_3ds/.claude/worktrees/stage10-c3d`, branch `stage10-c3d`. Written

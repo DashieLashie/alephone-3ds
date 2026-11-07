@@ -92,7 +92,7 @@ void* TexCache::alloc_with_eviction(TexPool pool, const TexSlot& shape, uint32_t
 	{
 		if (used_[pi(pool)] + bytes <= cap_[pi(pool)])
 		{
-			if (void* h = alloc_.alloc(pool, shape.S, shape.T, shape.key.kind, shape.key.clamp, bytes))
+			if (void* h = alloc_.alloc(pool, shape.S, shape.T, shape.key.kind, shape.key.wrap, bytes))
 			{
 				used_[pi(pool)] += bytes;
 				return h;
@@ -153,6 +153,8 @@ void TexCache::begin_frame(uint32_t frame)
 	promoted_this_frame_ = 0;
 	if (frames_since_gen_ < static_cast<int>(kTexGenWindow))
 		++frames_since_gen_;
+	if (frames_since_gen_ >= 0 && frames_since_gen_ < static_cast<int>(kTexGenWindow))
+		stats_.ls_pending[frames_since_gen_] = pending_count();
 }
 
 TexSlot* TexCache::lookup(const TexKey& key)
@@ -160,7 +162,7 @@ TexSlot* TexCache::lookup(const TexKey& key)
 	for (TexSlot& s : slots_)
 	{
 		if (s.state == TexSlotState::Live && s.generation == stats_.generation && s.key.bitmap == key.bitmap &&
-		    s.key.tables == key.tables && s.key.kind == key.kind && s.key.clamp == key.clamp)
+		    s.key.tables == key.tables && s.key.kind == key.kind && s.key.wrap == key.wrap && s.key.part == key.part)
 		{
 			s.last_used_frame = frame_;
 			++stats_.hits;
@@ -173,6 +175,14 @@ TexSlot* TexCache::lookup(const TexKey& key)
 
 TexSlot* TexCache::create(const TexKey& key, unsigned S, unsigned T)
 {
+	// M5 "fail_every": a hard failure before any allocation, as if both pools were full after eviction.
+	++stats_.creates;
+	if (cfg_.fail_every && stats_.creates % cfg_.fail_every == 0)
+	{
+		++stats_.forced_fails;
+		++stats_.discards_tex;
+		return nullptr;
+	}
 	TexSlot shape;
 	shape.key = key;
 	shape.S = S;
@@ -204,10 +214,24 @@ TexSlot* TexCache::create(const TexKey& key, unsigned S, unsigned T)
 	const bool was_over = frame_bytes_ > kTexSoftBudgetBytes;
 	frame_bytes_ += bytes;
 	stats_.frame_bytes_max = std::max(stats_.frame_bytes_max, frame_bytes_);
+	const bool in_window = frames_since_gen_ >= 0 && frames_since_gen_ < static_cast<int>(kTexGenWindow);
 	if (!was_over && frame_bytes_ > kTexSoftBudgetBytes)
+	{
 		++stats_.over_budget_frames;
-	if (frames_since_gen_ >= 0 && frames_since_gen_ < static_cast<int>(kTexGenWindow))
+		if (!in_window)
+			++stats_.burst_frames;
+	}
+	if (!in_window && frame_bytes_ > kTexSoftBudgetBytes)
+	{
+		stats_.last_burst_frame = frame_;
+		stats_.last_burst_bytes = frame_bytes_;
+	}
+	if (in_window)
+	{
 		stats_.gen_window_bytes[frames_since_gen_] += bytes;
+		stats_.ls_bytes[frames_since_gen_] += bytes;
+		++stats_.ls_textures[frames_since_gen_];
+	}
 	return s;
 }
 
@@ -278,6 +302,8 @@ unsigned TexCache::bump_generation()
 	++stats_.generation;
 	++stats_.collections_changed;
 	frames_since_gen_ = -1;
+	for (unsigned i = 0; i < kTexGenWindow; ++i)
+		stats_.ls_bytes[i] = stats_.ls_textures[i] = stats_.ls_pending[i] = 0;
 	return n;
 }
 
@@ -292,6 +318,27 @@ void TexCache::release_all()
 	for (TexSlot& s : slots_)
 		if (s.state != TexSlotState::Free)
 			free_slot_memory(s);
+}
+
+bool TexCache::audit(uint32_t* expected_linear, uint32_t* expected_vram) const
+{
+	uint64_t e[2] = {0, 0};
+	for (const TexSlot& s : slots_)
+	{
+		if (s.state == TexSlotState::Free)
+			continue;
+		if (s.handle && !s.handle_deferred)
+			e[pi(s.pool)] += s.bytes;
+		if (s.vram_handle)
+			e[pi(TexPool::Vram)] += s.bytes;
+	}
+	for (const Block& b : deferred_)
+		e[pi(b.pool)] += b.bytes;
+	if (expected_linear)
+		*expected_linear = static_cast<uint32_t>(e[0]);
+	if (expected_vram)
+		*expected_vram = static_cast<uint32_t>(e[1]);
+	return e[0] == used_[0] && e[1] == used_[1];
 }
 
 unsigned TexCache::live_count(TexPool pool) const
@@ -323,7 +370,7 @@ unsigned TexCache::retiring_count() const
 
 std::string TexCache::stats_line() const
 {
-	char buf[512];
+	char buf[768];
 	int n = std::snprintf(buf, sizeof buf, "[c3d] tex: entries %u/%u KiB %u/%u conv %u (%llu KiB, max/frame %u KiB, over %u) gen-window KiB",
 	                      live_count(TexPool::Linear), live_count(TexPool::Vram), used_[0] / 1024, used_[1] / 1024,
 	                      stats_.conversions, static_cast<unsigned long long>(stats_.bytes_converted / 1024),
@@ -332,9 +379,11 @@ std::string TexCache::stats_line() const
 		n += std::snprintf(buf + n, sizeof buf - n, " %u", stats_.gen_window_bytes[i] / 1024);
 	if (n > 0 && n < static_cast<int>(sizeof buf))
 		std::snprintf(buf + n, sizeof buf - n,
-		              " promo %u/%u evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u",
+		              " promo %u/%u evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u creates %u "
+		              "forced %u bursts %u audit %s",
 		              stats_.promotions_done, stats_.promotions_deferred, stats_.evictions, stats_.deferred_frees,
-		              stats_.generation, stats_.alloc_failed_free, stats_.discards_tex, stats_.hits, stats_.misses);
+		              stats_.generation, stats_.alloc_failed_free, stats_.discards_tex, stats_.hits, stats_.misses,
+		              stats_.creates, stats_.forced_fails, stats_.burst_frames, audit() ? "ok" : "MISMATCH");
 	return std::string(buf);
 }
 

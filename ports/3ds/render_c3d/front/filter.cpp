@@ -12,9 +12,11 @@
 #include "../core/shade_lut.h"
 
 #include "../core/geometry.h"
+#include "../core/landscape.h"
 #include "../core/tex_convert.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <climits>
 
 namespace a1_c3d {
@@ -33,15 +35,23 @@ Transfer to_transfer(int16 engine_transfer_mode)
 
 RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures, int* level)
 {
-	if (r.transfer_mode == _static_transfer)
-		return RectSupport::Static;
+	const bool stat = r.transfer_mode == _static_transfer;
 	const bool tinted = r.transfer_mode == _tinted_transfer;
-	if ((!tinted && r.transfer_mode != _textured_transfer) || !textures)
+	if (stat && !textures)
+		return RectSupport::Static;
+	if ((!tinted && !stat && r.transfer_mode != _textured_transfer) || !textures)
 		return RectSupport::Other;
 	const bitmap_definition* t = r.texture;
 	unsigned S = 0, T = 0;
 	if (!t || !(t->flags & _COLUMN_ORDER_BIT) || !rect_tex_size(t->width, t->height, t->bytes_per_row == NONE, S, T))
-		return RectSupport::Bitmap;
+		return stat ? RectSupport::Static : RectSupport::Bitmap;
+	if (stat)
+	{
+		// M5: the Mask on unit 0 and the noise on unit 1; SW reads table 0 for nothing (scottish_textures.cpp:752-755).
+		if (level)
+			*level = 255;
+		return RectSupport::Ok;
+	}
 	int L = 255;
 	if (tinted)
 	{
@@ -59,11 +69,48 @@ RectSupport rect_support(const rectangle_definition& r, int32_t M, bool textures
 	return RectSupport::Ok;
 }
 
+bool landscape_supported(const polygon_definition& p, bool textures)
+{
+	const bitmap_definition* t = p.texture;
+	unsigned S = 0;
+	return textures && t && landscape_tex_size(t->width, t->height, t->bytes_per_row == NONE, S, nullptr, nullptr);
+}
+
+bool static_supported(Entry e, const polygon_definition& p, bool textures, bool lit)
+{
+	const bitmap_definition* t = p.texture;
+	if (!textures || !lit || !t)
+		return false;
+	if (!(t->flags & _TRANSPARENT_BIT))
+		return true;   // the coverage only (w = 1): the bitmap is never sampled
+	// A transparent bitmap is sampled (SW's check_transparent): the wall mapper's texcoords and M2's square bitmaps.
+	return e == Entry::Vertical && tex_supported(t->width, t->height, t->bytes_per_row == NONE);
+}
+
 // --- FilterRasterizer ---
 
 bool FilterRasterizer::c3d_excluded(Entry e, const polygon_definition& p) const
 {
-	if (!c3d_only_ || p.transfer_mode != _textured_transfer || !p.texture)
+	if (!c3d_only_ || !p.texture)
+		return false;
+	// M5: the landscapes and statics C3D cannot draw are dropped on both sides, as M2's unsupported walls. (Static
+	// needs lit: the diff configs of M5 are lit.)
+	if (p.transfer_mode == _big_landscaped_transfer)
+	{
+		const bool no = !landscape_supported(p, textures_);
+		static bool logged = false;
+		if (no && !logged)
+		{
+			logged = true;
+			const bitmap_definition* t = p.texture;
+			printf("[c3d] front: landscape bitmap %d x %d (bytes_per_row %d, flags 0x%x) not drawn by C3D: excluded on both "
+			       "sides (first of its kind)\n", t->width, t->height, t->bytes_per_row, static_cast<unsigned>(t->flags));
+		}
+		return no;
+	}
+	if (p.transfer_mode == _static_transfer)
+		return !static_supported(e, p, textures_, true);
+	if (p.transfer_mode != _textured_transfer)
 		return false;
 	const bitmap_definition* t = p.texture;
 	return !c3d_supports(e, Transfer::Textured, t->width, t->height, t->bytes_per_row == NONE,
@@ -104,6 +151,8 @@ void FilterRasterizer::texture_horizontal_polygon(polygon_definition& p)
 	polygon_definition copy = p;
 	if (fullbright_ && copy.transfer_mode == _textured_transfer && !(copy.flags & _SHADELESS_BIT))
 		copy.ambient_shade = FIXED_ONE;
+	if (static_cover_ && copy.transfer_mode == _static_transfer)
+		copy.transfer_data = 0;
 	inner_->texture_horizontal_polygon(copy);
 }
 
@@ -131,6 +180,8 @@ void FilterRasterizer::texture_vertical_polygon(polygon_definition& p)
 	polygon_definition copy = p;
 	if (fullbright_ && copy.transfer_mode == _textured_transfer && !(copy.flags & _SHADELESS_BIT))
 		copy.ambient_shade = FIXED_ONE;
+	if (static_cover_ && copy.transfer_mode == _static_transfer)
+		copy.transfer_data = 0;
 	inner_->texture_vertical_polygon(copy);
 }
 
@@ -147,8 +198,10 @@ void FilterRasterizer::texture_rectangle(rectangle_definition& r)
 	rectangle_definition copy = r;
 	if (fullbright_ && copy.transfer_mode == _textured_transfer && !(copy.flags & _SHADELESS_BIT))
 		copy.ambient_shade = FIXED_ONE;
+	if (static_cover_ && copy.transfer_mode == _static_transfer)
+		copy.transfer_data = 0;
 	// M4: what C3D cannot draw is dropped on both sides of a C3D check (after the fullbright rewrite: the ambient
-	// SW will see). Static never gets here except through `frame` (excluded above) or `static` (not a C3D class).
+	// SW will see). M5: static rectangles are a C3D class (`static`; excluded from `frame` above).
 	if (c3d_only_)
 	{
 		const int32_t M = view_ ? static_cast<int32_t>(view_->maximum_depth_intensity) : 0;

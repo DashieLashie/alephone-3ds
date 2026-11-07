@@ -74,6 +74,17 @@ def parse_diff_line(line):
     if text.startswith("summary") or "class" not in kv or "frame" not in kv:
         return None
     mm = re.search(r"\b(discarded|skipped) \(([^)]*)\)", text)
+    if not mm and kv.get("class") == "static" and "cover" in kv:
+        # M5: "[c3d] DIFF frame=F class=static cover=C written=A/B density=DA/DB out=E/N a_out=X b=c3d ..."
+        try:
+            w = kv["written"].split("/")
+            o = kv["out"].split("/")
+            return {"frame": int(kv["frame"]), "class": "static", "state": "static", "cover": int(kv["cover"]),
+                    "wa": int(w[0]), "wb": int(w[1]), "out_edge": int(o[0]), "out_non": int(o[1]),
+                    "a_out": int(kv.get("a_out", "0")), "sentinel": int(kv.get("sentinel", "0")),
+                    "excluded": int(kv.get("excluded", "0"))}
+        except (KeyError, ValueError, IndexError):
+            return None
     if mm:
         try:
             return {"frame": int(kv["frame"]), "class": kv["class"], "state": mm.group(1), "reason": mm.group(2)}
@@ -103,8 +114,56 @@ def parse_diff_line(line):
         return None
 
 
-def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour=None, colour_opts=None):
-    rows, other, summary, dropped, dbg = [], [], None, [], None
+def static_check(srows, other, summary, n_dropped, o, min_checks):
+    """M5's static gate (design 7, M5 specification "Colour and density gates"): the pooled density of B inside SW's
+    coverage C against A's, within --static-pts points, with sum C >= --min-covered; B outside C off C's edge band
+    <= --static-out-pct of sum C; per check printed. Returns True on failure."""
+    problems = []
+    cov = sum(r["cover"] for r in srows)
+    wa = sum(r["wa"] for r in srows)
+    wb = sum(r["wb"] for r in srows)
+    non = sum(r["out_non"] for r in srows)
+    edge = sum(r["out_edge"] for r in srows)
+    da = 100.0 * wa / cov if cov else 0.0
+    db = 100.0 * wb / cov if cov else 0.0
+    with_px = [r for r in srows if r["cover"] > 0]
+    print("static: %d check(s), %d with static; cover %d, written A %d / B %d, density %.3f / %.3f %% (delta %+.3f points); "
+          "B outside C: edge %d, non-edge %d (%.3f %% of cover)" % (
+              len(srows), len(with_px), cov, wa, wb, da, db, db - da, edge, non, 100.0 * non / cov if cov else 0.0))
+    big = [r for r in with_px if r["cover"] >= 4096]
+    if big:
+        worst = max(big, key=lambda r: abs(r["wb"] - r["wa"]) / r["cover"])
+        print("  per check (cover >= 4096, printed, not gated): %d check(s), worst delta %+.3f points (frame %d, cover %d)" % (
+            len(big), 100.0 * (worst["wb"] - worst["wa"]) / worst["cover"], worst["frame"], worst["cover"]))
+    if len(srows) < min_checks:
+        problems.append("static: %d check(s), fewer than --min-checks %d" % (len(srows), min_checks))
+    if cov < o["min_covered"]:
+        problems.append("static: cover %d, under --min-covered %d" % (cov, o["min_covered"]))
+    if abs(db - da) > o["static_pts"]:
+        problems.append("static: pooled density delta %.3f points, over %.3f" % (db - da, o["static_pts"]))
+    if cov and 100.0 * non / cov > o["static_out"]:
+        problems.append("static: B outside C off the band %.3f %% of cover, over %.3f %%" % (100.0 * non / cov, o["static_out"]))
+    if any(r["a_out"] for r in srows):
+        problems.append("static: SW wrote outside its own coverage (a_out > 0): a harness bug")
+    nd = [x for x in other if x["state"] == "discarded" and x["class"] == "static"]
+    if nd:
+        problems.append("static: %d discarded check(s)" % len(nd))
+    if any(r["sentinel"] for r in srows):
+        problems.append("static: sentinel > 0")
+    if not summary:
+        problems.append("no DIFF summary line")
+    if n_dropped:
+        problems.append("%d dropped frame(s)" % n_dropped)
+    for p_ in problems:
+        print("c3d-diff: %s" % p_)
+    if problems:
+        print("c3d-diff: FAIL (--static)")
+    return bool(problems)
+
+
+def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour=None, colour_opts=None,
+            static=False):
+    rows, other, summary, dropped, dbg, srows = [], [], None, [], None, []
     with open(path, "r", errors="replace") as f:
         for line in f:
             if "[c3d] DIFF summary" in line:
@@ -117,6 +176,8 @@ def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour
                 r = parse_diff_line(line)
                 if r and r["state"] == "compared":
                     rows.append(r)
+                elif r and r["state"] == "static":
+                    srows.append(r)
                 elif r:
                     other.append(r)
     if expect_zero:   # M0's SW-vs-SW test: the C3D checks are judged by --coverage, not here
@@ -200,6 +261,9 @@ def cmd_log(path, expect_zero, coverage=None, band_pct=2.0, min_checks=1, colour
             failed = True
     if colour:
         if colour_check(colour, colour_opts, rows, other, summary, n_dropped, dbg, min_checks):
+            failed = True
+    if static:
+        if static_check(srows, other, summary, n_dropped, colour_opts, min_checks):
             failed = True
     return 1 if failed else 0
 
@@ -482,14 +546,15 @@ def main(argv):
         rest = argv[3:]
         opts = {"--coverage": None, "--band-pct": "2", "--min-checks": "1", "--colour": None,
                 "--nonedge-pct": "0.1", "--within": "98", "--tol": "2", "--mean": "1.0", "--shading": "full",
-                "--strict": None, "--min-covered": "0", "--min-covered-checks": "1"}
+                "--strict": None, "--min-covered": "0", "--min-covered-checks": "1", "--static-pts": "2",
+                "--static-out-pct": "0.5"}
         flags = set()
         i = 0
         while i < len(rest):
             if rest[i] in opts and i + 1 < len(rest):
                 opts[rest[i]] = rest[i + 1]
                 i += 2
-            elif rest[i] == "--expect-zero":
+            elif rest[i] in ("--expect-zero", "--static"):
                 flags.add(rest[i])
                 i += 1
             else:
@@ -501,7 +566,8 @@ def main(argv):
                            "tol": int(opts["--tol"]), "mean": float(opts["--mean"]), "shading": opts["--shading"],
                            "strict": [c for c in (opts["--strict"] or "").split(",") if c],
                            "min_covered": int(opts["--min-covered"]),
-                           "min_covered_checks": int(opts["--min-covered-checks"])}
+                           "min_covered_checks": int(opts["--min-covered-checks"]),
+                           "static_pts": float(opts["--static-pts"]), "static_out": float(opts["--static-out-pct"])}
         except ValueError:
             print("c3d-diff: --band-pct, --nonedge-pct, --within, --mean need numbers; --min-checks, --tol integers",
                   file=sys.stderr)
@@ -511,7 +577,8 @@ def main(argv):
             return 2
         colour = [c for c in opts["--colour"].split(",") if c] if opts["--colour"] else None
         coverage = [c for c in opts["--coverage"].split(",") if c] if opts["--coverage"] else None
-        return cmd_log(argv[2], "--expect-zero" in flags, coverage, band_pct, min_checks, colour, colour_opts)
+        return cmd_log(argv[2], "--expect-zero" in flags, coverage, band_pct, min_checks, colour, colour_opts,
+                       "--static" in flags)
     if len(argv) >= 4 and argv[1] == "bmp":
         cls = "frame"
         rest = argv[4:]
@@ -524,7 +591,8 @@ def main(argv):
             return 2
     print("usage: c3d-diff.py log LOG [--expect-zero] [--coverage CLASS[,CLASS] --band-pct P --min-checks N]\n"
           "                         [--colour CLASS[,CLASS] --nonedge-pct P --within P --tol T --mean M --shading full|lit|infra\n"
-          "                          --strict CLASS[,CLASS] --min-covered N --min-covered-checks K] "
+          "                          --strict CLASS[,CLASS] --min-covered N --min-covered-checks K]\n"
+          "                         [--static --min-covered N --static-pts P --static-out-pct P] "
           "| bmp A.bmp B.bmp [--class C]")
     return 2
 

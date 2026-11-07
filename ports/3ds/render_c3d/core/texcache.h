@@ -54,15 +54,24 @@ namespace a1_c3d {
 
 enum class TexPool : uint8_t { Linear = 0, Vram = 1 };
 
+// The sampler wrap of a texture (part of the key: one bitmap may be a wall and a sprite).
+enum class TexWrap : uint8_t
+{
+	Repeat,      // walls, floors (M2)
+	Clamp,       // M4: an RLE rectangle's texture (GPU_CLAMP_TO_EDGE both ways, POT-padded)
+	Landscape    // M5: repeat on s (along a row), clamp on t (the padded rows = SW's PIN)
+};
+
 // The GPU side. alloc returns an opaque handle (nullptr: failed) for an S x T texture of `kind` (S texels per
 // memory row, T rows; `bytes` = tex_bytes(S, T, kind), what the caps count) in the pool, sampled with
-// clamp-to-edge if `clamp` (M4: RLE rectangles) else repeat; release frees one. Handles are never interpreted
+// the sampler wrap of `wrap` (M4: clamp-to-edge for RLE rectangles; M5: repeat on s, clamp on t for landscapes; else
+// repeat); release frees one. Handles are never interpreted
 // by the cache.
 class TexAllocator
 {
 public:
 	virtual ~TexAllocator() {}
-	virtual void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, bool clamp, uint32_t bytes) = 0;
+	virtual void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, TexWrap wrap, uint32_t bytes) = 0;
 	virtual void release(TexPool pool, void* handle) = 0;
 };
 
@@ -78,7 +87,8 @@ struct TexKey
 	const void* bitmap = nullptr;
 	const void* tables = nullptr;
 	TexKind kind = TexKind::Normal;
-	bool clamp = false;   // M4: an RLE rectangle's texture (GPU_CLAMP_TO_EDGE, POT-padded); else repeat
+	TexWrap wrap = TexWrap::Repeat;
+	uint8_t part = 0;     // M5: a landscape's part (rows [0, 512) or [512, R))
 };
 
 enum class TexSlotState : uint8_t { Free, Live, Retiring };
@@ -106,6 +116,7 @@ struct TexCacheConfig
 	unsigned linear_cap_kib = 4096;
 	unsigned vram_cap_kib = 3584;
 	unsigned promote_max = 8;             // 0 = never promote (linear sampling only)
+	unsigned fail_every = 0;              // M5: every N-th create() fails before allocating (0 = never)
 };
 
 struct TexStats
@@ -124,6 +135,14 @@ struct TexStats
 	uint32_t collections_changed = 0;     // bump_generation() calls
 	uint32_t alloc_failed_free = 0;       // allocator failed while the cap had room ("alloc failed with free >= request")
 	uint32_t discards_tex = 0;            // create() failed: the caller discards `tex`
+	uint32_t forced_fails = 0;            // M5: create() failures forced by fail_every (also in discards_tex)
+	uint32_t creates = 0;                 // M5: create() calls (fail_every counts these)
+	// M5 "Level-start counts": the first kTexGenWindow view frames after the last generation change (reset by it).
+	uint32_t ls_bytes[kTexGenWindow] = {};
+	uint32_t ls_textures[kTexGenWindow] = {};
+	uint32_t ls_pending[kTexGenWindow] = {};   // promotions pending at the frame's start
+	uint32_t burst_frames = 0;            // frames past kTexSoftBudgetBytes outside the level-start window
+	uint32_t last_burst_frame = 0, last_burst_bytes = 0;
 };
 
 struct TexPromotion
@@ -172,6 +191,13 @@ public:
 
 	// Teardown (after C3D_Fini in the back end): frees everything, whatever its state.
 	void release_all();
+
+	// M5: each pool's bytes recomputed from the slots (a live or retiring texture, a copy's VRAM destination) and the
+	// deferred-free list; true when both equal used_bytes(). `expected` (optional) gets the recomputed values.
+	bool audit(uint32_t* expected_linear = nullptr, uint32_t* expected_vram = nullptr) const;
+	// The view frames since the last generation change (0 = the first; kTexGenWindow and above: the window is over;
+	// -1 before the first frame after a change).
+	int frames_since_generation() const { return frames_since_gen_; }
 
 	uint32_t generation() const { return stats_.generation; }
 	uint32_t frame() const { return frame_; }

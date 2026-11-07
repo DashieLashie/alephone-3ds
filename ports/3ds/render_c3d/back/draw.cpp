@@ -27,6 +27,7 @@
 #include "shade.h"
 #include "view_shared.h"
 #include "../core/calibrate.h"
+#include "../core/noise.h"
 #include "../core/ring.h"
 
 #include <3ds.h>
@@ -94,6 +95,7 @@ struct Frame
 	void* lut = nullptr;               // the LUT's C3D_Tex this frame (shade_frame_start)
 	unsigned blend = 0;                // M4: 0 = 2.4's world blend; 0x100 | c = the tinted blend with constant c
 	bool tinted_used = false;          // M4: the tinted blend was set this frame (restore_state puts the world's back)
+	unsigned mode = 0;                 // M5: 0 = Lit (M3's TEV, the LUT on unit 1); 0x10000 | masked << 8 | ref = Static
 	uint32_t sentinel_argb = 0;
 	int w = 0, h = 0;
 	int half = 0;
@@ -115,6 +117,7 @@ struct Counters
 	unsigned tex_bind_calls = 0, tex_restore_mismatch = 0;
 	unsigned tex1_restore_mismatch = 0, tev1_not_init = 0, unit1_left_bound = 0;   // M3
 	unsigned blend_sets = 0, blend_restores = 0;   // M4: tinted/world blend switches between draws; restores
+	unsigned static_sets = 0, static_restores = 0, static_frames_ended = 0;   // M5: Lit/Static switches
 } s_n;
 
 // --- helpers ---
@@ -307,6 +310,90 @@ void set_blend(unsigned blend)
 	++s_n.blend_sets;
 }
 
+// M3 "TEV" (design 4.2; enums.h:331-383), stages 0 and 1 of a lit frame. Stage 0: x = A0 * (1 - L) (the texel's
+// alpha, 128 for self-luminous, times one minus the LUT's level), alpha = the texel's (x2 only with alpha_x2: the
+// UNVERIFIED clamp). Stage 1: c * (1 - x): c * L for A 255, c * (1/2 + L/2) for A 128. view_begin, and (M5) the
+// switch back from a static draw.
+void lit_tev()
+{
+	C3D_TexEnv* env = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(env);
+	C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_ONE_MINUS_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
+	C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+	C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+	C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+	if (config().alpha_x2)
+		C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+	C3D_TexEnv* env1 = C3D_GetTexEnv(1);
+	C3D_TexEnvInit(env1);
+	C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE0, GPU_PREVIOUS, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+	C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
+	C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+	C3D_TexEnvFunc(env1, C3D_Alpha, GPU_REPLACE);
+}
+
+// M5 (design 7, M5 specification "Static on the GPU", "Unit 1 and TEV, the state machine"): a draw's mode follows
+// its key. kStatic: the noise on unit 1, its colour, the alpha test GEQUAL ref; the alpha is the noise's, times the
+// mask's (A8 0/255 on unit 0) when the draw is masked (a transparent bitmap: `tex` given).
+unsigned mode_of(const DrawKey& key, bool masked)
+{
+	if (key.cls != kStatic)
+		return 0;
+	return 0x10000u | (masked ? 0x100u : 0u) | noise_ref(static_cast<uint16_t>(key.transfer_data));
+}
+
+// Between draws (after issue_pending), as set_blend. False: the noise has no memory (the caller discards tex).
+bool set_mode(unsigned mode)
+{
+	if (mode == s_f.mode)
+		return true;
+	if (mode)
+	{
+		if (!s_f.mode)
+		{
+			void* noise = noise_get();
+			if (!noise)
+				return false;
+			__real_C3D_TexBind(1, static_cast<C3D_Tex*>(noise));
+			// Stage 1 passes stage 0 on.
+			C3D_TexEnv* env1 = C3D_GetTexEnv(1);
+			C3D_TexEnvInit(env1);
+			C3D_TexEnvSrc(env1, C3D_Both, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(env1, C3D_Both, GPU_REPLACE);
+			++s_n.static_sets;
+		}
+		// Stage 0: RGB = the noise texel's (SW's seed ^ seed << 8); alpha = the noise's (A = hi + 1), masked or not.
+		C3D_TexEnv* env = C3D_GetTexEnv(0);
+		C3D_TexEnvInit(env);
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+		if (mode & 0x100u)
+		{
+			C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+		}
+		else
+		{
+			C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE1, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+		}
+		C3D_AlphaTest(true, GPU_GEQUAL, static_cast<int>(mode & 0xFFu));
+	}
+	else
+	{
+		__real_C3D_TexBind(1, static_cast<C3D_Tex*>(s_f.lut));
+		lit_tev();
+		C3D_AlphaTest(true, GPU_GEQUAL, 128);
+		++s_n.static_restores;
+	}
+	s_f.mode = mode;
+	return true;
+}
+
 // Program, AttrInfo and BufInfo back to what the present set (the file head). The program through the
 // real bind, so the record is untouched; then the check that the record is still the one re-bound.
 void restore_state()
@@ -332,6 +419,14 @@ void restore_state()
 	// back/ may bind it.
 	if (s_f.lit)
 	{
+		// M5: a frame ending on a static draw holds the noise on unit 1: the LUT goes back first, so whatever follows
+		// (the unbind, or the layout fallback that leaves unit 1 bound) sees what an M3 frame leaves.
+		if (s_f.mode)
+		{
+			__real_C3D_TexBind(1, static_cast<C3D_Tex*>(s_f.lut));
+			s_f.mode = 0;
+			++s_n.static_frames_ended;
+		}
 		C3D_SetTexEnv(1, &s_saved_env1);
 		C3D_TexEnv init;
 		C3D_TexEnvInit(&init);
@@ -488,6 +583,8 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 			return discarded_at_begin(DiscardReason::Tex);
 		}
 	}
+	if (lit)
+		noise_frame_start();
 	texcache_frame_start(s_k);
 
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
@@ -534,25 +631,10 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 		// M3 "TEV" (design 4.2; enums.h:331-383). Stage 0: x = A0 * (1 - L) (the texel's alpha, 128 for
 		// self-luminous, times one minus the LUT's level), alpha = the texel's (x2 only with alpha_x2: the
 		// UNVERIFIED clamp). Stage 1: c * (1 - x): c * L for A 255, c * (1/2 + L/2) for A 128.
-		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
-		C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_ONE_MINUS_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
-		C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
-		C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-		C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-		if (config().alpha_x2)
-			C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
-		// Stage 1, after the SAVE above (so the early returns leave nothing to restore): saved by copy, built
-		// from C3D_TexEnvInit (scale 1), put back by restore_state.
+		// Stage 1 is saved first, after the SAVE above (so the early returns leave nothing to restore): by copy, put
+		// back by restore_state; both stages are then built by lit_tev (from C3D_TexEnvInit: scale 1).
 		s_saved_env1 = *C3D_GetTexEnv(1);
-		C3D_TexEnv* env1 = C3D_GetTexEnv(1);
-		C3D_TexEnvInit(env1);
-		C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE0, GPU_PREVIOUS, GPU_PRIMARY_COLOR);
-		C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-		C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
-		C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-		C3D_TexEnvFunc(env1, C3D_Alpha, GPU_REPLACE);
+		lit_tev();
 		// Unit 1 = the LUT (texture unit 1 samples texcoord1: normal_mapping example, design 0.3); unbound again
 		// by restore_state.
 		__real_C3D_TexBind(1, static_cast<C3D_Tex*>(s_f.lut));
@@ -562,6 +644,7 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 	else
 	{
 		const GPU_TEVSRC src = config().textures ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR;
+		C3D_TexEnvInit(env);
 		C3D_TexEnvSrc(env, C3D_Both, src, src, src);
 		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
 	}
@@ -595,6 +678,17 @@ bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* t
 		if (s_f.discarded)
 			return false;
 		set_blend(blend_of(key));
+		const unsigned mode = mode_of(key, tex != nullptr);
+		if (mode && !s_f.lit)
+		{
+			discard(DiscardReason::Unsupported);   // the front end refuses static without lit (M5 specification)
+			return false;
+		}
+		if (!set_mode(mode))
+		{
+			discard(DiscardReason::Tex);
+			return false;
+		}
 		if (tex)
 		{
 			void* t = nullptr;
@@ -773,13 +867,15 @@ int draw_stats_text(char* buf, size_t size)
 	                " views=%u draws=%u polys=%u verts=%u idx=%u ring_hw_v=%u,%u ring_hw_i=%u,%u "
 	                "discards=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) skips=%u/%u/%u/%u(down/gate/size/pref) "
 	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u lut=%s lut_builds=%u "
-	                "tex1_restore_mismatch=%u tev1_not_init=%u unit1_left_bound=%u blend_sets=%u blend_restores=%u",
+	                "tex1_restore_mismatch=%u tev1_not_init=%u unit1_left_bound=%u blend_sets=%u blend_restores=%u "
+	                "static_sets=%u static_restores=%u static_frames_ended=%u noise=%s",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
 	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.discards[5],
 	                n.skips[0], n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch, n.tex_bind_calls,
 	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init, n.unit1_left_bound,
-	                n.blend_sets, n.blend_restores);
+	                n.blend_sets, n.blend_restores, n.static_sets, n.static_restores, n.static_frames_ended,
+	                noise_state_name());
 }
 
 } // namespace back

@@ -3472,6 +3472,31 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
     second half.** The outcome and what follows are the **user's decision** (M6 removes the readback and the copy,
     where the extra time is; or stop at readback; or measure G2-b on the console first), presented at the end of the
     session in plain language with the numbers; the gate itself is not changed.
+  - ***Implementation, session 1 (2026-11-07): corrections found in Azahar*** (Review log "M5 implementation, landscape
+    size"). (1) **Marathon 2's landscape bitmaps are 540 rows × 1 024 texels** in this data (logged by the front end:
+    `landscape bitmap 540 x 1024`), not 270 × 512 as 3.2, the kickoff and the bullets above say: padded to a power of two
+    that is 1 024 × 1 024 RGBA8 = 4 MiB, over both caps. The texture is therefore cut at **row 512** into two parts:
+    part 0 = rows 0-511 (1 024 × 512, 2 MiB, no padding), part 1 = rows 512 to R − 1 (1 024 × 32, 128 KiB, padded with
+    row R − 1), each its own cache entry (`TexKey::part`) and draw (`DrawKey::part`); a line reads one part (rows are
+    constant per line), so a polygon crossing the cut is drawn as SW's spans with its quads cut there (the VertRepeat
+    machinery: a *piece* = band × 2 + part, `landscape_piece`), its own δ per piece; with Marathon 2's vertical scale
+    (VertExp 1: 1.28 rows per line at 400 × 240) the cut is on screen only when the player looks up, so the fan path
+    stays the common case. `landscape_tex_size` gives `S`, `T[2]`, the part count; any `S·T` up to 1 024 × 512 per part.
+    Memory per level: 2 MiB (+ 128 KiB when part 1 is seen) — **twice the 1 MiB the bullets above assume**; RGB8 (3
+    bytes) would make part 0 1.5 MiB and is the known option if VRAM pressure shows (not done: a new format and its
+    tex3ds check). (2) The host grid gains R = 540 and 1 024: rows agree 100 % in double, **99.971 %** in float32 (the
+    misses are on long pieces of R = 1 024, a size Marathon 2 does not have), 98.08 % float24; columns unchanged (the
+    float32 assertion is ≥ 99.95 % for rows). (3) **Films** (screening on the M4 binary, `play 1`, 230 s each, frames
+    sent to SW as landscape / static): L01 2 646 / 269 (M4's record), L02 535 / 28, **L06** 43 / 722, **L10** 3 439 / 95,
+    L13 0 / 0, **L16** 234 / 196, **L21** 0 / 360: the five films are **L01, L06, L10, L16, L21**. A film at `diff 30`
+    shows ΣC ≈ 11 000 (L06: 10 checks with static of 134), so the static gate runs on its own config
+    (`m5-static-film.cfg`: L06, `diff 2`, classes `static,frame`); the Static Test plugin is not written (the film
+    covers the class). Killed film runs print no DIFF summary: the film configs stop at `diff_frames 120`.
+    (4) Smoke results (Azahar, host GPU): L6 `m5-diff`: landscapes 254 700 pixels over 20 checks, coverage exact,
+    colour **exact** (max Δ 0), the frame with landscapes 99.58 % within; L06 film: static density 67.73 / 67.83 %
+    (+0.10 points) over ΣC 10 818, B outside C only in the band, the noise promoted to VRAM, 10 frames ending on a static
+    draw restored; L01 film in play mode: 4 650 frames, **all C3D** (M4: 2 915 to SW), 361 with static, 155 play checks,
+    worst 98.63 %, 0 discards, `sentinel` 0; the level-start line logs (2 MiB in frame 0, `audit ok`, GX high-water 11).
   - *Not in M5:* direct mode (M6), the texture-cache hash (an M6 prerequisite), supersampling, stereo.
 
 ### M6 — direct mode (HUD + Map)
@@ -4431,3 +4456,11 @@ the 256² column-ordered texture and the pooled static gate checked. Folded: the
 `R − (R >> 1)` and δ (1); section 10 item 6 gains the M5 console items (float24 landscapes with the band fallback,
 MODULATE rounding on masked static, the 1 MiB conversion and copy, G2-b) (2). The VRAM table counts the noise at
 256 KiB.
+
+### M5 implementation, landscape size (coordinator, 2026-11-07; a design correction)
+
+The first L6 run excluded every landscape: the bitmaps are 540 × 1 024 (4 MiB padded), not 270 × 512 (3.2, the
+kickoff, revision 1 of the spec). Not a tolerance or gate change: the mapping, the padding rule and the gates stand;
+the texture is cut at row 512 into two cache entries and a polygon crossing the cut goes through the span path
+already built for VertRepeat (section 7, M5, "Implementation, session 1"). Memory per landscape is 2 MiB, not 1;
+RGB8 is the recorded option. To be checked in the commit review.

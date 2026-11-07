@@ -11,12 +11,16 @@
 #include "filter.h"
 #include "../back/draw.h"
 #include "../core/classify.h"
+#include "../core/landscape.h"
+#include "../core/noise.h"
 #include "../core/rect.h"
 #include "../core/shade_lut.h"
 #include "../core/tex_convert.h"
 
 #include "player.h"
+#include "ViewControl.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace a1_c3d {
@@ -51,9 +55,11 @@ void C3dRasterizer::texture_rectangle(rectangle_definition& r)
 	note_m();
 	const int32_t M = static_cast<int32_t>(view_->maximum_depth_intensity);
 	int L = 255;
-	if (rect_support(r, M, textures_, &L) != RectSupport::Ok)
+	const bool stat = r.transfer_mode == _static_transfer;
+	if (rect_support(r, M, textures_, &L) != RectSupport::Ok || (stat && !lit_))
 	{
 		++rect_unsupported_;
+		static_unsupported_ += stat;
 		back::view_discard(back::DiscardReason::Unsupported);
 		return;
 	}
@@ -78,7 +84,7 @@ void C3dRasterizer::texture_rectangle(rectangle_definition& r)
 	ts.bitmap.rows = const_cast<const uint8_t* const*>(reinterpret_cast<uint8_t* const*>(tex->row_addresses));
 	ts.bitmap.rle = true;
 	ts.tables = static_cast<const uint32_t*>(r.shading_tables);
-	ts.kind = tinted ? TexKind::Mask : (shadeless ? TexKind::ShadelessKeyed : TexKind::NormalKeyed);
+	ts.kind = tinted || stat ? TexKind::Mask : (shadeless ? TexKind::ShadelessKeyed : TexKind::NormalKeyed);
 	ts.rect = true;
 
 	// texcoord1: the level L in the LUT's column 0 (shade_lut_value(0, j) == j); shadeless: LUT 255; tinted: any
@@ -86,6 +92,11 @@ void C3dRasterizer::texture_rectangle(rectangle_definition& r)
 	const bool lit = lit_;
 	const float u1 = shadeless ? 255.5f / 256.0f : 0.5f / 256.0f;
 	const float v1 = (static_cast<float>(tinted ? 0 : L) + 0.5f) / 256.0f;
+	// M5 (design 7, M5 specification "Static on the GPU"): a static rectangle samples the Mask on unit 0 and the
+	// noise on unit 1 at the screen position plus this rectangle's offset.
+	double nox = 0.0, noy = 0.0;
+	if (stat)
+		noise_offset(nox, noy);
 	const double eps = static_cast<double>(rect_bias_) / 131072.0;
 	const DrawKey key{classify(Entry::Rectangle, to_transfer(r.transfer_mode), foreground_), r.texture, r.shading_tables,
 	                  r.transfer_mode, r.transfer_data, static_cast<uint16_t>(r.flags & _SHADELESS_BIT)};
@@ -99,14 +110,15 @@ void C3dRasterizer::texture_rectangle(rectangle_definition& r)
 		o.w = 1.0f;
 		o.u0 = static_cast<float>((rect_s(box, ys[i]) + eps) / S);   // texels along the column (memory row)
 		o.v0 = static_cast<float>((rect_t(box, xs[i]) + eps) / T);   // the column (memory row index)
-		o.u1 = lit ? u1 : 0.0f;
-		o.v1 = lit ? v1 : 0.0f;
+		o.u1 = stat ? static_cast<float>((xs[i] + nox) / kNoiseSide) : (lit ? u1 : 0.0f);
+		o.v1 = stat ? static_cast<float>((ys[i] + noy) / kNoiseSide) : (lit ? v1 : 0.0f);
 		o.r = o.g = o.b = o.a = 0xFF;
 	}
 	if (back::view_polygon(v, 4, key, &ts))
 	{
 		++rects_;
 		tinted_rects_ += tinted;
+		static_rects_ += stat;
 	}
 }
 
@@ -148,18 +160,36 @@ TexResult C3dRasterizer::attrs(bool horizontal, const polygon_definition& p, con
 	                  pts, n, delta, at);
 }
 
-// Walls and floors (design 7, M2 specification). Acceptance first (what SW draws), then the vertex
-// attributes at (X + delta, Y + delta), delta = -1/2 with uv_half. A convex polygon is one fan; a non-convex
-// one (rounded vertices can make a thin polygon slightly concave, M2 status) is drawn as SW's own spans,
-// one 1-line quad each, so its coverage is SW's exactly.
+// Walls and floors (design 7, M2 specification), M5's landscapes and static polygons. Acceptance first (what SW
+// draws), then the vertex attributes at (X + delta, Y + delta), delta = -1/2 with uv_half. A convex polygon is one
+// fan; a non-convex one (rounded vertices can make a thin polygon slightly concave, M2 status) is drawn as SW's own
+// spans, one quad per run of equal spans, so its coverage is SW's exactly.
 void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 {
 	const bitmap_definition* tex = p.texture;
-	const bool transparent = tex && (tex->flags & _TRANSPARENT_BIT) != 0;
-	if (!view_ || !tex ||
-	    !c3d_supports(e, to_transfer(p.transfer_mode), tex->width, tex->height, tex->bytes_per_row == NONE,
-	                  (p.flags & _SHADELESS_BIT) != 0, transparent, textures_))
+	const Transfer xfer = to_transfer(p.transfer_mode);
+	// M5 (design 7, M5 specification, table "SW's static" and the _solid note (f)): smear polygons are drawn by no SW
+	// mapper in a release build; nothing to draw, nothing to discard.
+	if (p.transfer_mode == _solid_transfer)
 	{
+		++solid_skipped_;
+		return;
+	}
+	const bool landscape = xfer == Transfer::BigLandscaped;
+	const bool stat = xfer == Transfer::Static;
+	const bool transparent = tex && (tex->flags & _TRANSPARENT_BIT) != 0;
+	bool supported = view_ && tex;
+	if (supported && landscape)
+		supported = landscape_supported(p, textures_);
+	else if (supported && stat)
+		supported = static_supported(e, p, textures_, lit_);
+	else if (supported)
+		supported = c3d_supports(e, xfer, tex->width, tex->height, tex->bytes_per_row == NONE,
+		                         (p.flags & _SHADELESS_BIT) != 0, transparent, textures_);
+	if (!supported)
+	{
+		land_unsupported_ += landscape;
+		static_unsupported_ += stat;
 		back::view_discard(back::DiscardReason::Unsupported);
 		return;
 	}
@@ -172,7 +202,9 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	Point2 pts[MAXIMUM_VERTICES_PER_SCREEN_POLYGON];
 	for (int i = 0; i < n; ++i)
 		pts[i] = Point2{p.vertices[i].x, p.vertices[i].y};
-	const bool horizontal = e == Entry::Horizontal;
+	// SW's mapper: landscapes go through the horizontal one (scottish_textures.cpp:436-439), static through the
+	// vertical one (:221-225), the rest by their entry.
+	const bool horizontal = landscape || (!stat && e == Entry::Horizontal);
 	const Orient orient = horizontal ? Orient::Horizontal : Orient::Vertical;
 	const Accept a = accept_polygon(pts, n, w_, h_, orient);
 	if (!accepted(a))
@@ -181,8 +213,55 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		return;
 	}
 
+	// The polygon's line range (landscape bands and row offsets).
+	int ymin = pts[0].y, ymax = pts[0].y;
+	for (int i = 1; i < n; ++i)
+	{
+		ymin = std::min(ymin, pts[i].y);
+		ymax = std::max(ymax, pts[i].y);
+	}
+	LandParams lp;
+	bool multi_band = false;
+	if (landscape)
+	{
+		const LandscapeOptions* lo = View_GetLandscapeOptions(p.ShapeDesc);
+		LandOpts o;
+		o.horiz_exp = lo->HorizExp;
+		o.vert_exp = lo->VertExp;
+		o.asp_rat_exp = lo->OGL_AspRatExp;
+		o.azimuth = lo->Azimuth;
+		o.vert_repeat = lo->VertRepeat;
+		const LandView lv{view_->half_screen_height, view_->dtanpitch, view_->landscape_yaw, view_->half_cone,
+		                  view_->standard_screen_width};
+		if (!landscape_setup(lv, o, tex->width, tex->height, tex->bytes_per_row == NONE, lp))
+		{
+			++land_unsupported_;
+			back::view_discard(back::DiscardReason::Unsupported);
+			return;
+		}
+		// Several pieces (VertRepeat bands, or the two texture parts of a bitmap over 512 rows) go through SW's spans.
+		multi_band = landscape_piece(lp, ymin) != landscape_piece(lp, ymax - 1);
+	}
+	const double delta = uv_half_ ? -0.5 : 0.0;
+	// A static polygon samples its bitmap only when it is transparent (the Mask: SW's check_transparent); otherwise
+	// it draws its coverage with w = 1.
+	const bool masked = stat && transparent;
+	auto attrs_of = [&](const Point2* q, int count, int piece, double row_off, TexAttr* out) -> TexResult {
+		if (landscape)
+			return landscape_attrs(lp, q, count, delta, piece >> 1, piece & 1, row_off, out);
+		if (stat && !masked)
+		{
+			for (int i = 0; i < count; ++i)
+				out[i] = TexAttr{1.0f, 0.0f, 0.0f};
+			return TexResult::Ok;
+		}
+		return attrs(horizontal, p, q, count, out);
+	};
+
+	const int piece0 = landscape ? landscape_piece(lp, ymin) : 0;
+	const double row_off0 = landscape && !multi_band ? landscape_row_offset(lp, ymin, ymax, piece0 >> 1, piece0 & 1) : 0.0;
 	TexAttr at[MAXIMUM_VERTICES_PER_SCREEN_POLYGON];
-	const TexResult tr = attrs(horizontal, p, pts, n, at);
+	const TexResult tr = multi_band ? TexResult::Ok : attrs_of(pts, n, piece0, row_off0, at);
 	if (tr == TexResult::Degenerate)
 	{
 		++skipped_[static_cast<int>(Accept::Degenerate)];
@@ -200,13 +279,25 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	}
 
 	// texcoord1 (M3 "texcoord1"): the shade LUT's coordinates from M (the weapon flash), the ambient and the
-	// vertex's perspective weight; constant for shadeless and negative-ambient polygons.
+	// vertex's perspective weight; constant for shadeless and negative-ambient polygons. M5: landscapes the LUT's
+	// column 0 at SW's level of depth 0, ambient FIXED_ONE (or the shadeless constant); static the noise at the
+	// screen position plus this primitive's offset.
 	const bool shadeless = (p.flags & _SHADELESS_BIT) != 0;
 	const bool lit = textures_ && lit_;
 	const int32_t M = static_cast<int32_t>(view_->maximum_depth_intensity);
 	note_m();
 	ShadePoly sp;
-	if (lit)
+	float land_u1 = 0.0f, land_v1 = 0.0f;
+	double nox = 0.0, noy = 0.0;
+	if (landscape && lit)
+	{
+		const int L = shadeless ? 255 : sw_shade_index(M, 0, FIXED_ONE);
+		land_u1 = shadeless ? 255.5f / 256.0f : 0.5f / 256.0f;
+		land_v1 = (static_cast<float>(L < 0 ? 0 : L) + 0.5f) / 256.0f;
+	}
+	else if (stat)
+		noise_offset(nox, noy);
+	else if (lit)
 	{
 		sp = shade_polygon(M, static_cast<int32_t>(p.ambient_shade), shadeless);
 		if (sp.kind == ShadeKind::FlashOver || sp.kind == ShadeKind::Excluded)
@@ -227,8 +318,10 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	// The texture (M2 "View frame with textures"): the bitmap's rows, the 32-bit tables (the harness runs at
 	// bit_depth 32 only, frame.cpp), keyed texel 0 only for a _TRANSPARENT_BIT bitmap on a wall (the floor
 	// mapper always writes, M2 "Transparent texels"); infravision's tint table through the shadeless kinds (M3).
+	// M5: a landscape's padded texture (normal / shadeless); a transparent static wall's Mask; other statics none.
 	back::TexSource ts;
-	if (textures_)
+	const bool with_tex = textures_ && (!stat || masked);
+	if (with_tex)
 	{
 		ts.id = tex;
 		ts.bitmap.width = tex->width;
@@ -237,13 +330,29 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		ts.bitmap.rle = tex->bytes_per_row == NONE;
 		ts.tables = static_cast<const uint32_t*>(p.shading_tables);
 		const bool keyed = !horizontal && transparent;
-		ts.kind = shadeless ? (keyed ? TexKind::ShadelessKeyed : TexKind::Shadeless)
-		                    : (keyed ? TexKind::NormalKeyed : TexKind::Normal);
+		if (landscape)
+		{
+			ts.kind = shadeless ? TexKind::Shadeless : TexKind::Normal;
+			ts.landscape = true;
+		}
+		else if (masked)
+			ts.kind = TexKind::Mask;
+		else
+			ts.kind = shadeless ? (keyed ? TexKind::ShadelessKeyed : TexKind::Shadeless)
+			                    : (keyed ? TexKind::NormalKeyed : TexKind::Normal);
 	}
-	const back::TexSource* tsp = textures_ ? &ts : nullptr;
+	const back::TexSource* tsp = with_tex ? &ts : nullptr;
 	const Rgb col = textures_ ? Rgb{0xFF, 0xFF, 0xFF} : shape_colour(static_cast<uint16_t>(p.ShapeDesc));
-	const DrawKey key{classify(e, Transfer::Textured, foreground_), p.texture, p.shading_tables,
-	                  p.transfer_mode, p.transfer_data, static_cast<uint16_t>(p.flags & _SHADELESS_BIT)};
+	const Transfer key_xfer = landscape || stat ? xfer : Transfer::Textured;
+	DrawKey key{classify(e, key_xfer, foreground_), p.texture, p.shading_tables,
+	            p.transfer_mode, p.transfer_data, static_cast<uint16_t>(p.flags & _SHADELESS_BIT)};
+	// M5: a landscape's texture part is part of the draw (one bitmap, two textures).
+	auto set_part = [&](int piece) {
+		ts.land_part = static_cast<uint8_t>(piece & 1);
+		key.part = static_cast<uint8_t>(piece & 1);
+	};
+	if (landscape)
+		set_part(piece0);
 	auto make = [&](const Point2* q, const TexAttr* qa, int count, Vertex* out) {
 		for (int i = 0; i < count; ++i)
 		{
@@ -253,16 +362,40 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			o.w = qa[i].w;
 			o.u0 = qa[i].s;
 			o.v0 = qa[i].t;
-			o.u1 = lit ? shade_u(sp, qa[i].w) : 0.0f;
-			o.v1 = lit ? sp.v : 0.0f;
+			if (stat)
+			{
+				// The noise texel under the pixel centre X + 1/2: (X + ox + 1/2) / 256 at the centre, so the vertex
+				// carries (X + ox) / 256 (no uv_half shift: the noise has no SW position to match).
+				o.u1 = static_cast<float>((q[i].x + nox) / kNoiseSide);
+				o.v1 = static_cast<float>((q[i].y + noy) / kNoiseSide);
+			}
+			else if (landscape)
+			{
+				o.u1 = land_u1;
+				o.v1 = land_v1;
+			}
+			else
+			{
+				o.u1 = lit ? shade_u(sp, qa[i].w) : 0.0f;
+				o.v1 = lit ? sp.v : 0.0f;
+			}
 			o.r = col.r;
 			o.g = col.g;
 			o.b = col.b;
 			o.a = 0xFF;
 		}
 	};
+	auto count_drawn = [&]() {
+		++drawn_;
+		if (landscape)
+			++land_polys_;
+		else if (stat)
+			++static_polys_;
+		else
+			count_lit(lit, shadeless, p.ambient_shade < 0);
+	};
 
-	if (!convex_cw(pts, n))
+	if (multi_band || !convex_cw(pts, n))
 	{
 		Span spans[1024];
 		const int ns = sw_spans(pts, n, orient, spans, 1024);
@@ -272,26 +405,31 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			back::view_discard(back::DiscardReason::Unsupported);
 			return;
 		}
-		// Consecutive lines with the same [a0, a1) are one rectangle (still exact: every edge on a pixel boundary).
+		// Consecutive lines with the same [a0, a1) are one rectangle (still exact: every edge on a pixel boundary);
+		// M5: a landscape's run also stays inside one VertRepeat band.
 		Span rects[1024];
+		int band_of[1024];
 		int nr = 0;
 		for (int k = 0; k < ns; ++k)
 		{
 			if (spans[k].a1 <= spans[k].a0)
 				continue;
+			const int band = landscape ? landscape_piece(lp, spans[k].line) : 0;
 			if (nr && rects[nr - 1].a0 == spans[k].a0 && rects[nr - 1].a1 == spans[k].a1 &&
-			    rects[nr - 1].line + span_len_[nr - 1] == spans[k].line)
+			    rects[nr - 1].line + span_len_[nr - 1] == spans[k].line && band_of[nr - 1] == band)
 				++span_len_[nr - 1];
 			else
 			{
+				band_of[nr] = band;
 				rects[nr] = spans[k];
 				span_len_[nr++] = 1;
 			}
 		}
 		if (span_polygons_++ < 8)
 		{
-			printf("[c3d] front: non-convex %s polygon drawn as %d spans in %d quads (first 8 logged):",
-			       horizontal ? "floor" : "wall", ns, nr);
+			printf("[c3d] front: %s %s polygon drawn as %d spans in %d quads (first 8 logged):",
+			       multi_band ? "multi-band" : "non-convex", landscape ? "landscape" : (horizontal ? "floor" : "wall"), ns,
+			       nr);
 			for (int i = 0; i < n; ++i)
 				printf(" (%d,%d)", pts[i].x, pts[i].y);
 			printf("\n");
@@ -305,6 +443,9 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			back::view_discard(back::DiscardReason::Ring);
 			return;
 		}
+		land_spans_ += landscape;
+		int off_band = 0x7FFFFFFF;
+		double off = 0.0;
 		for (int k = 0; k < nr; ++k)
 		{
 			const Span& rc = rects[k];
@@ -325,8 +466,14 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 				q[2] = Point2{l1, rc.a1};
 				q[3] = Point2{l0, rc.a1};
 			}
+			if (landscape && band_of[k] != off_band)
+			{
+				off_band = band_of[k];
+				off = landscape_row_offset(lp, ymin, ymax, off_band >> 1, off_band & 1);
+				set_part(off_band);
+			}
 			TexAttr qa[4];
-			const TexResult qr = attrs(horizontal, p, q, 4, qa);
+			const TexResult qr = attrs_of(q, 4, band_of[k], landscape ? off : row_off0, qa);
 			if (qr != TexResult::Ok)
 			{
 				// A quad corner lies on a pixel boundary, possibly just outside the polygon (near the horizon its
@@ -343,8 +490,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 				return;
 			++span_quads_;
 		}
-		++drawn_;
-		count_lit(lit, shadeless, p.ambient_shade < 0);
+		count_drawn();
 		return;   // no tie pixels: span edges lie on pixel boundaries, and the spans are SW's own
 	}
 
@@ -352,8 +498,7 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 	make(pts, at, n, v);
 	if (back::view_polygon(v, n, key, tsp))
 	{
-		++drawn_;
-		count_lit(lit, shadeless, p.ambient_shade < 0);
+		count_drawn();
 		tie_pixels(pts, n, w_, h_,
 		           [](void* ctx, int k, int m) {
 			           auto* self = static_cast<C3dRasterizer*>(ctx);
@@ -361,6 +506,19 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 		           },
 		           this);
 	}
+}
+
+// M5: this static primitive's noise offset (design 7, M5 specification "Static on the GPU": a front-end xorshift32,
+// never texture_random_seed(), which SW's replays restore).
+void C3dRasterizer::noise_offset(double& ox, double& oy)
+{
+	uint32_t x = noise_state_;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	noise_state_ = x;
+	ox = static_cast<double>(x & (kNoiseSide - 1));
+	oy = static_cast<double>((x >> 8) & (kNoiseSide - 1));
 }
 
 } // namespace a1_c3d

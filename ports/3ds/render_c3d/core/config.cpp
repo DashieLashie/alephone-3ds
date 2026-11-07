@@ -177,6 +177,10 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 0, 100000, cfg.play_check);
 	if (key == "rect_bias")
 		return parse_unsigned(value, 0, 65536, cfg.rect_bias);
+	if (key == "fail_every")
+		return parse_unsigned(value, 0, 100000, cfg.fail_every);
+	if (key == "landscape_tol")
+		return parse_unsigned(value, 0, 255, cfg.landscape_tol);
 	if (key == "film")
 	{
 		if (value.empty())

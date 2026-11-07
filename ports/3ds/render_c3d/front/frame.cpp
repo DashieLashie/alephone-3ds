@@ -132,7 +132,7 @@ struct Scratch
 	bitmap_definition* get() { return def.get(); }
 	Image32 image() const { return Image32{pixels.data(), w, h, w}; }
 };
-Scratch s_a, s_b;
+Scratch s_a, s_b, s_c;   // s_c: M5's static coverage (the drop forced to 0)
 
 bool write_file(const std::string& name, const std::vector<uint8_t>& bytes)
 {
@@ -217,15 +217,31 @@ void diff_summary()
 	       "c3d_span_polygons=%u c3d_span_quads=%u c3d_span_quads_max=%d c3d_span_ring_refused=%u "
 	       "c3d_lit_polys=%u c3d_shadeless_polys=%u c3d_neg_ambient_polys=%u c3d_flash_checks=%u c3d_m_max=%ld "
 	       "c3d_flash_over=%u c3d_ambient_wrap=%u c3d_rects=%u c3d_tinted_rects=%u c3d_rect_skipped=%u "
-	       "c3d_rect_unsupported=%u\n", s_diff_done,
+	       "c3d_rect_unsupported=%u c3d_land_polys=%u c3d_land_spans=%u c3d_land_unsupported=%u c3d_static_polys=%u "
+	       "c3d_static_rects=%u c3d_static_unsupported=%u c3d_solid_skipped=%u\n", s_diff_done,
 	       s_diff_checks, static_cast<unsigned long long>(s_diff_differ_total), s_diff_dropped, s_c3d_compared,
 	       s_c3d_discarded, s_c3d_skipped, s_c3d_drawn, s_c3d_accept_skips[1], s_c3d_accept_skips[2],
 	       s_c3d_accept_skips[3], s_c3d_accept_skips[4], s_c3d_ties, s_c3d_tie_mismatch, s_c3d_rast.span_polygons(),
 	       s_c3d_rast.span_quads(), s_c3d_rast.span_quads_max(), s_c3d_rast.span_ring_refused(),
 	       s_c3d_rast.lit_polys(), s_c3d_rast.shadeless_polys(), s_c3d_rast.neg_ambient_polys(),
 	       s_c3d_rast.flash_checks(), s_c3d_rast.m_max(), s_c3d_rast.flash_over(), s_c3d_ambient_wrap,
-	       s_c3d_rast.rects(), s_c3d_rast.tinted_rects(), s_c3d_rast.rect_skipped(), s_c3d_rast.rect_unsupported());
+	       s_c3d_rast.rects(), s_c3d_rast.tinted_rects(), s_c3d_rast.rect_skipped(), s_c3d_rast.rect_unsupported(),
+	       s_c3d_rast.land_polys(), s_c3d_rast.land_spans(), s_c3d_rast.land_unsupported(), s_c3d_rast.static_polys(),
+	       s_c3d_rast.static_rects(), s_c3d_rast.static_unsupported(), s_c3d_rast.solid_skipped());
 	fflush(stdout);
+}
+
+// M5 (design 7, M5 specification "Diff checks"): SW's static coverage C into scratch C: the static class replayed
+// in SW with every drop forced to 0, over a clear 0.
+void static_cover(const Config& cfg, uint16 s0, Rasterizer_SW_Class* swr, RasterizerClass* sw, int w, int h)
+{
+	s_c.make(w, h);
+	texture_random_seed() = s0;
+	s_c.clear(0);
+	swr->screen = s_c.get();
+	FilterRasterizer fc(sw, kStatic, cfg.fullbright, true, cfg.textures);
+	fc.set_static_cover(true);
+	s_recorder.replay(&fc);
 }
 
 // One C3D check (M1): side A = SW replay of filter(class, c3d_only) into scratch A, side B = one C3D view
@@ -250,8 +266,13 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 	// clear"; the frame compares every pixel either side drew (Coverage::All); the other classes clear to 0 and use
 	// the alpha byte.
 	const bool tinted = c == kTinted;
+	const bool stat = c == kStatic;
 	const uint32_t clear_argb = tinted ? 0xFF808080u : 0u;
 	const Coverage cov = tinted ? Coverage::NotClear : (c == kFrame ? Coverage::All : Coverage::TopByte);
+	// M5: landscape lines at their own tolerance (landscape_tol; 0 = diff_tol).
+	const int tol = static_cast<int>(c == kLandscape && cfg.landscape_tol ? cfg.landscape_tol : cfg.diff_tol);
+	if (stat)
+		static_cover(cfg, s0, swr, sw, w, h);
 	texture_random_seed() = s0;
 	s_a.clear(clear_argb);
 	swr->screen = s_a.get();
@@ -304,9 +325,18 @@ void c3d_check(const Config& cfg, int c, uint16 s0, Rasterizer_SW_Class* swr, Ra
 		printf("[c3d] DIFF frame=%u class=%s discarded (%s)\n", s_frame, cls, back::discard_name(ve.discard));
 		return;
 	}
-	const DiffResult r = diff_images(s_a.image(), s_b.image(), cov, clear_argb, static_cast<int>(cfg.diff_tol),
-	                                s_c3d_rast.tie_mask());
-	printf("%s\n", diff_line_c3d(s_frame, cls, r, static_cast<int>(cfg.diff_tol), fa.excluded(), sentinel).c_str());
+	if (stat)
+	{
+		// M5: the density of A and of B inside SW's coverage C, B outside it (c3d-diff.py gates the pooled density).
+		const StaticResult sr = diff_static(s_a.image(), s_b.image(), s_c.image());
+		printf("%s\n", static_line(s_frame, sr, fa.excluded(), sentinel).c_str());
+		++s_c3d_compared;
+		if (cfg.dump && (first || sr.out_nonedge > 0))
+			dump_pair(s_frame, cls);
+		return;
+	}
+	const DiffResult r = diff_images(s_a.image(), s_b.image(), cov, clear_argb, tol, s_c3d_rast.tie_mask());
+	printf("%s\n", diff_line_c3d(s_frame, cls, r, tol, fa.excluded(), sentinel).c_str());
 	++s_c3d_compared;
 	s_c3d_ties += r.ties;
 	s_c3d_tie_mismatch += r.tie_mismatch;
@@ -400,17 +430,20 @@ constexpr int kDiscardCount = static_cast<int>(back::DiscardReason::kCount);
 constexpr unsigned kOffAfter = 10;
 
 // Replays nothing: finds the first reason C3D cannot draw a recorded frame (step 2), with the same predicates the
-// C3D rasterizer applies (c3d_supports, M3's ambient wrap and flash limit, rect_support).
+// C3D rasterizer applies (c3d_supports, M3's ambient wrap and flash limit, rect_support; M5: landscape_supported,
+// static_supported, _solid skipped). Also counts the static primitives (the play check's exclusion).
 class PlayScan : public RasterizerClass
 {
 public:
 	ScanReason reason = ScanReason::None;
+	unsigned statics = 0;
 
 	void SetView(view_data& View) override { view_ = &View; }
 	void texture_horizontal_polygon(polygon_definition& p) override { polygon(Entry::Horizontal, p); }
 	void texture_vertical_polygon(polygon_definition& p) override { polygon(Entry::Vertical, p); }
 	void texture_rectangle(rectangle_definition& r) override
 	{
+		statics += r.transfer_mode == _static_transfer;
 		if (reason != ScanReason::None)
 			return;
 		const int32_t M = view_ ? static_cast<int32_t>(view_->maximum_depth_intensity) : 0;
@@ -427,17 +460,22 @@ public:
 private:
 	void polygon(Entry e, const polygon_definition& p)
 	{
-		if (reason != ScanReason::None)
-			return;
 		const Transfer t = to_transfer(p.transfer_mode);
+		statics += t == Transfer::Static;
+		if (reason != ScanReason::None || p.transfer_mode == _solid_transfer)   // M5: _solid, SW draws nothing
+			return;
+		// M5: landscapes and static polygons are drawn; the names remain for the ones C3D cannot draw (play frames are
+		// textures 1 and lit 1).
 		if (t == Transfer::BigLandscaped)
 		{
-			reason = ScanReason::Landscape;
+			if (!landscape_supported(p, true) || p.vertex_count > MAXIMUM_VERTICES_PER_SCREEN_POLYGON)
+				reason = ScanReason::Landscape;
 			return;
 		}
 		if (t == Transfer::Static)
 		{
-			reason = ScanReason::Static;
+			if (!static_supported(e, p, true, true) || p.vertex_count > MAXIMUM_VERTICES_PER_SCREEN_POLYGON)
+				reason = ScanReason::Static;
 			return;
 		}
 		if (t != Transfer::Textured || p.vertex_count > MAXIMUM_VERTICES_PER_SCREEN_POLYGON)
@@ -472,11 +510,15 @@ struct PlayState
 	unsigned run = 0, max_run = 0, offs = 0, ons = 0;
 	unsigned long long sentinel = 0, copied = 0;
 	unsigned checks = 0, empty_frames = 0;   // empty: C3D play frames that copied no pixel
+	unsigned static_frames = 0;              // M5: C3D play frames with static primitives
+	unsigned static_checks = 0;              // M5: play checks with SW's static coverage excluded
+	unsigned long long static_px = 0;        // M5: the pixels those checks left out
 	bool off = false;
 	uint32_t off_gen = 0;
 	bool logged_first = false;
 } s_play;
 C3dRasterizer s_play_rast;   // its own counters: the DIFF summary's stay the diff checks'
+std::vector<uint8_t> s_play_mask;   // M5: the play check's exclusion (SW's static coverage)
 
 bool resource_discard(back::DiscardReason r)
 {
@@ -509,11 +551,11 @@ int play_counts_text(char* buf, size_t size)
 	                "frames=%u c3d=%u sw=%u overflow=%u off_frames=%u scan=%u/%u/%u/%u/%u/%u"
 	                "(landscape/static/other/bitmap/wrap/flash) discard=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) "
 	                "skip=%u/%u/%u/%u/%u(down/gate/size/pref/config) offs=%u ons=%u max_run=%u sentinel=%llu play_checks=%u "
-	                "copied=%llu empty_frames=%u",
+	                "copied=%llu empty_frames=%u static_frames=%u static_checks=%u static_px=%llu",
 	                p.frames, p.c3d, p.sw, p.overflow, p.off_frames, p.scan[0], p.scan[1], p.scan[2], p.scan[3], p.scan[4],
 	                p.scan[5], p.discard[0], p.discard[1], p.discard[2], p.discard[3], p.discard[4], p.discard[5],
 	                p.skip[0], p.skip[1], p.skip[2], p.skip[3], p.skip[4], p.offs, p.ons, p.max_run, p.sentinel, p.checks,
-	                p.copied, p.empty_frames);
+	                p.copied, p.empty_frames, p.static_frames, p.static_checks, p.static_px);
 }
 
 // Design 7, M4 "Play mode". True: the frame is in dest (C3D or the SW replay). False: the caller draws it in SW
@@ -525,7 +567,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	if (!P.logged_first)
 	{
 		P.logged_first = true;
-		printf("[c3d] renderer c3d: play frames drawn by citro3d (readback mode, M4)\n");
+		printf("[c3d] renderer c3d: play frames drawn by citro3d (readback mode, M5)\n");
 	}
 	if (P.off)
 	{
@@ -569,7 +611,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	};
 	back::ViewBegin vb{back::ViewBegin::Kind::Skipped, back::SkipReason::Down, back::DiscardReason::Unsupported};
 	back::ViewEnd ve{false, back::DiscardReason::Begin};
-	unsigned sentinel = 0, copied = 0;
+	unsigned sentinel = 0, copied = 0, play_statics = 0;
 	const bool check = cfg.play_check && (P.c3d + 1) % cfg.play_check == 0;
 	{
 #ifdef A1_PROFILE
@@ -591,6 +633,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		// (2) the scan.
 		PlayScan scan;
 		s_recorder.replay(&scan);
+		play_statics = scan.statics;
 		if (scan.reason != ScanReason::None)
 		{
 			++P.scan[static_cast<int>(scan.reason)];
@@ -635,6 +678,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		return true;
 	}
 	++P.c3d;
+	P.static_frames += play_statics != 0;
 	P.run = 0;
 	P.sentinel += sentinel;
 	P.copied += copied;
@@ -650,8 +694,26 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		s_b.make(w, h);
 		for (int y = 0; y < h; ++y)
 			memcpy(&s_b.pixels[static_cast<size_t>(y) * w], dest->row_addresses[y], static_cast<size_t>(w) * 4);
-		const DiffResult r = diff_images(s_a.image(), s_b.image(), Coverage::All, 0, static_cast<int>(cfg.diff_tol));
-		printf("%s\n", diff_line_c3d(s_frame, "play", r, static_cast<int>(cfg.diff_tol), 0, sentinel).c_str());
+		// M5 (design 7, M5 specification "Diff checks", play): a frame with static is compared without SW's static
+		// coverage (the noise differs per pixel by design); the line's `excluded` is then the pixels left out.
+		unsigned static_px = 0;
+		DiffResult r;
+		if (play_statics)
+		{
+			static_cover(cfg, s0, swr, sw, w, h);
+			swr->screen = dest;
+			texture_random_seed() = s0;
+			s_play_mask.resize(static_cast<size_t>(w) * h);
+			for (size_t i = 0; i < s_play_mask.size(); ++i)
+				s_play_mask[i] = s_c.pixels[i] != 0;
+			r = diff_images_excluding(s_a.image(), s_b.image(), 0, static_cast<int>(cfg.diff_tol), s_play_mask.data(),
+			                          &static_px);
+			++P.static_checks;
+			P.static_px += static_px;
+		}
+		else
+			r = diff_images(s_a.image(), s_b.image(), Coverage::All, 0, static_cast<int>(cfg.diff_tol));
+		printf("%s\n", diff_line_c3d(s_frame, "play", r, static_cast<int>(cfg.diff_tol), static_px, sentinel).c_str());
 		++P.checks;
 	}
 	return true;
@@ -712,7 +774,7 @@ void stats_tick()
 	       s_diff_dropped, s_null_frames, s_cal_done, s_cal_skipped);
 	if (s_play.frames)
 	{
-		char buf[512];
+		char buf[768];
 		play_counts_text(buf, sizeof buf);
 		printf("[c3d] play %s\n", buf);
 	}
@@ -787,10 +849,14 @@ void frame_final_stats()
 	if (s_play.frames && !play_final)
 	{
 		play_final = true;
-		char buf[512];
+		char buf[768];
 		play_counts_text(buf, sizeof buf);
-		printf("[c3d] play final %s rects=%u tinted_rects=%u rect_skipped=%u rect_unsupported=%u\n", buf,
-		       s_play_rast.rects(), s_play_rast.tinted_rects(), s_play_rast.rect_skipped(), s_play_rast.rect_unsupported());
+		printf("[c3d] play final %s rects=%u tinted_rects=%u rect_skipped=%u rect_unsupported=%u land_polys=%u "
+		       "land_spans=%u land_unsupported=%u static_polys=%u static_rects=%u static_unsupported=%u solid_skipped=%u\n",
+		       buf, s_play_rast.rects(), s_play_rast.tinted_rects(), s_play_rast.rect_skipped(),
+		       s_play_rast.rect_unsupported(), s_play_rast.land_polys(), s_play_rast.land_spans(),
+		       s_play_rast.land_unsupported(), s_play_rast.static_polys(), s_play_rast.static_rects(),
+		       s_play_rast.static_unsupported(), s_play_rast.solid_skipped());
 		fflush(stdout);
 	}
 	if ((s_diff_done || s_diff_dropped || s_diff_checks) && !s_diff_summary_printed)

@@ -75,6 +75,15 @@ bool rect_tex_size(int width, int height, bool rle, unsigned& S, unsigned& T);
 bool tex_convert_rle(const TexBitmap& bitmap, const uint32_t* shading_tables, TexKind kind, unsigned S, unsigned T,
                      void* out);
 
+// M5: converts and tiles part `part` of a landscape bitmap (`width` = R rows of `height` texels, row_addresses) into
+// `out` (tex_bytes(S, T, kind) bytes, 4-byte aligned), S and T = T[part] from landscape_tex_size (core/landscape.h):
+// the part holds rows [512 part, min(R, 512 (part + 1))); memory row tile_memory_row(T, j) holds the part's row
+// min(j, count - 1) (the padding repeats its last real row, so a clamp on t is SW's PIN). Kinds Normal and Shadeless
+// (tables needed). False (nothing written) for another kind, a part or size landscape_tex_size does not give, or a
+// null pointer.
+bool tex_convert_landscape(const TexBitmap& bitmap, const uint32_t* shading_tables, TexKind kind, int part, unsigned S,
+                           unsigned T, void* out);
+
 // Converts and tiles into `out` (tex_bytes(W, kind) bytes, 4-byte aligned for RGBA kinds). False
 // (nothing written) if the bitmap is unsupported, `rows` is null, or `tables` is null for a kind
 // that needs it (every kind but Mask).

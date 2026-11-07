@@ -1,5 +1,5 @@
 /*
-	Aleph One for the Nintendo 3DS, citro3d back end: the shade LUT's texture (docs/3ds/CITRO3D_DESIGN.md,
+	Aleph One for the Nintendo 3DS, citro3d back end: the shade LUT's texture and (M5) the static noise's (docs/3ds/CITRO3D_DESIGN.md,
 	4.2 and section 7, M3 specification "The LUT's lifecycle"). One 256 x 256 L8 texture, built once by
 	core/shade_lut into linear memory, promoted to VRAM in a later view frame through M2's in-frame
 	TextureCopy, and bound to texture unit 1 by lit view frames (back/draw.cpp). Main thread only. Plain
@@ -34,7 +34,15 @@ bool shade_unbind_unit1();
 // Right after __real_C3D_TexBind(1, lut): checks that citro3d 1.7.1's context holds `lut` where
 // shade_unbind_unit1 writes. The first call decides.
 void shade_check_bound(const void* lut);
-// After C3D_Fini (release_and_fini): deletes both copies, state None. Idempotent.
+// M5 (design 7, M5 specification "Static on the GPU"): the static noise (256 x 256 RGBA8, core/noise), the LUT's
+// lifecycle. noise_frame_start: at every view frame's start after shade_frame_start (nothing until the noise is
+// built; then its promotion, as the LUT's). noise_get: what unit 1 samples for a static draw this frame, building the
+// noise in linear memory on the first call of the run (a CPU fill inside the frame); nullptr = no memory (the caller
+// discards tex). Zone c3d_tex.
+void noise_frame_start();
+void* noise_get();
+const char* noise_state_name();
+// After C3D_Fini (release_and_fini): deletes both copies of the LUT and of the noise, state None. Idempotent.
 void shade_free();
 // For the "[c3d] cmdbuf" line.
 const char* shade_state_name();

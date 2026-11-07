@@ -8,6 +8,7 @@
 */
 #include "tex_convert.h"
 
+#include "landscape.h"
 #include "tiling.h"
 
 namespace a1_c3d {
@@ -164,6 +165,43 @@ bool tex_convert_rle(const TexBitmap& bitmap, const uint32_t* tables, TexKind ki
 		{
 			const unsigned i = (data && s >= first && s < last) ? data[s - first] : 0u;
 			put_texel(dst, tile_index(S, m, s), palette[i], a8);
+		}
+	}
+	return true;
+}
+
+} // namespace a1_c3d
+
+namespace a1_c3d {
+
+bool tex_convert_landscape(const TexBitmap& bitmap, const uint32_t* tables, TexKind kind, int part, unsigned S,
+                           unsigned T, void* out)
+{
+	unsigned s_want = 0, t_want[2] = {0, 0};
+	int parts = 0;
+	if (!landscape_tex_size(bitmap.width, bitmap.height, bitmap.rle, s_want, t_want, &parts) || part < 0 ||
+	    part >= parts || S != s_want || T != t_want[part] || !bitmap.rows || !tables || !out ||
+	    (kind != TexKind::Normal && kind != TexKind::Shadeless))
+		return false;
+	uint32_t palette[256];
+	for (unsigned i = 0; i < 256; ++i)
+		palette[i] = tex_palette_word(tables, kind, i);
+	uint8_t* dst = static_cast<uint8_t*>(out);
+	const unsigned base = static_cast<unsigned>(kLandPartRows) * static_cast<unsigned>(part);
+	const unsigned R = static_cast<unsigned>(bitmap.width);
+	const unsigned count = R - base < static_cast<unsigned>(kLandPartRows) ? R - base : static_cast<unsigned>(kLandPartRows);
+	for (unsigned j = 0; j < T; ++j)
+	{
+		const uint8_t* row = bitmap.rows[base + (j < count ? j : count - 1)];
+		const unsigned m = tile_memory_row(T, j);
+		for (unsigned s = 0; s < S; ++s)
+		{
+			const uint32_t w = palette[row[s]];
+			uint8_t* p = dst + tile_index(S, m, s) * 4;   // little-endian u32: A, B, G, R
+			p[0] = static_cast<uint8_t>(w);
+			p[1] = static_cast<uint8_t>(w >> 8);
+			p[2] = static_cast<uint8_t>(w >> 16);
+			p[3] = static_cast<uint8_t>(w >> 24);
 		}
 	}
 	return true;

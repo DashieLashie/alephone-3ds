@@ -90,6 +90,17 @@ public:
 	unsigned rect_skipped() const { return rect_skipped_; }
 	unsigned rect_unsupported() const { return rect_unsupported_; }
 
+	// M5 counters since the start (design 7, M5 specification "Front end"): landscape polygons drawn, of them through
+	// SW's spans (VertRepeat bands, or not convex); landscapes C3D cannot draw; static polygons and rectangles drawn;
+	// statics C3D cannot draw; _solid polygons skipped (SW draws nothing for them).
+	unsigned land_polys() const { return land_polys_; }
+	unsigned land_spans() const { return land_spans_; }
+	unsigned land_unsupported() const { return land_unsupported_; }
+	unsigned static_polys() const { return static_polys_; }
+	unsigned static_rects() const { return static_rects_; }
+	unsigned static_unsupported() const { return static_unsupported_; }
+	unsigned solid_skipped() const { return solid_skipped_; }
+
 private:
 	view_data* view_ = nullptr;
 	int w_ = 0, h_ = 0;
@@ -115,6 +126,10 @@ private:
 	bool lit_ = true;
 	unsigned rect_bias_ = 1;   // 1/131072 texel
 	unsigned rects_ = 0, tinted_rects_ = 0, rect_skipped_ = 0, rect_unsupported_ = 0;
+	unsigned land_polys_ = 0, land_spans_ = 0, land_unsupported_ = 0, static_polys_ = 0, static_rects_ = 0;
+	unsigned static_unsupported_ = 0, solid_skipped_ = 0;
+	uint32_t noise_state_ = 0x9E3779B9u;   // M5: the static noise offsets' xorshift32 (never 0)
+	void noise_offset(double& ox, double& oy);
 	void note_m();
 	bool m_noted_ = false;   // this target's M was looked at (reset by set_target)
 	unsigned lit_polys_ = 0, shadeless_polys_ = 0, neg_ambient_polys_ = 0, flash_over_ = 0, flash_checks_ = 0;
