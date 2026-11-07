@@ -2353,6 +2353,7 @@ public:
 	uintptr_t next = 0x1000;
 	int fail_next = 0;            // fail the next N allocations
 	uint32_t max_vram_block = 0;  // M5: refuse VRAM blocks over this many bytes (fragmentation); 0 = no limit
+	uint32_t vram_heap = 0;       // M5: the real VRAM heap's size in bytes (refuse past it); 0 = no limit
 	unsigned bad_release = 0, allocs = 0, releases = 0;
 	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, TexWrap, uint32_t bytes) override
 	{
@@ -2364,6 +2365,8 @@ public:
 			return nullptr;
 		}
 		if (pool == TexPool::Vram && max_vram_block && bytes > max_vram_block)
+			return nullptr;
+		if (pool == TexPool::Vram && vram_heap && total(TexPool::Vram) + bytes > vram_heap)
 			return nullptr;
 		void* h = reinterpret_cast<void*>(next);
 		next += 0x100;
@@ -4346,7 +4349,8 @@ static void test_m5_promotion_pressure()
 		run_frame(c, gx, ++f);
 		CHECK(c.lookup(land) == L);
 	}
-	CHECK(c.stats().evictions == ev0 && c.stats().promotions_blocked == 1 && c.stats().alloc_failed_free == 1);
+	CHECK(c.stats().evictions == ev0 && c.stats().promotions_blocked == 1 && c.stats().alloc_failed_free == 1 &&
+	      c.stats().promotions_blocked_land == 1);
 	CHECK(L->pool == TexPool::Linear && !L->promote_pending && c.live_count(TexPool::Vram) == 20);
 	CHECK(c.audit());
 	// Over the cap with enough older victims: the allocation first, then exactly the evictions the cap needs.
@@ -4381,6 +4385,26 @@ static void test_m5_promotion_pressure()
 		CHECK(d.audit() && d.used_bytes(TexPool::Vram) == 0 && d.used_bytes(TexPool::Linear) == 0);
 		d.release_all();
 		CHECK(d.audit() && fb.live.empty() && fb.bad_release == 0);
+	}
+	// At the cap, a real heap no larger than the cap: the first allocation fails until the victims are freed, so the
+	// promotion evicts for the cap and retries instead of blocking (critic, M5 code review round 2).
+	{
+		FakeAlloc fh;
+		fh.vram_heap = 1024 * 1024;
+		TexCache d(fh, cfg_of(4096, 1024, 8));
+		GxQueue g3;
+		uint32_t h = 1;
+		run_frame(d, g3, h++);
+		for (int i = 0; i < 16; ++i)
+			CHECK(d.create(K(i), 128));
+		for (int k = 0; k < 4; ++k)
+			run_frame(d, g3, h++);
+		run_frame(d, g3, h++);
+		TexSlot* big = d.create(K(60), 512);
+		run_frame(d, g3, h++);
+		CHECK(big->vram_handle && d.stats().promotions_blocked == 0 && d.stats().evictions == 16 && d.audit());
+		d.release_all();
+		CHECK(d.audit() && fh.live.empty() && fh.bad_release == 0);
 	}
 	// A landscape goes last: linear only (promote_max 0), the landscape older than the others.
 	{

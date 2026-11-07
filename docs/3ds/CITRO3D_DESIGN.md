@@ -4535,3 +4535,11 @@ carries only VertRepeat / non-convex landscape polygons (40-60 per 60 checks), w
 `landscape_params` (filter.cpp) is the one landscape rule of the filter, the play scan and the rasterizer; 6, recorded
 in "M5, play check and static, user decision". Also: `c3d-diff.py play --off-reason` (`m5-fail1.cfg` goes off on
 `tex`, not `cmdbuf`).
+
+### M5 code review, round 2 (critic APPROVE, 2026-11-07)
+
+On `663d05820`. Both majors fixed; the software-backend look-up exception accepted (test-only `land_cut 400`; the
+production landscape gate stays strict at 98 on both backends; section 10 keeps the look-up as a console item). One
+non-blocking minor applied: at the cap, the real heap can refuse a promotion only because the victims still hold their
+blocks, so `alloc_promotion` now evicts for the cap and retries once before it blocks; the blocked landscape parts are
+counted (`promo done/deferred/blocked(land n)`). Host test: a FakeAlloc whose VRAM heap equals the cap.

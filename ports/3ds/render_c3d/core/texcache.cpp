@@ -139,21 +139,32 @@ void* TexCache::alloc_promotion(TexSlot& s)
 		if (used_[V] + bytes > cap_[V] + freeable)
 			return nullptr;
 	}
+	auto evict_for_cap = [&]() {
+		while (used_[V] + bytes > cap_[V])
+		{
+			TexSlot* victim = lru_victim(false, TexPool::Vram, below);
+			if (!victim)
+				break;   // never: the freeable sum above covered it
+			evict(*victim);
+		}
+	};
 	void* h = alloc_.alloc(TexPool::Vram, s.S, s.T, s.key.kind, s.key.wrap, bytes);
+	if (!h && used_[V] + bytes > cap_[V])
+	{
+		// At the cap the real heap may refuse only because the victims still hold their blocks: free them for the
+		// cap, then one more try (critic, M5 code review round 2).
+		evict_for_cap();
+		h = alloc_.alloc(TexPool::Vram, s.S, s.T, s.key.kind, s.key.wrap, bytes);
+	}
 	if (!h)
 	{
 		++stats_.alloc_failed_free;
 		++stats_.promotions_blocked;
+		stats_.promotions_blocked_land += s.key.wrap == TexWrap::Landscape;
 		s.promote_pending = false;
 		return nullptr;
 	}
-	while (used_[V] + bytes > cap_[V])
-	{
-		TexSlot* victim = lru_victim(false, TexPool::Vram, below);
-		if (!victim)
-			break;   // never: the freeable sum above covered it
-		evict(*victim);
-	}
+	evict_for_cap();
 	used_[V] += bytes;
 	return h;
 }
@@ -421,9 +432,10 @@ std::string TexCache::stats_line() const
 		n += std::snprintf(buf + n, sizeof buf - n, " %u", stats_.gen_window_bytes[i] / 1024);
 	if (n > 0 && n < static_cast<int>(sizeof buf))
 		std::snprintf(buf + n, sizeof buf - n,
-		              " promo %u/%u/%u evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u creates %u "
+		              " promo %u/%u/%u(land %u) evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u creates %u "
 		              "forced %u bursts %u audit %s",
-		              stats_.promotions_done, stats_.promotions_deferred, stats_.promotions_blocked, stats_.evictions, stats_.deferred_frees,
+		              stats_.promotions_done, stats_.promotions_deferred, stats_.promotions_blocked,
+		              stats_.promotions_blocked_land, stats_.evictions, stats_.deferred_frees,
 		              stats_.generation, stats_.alloc_failed_free, stats_.discards_tex, stats_.hits, stats_.misses,
 		              stats_.creates, stats_.forced_fails, stats_.burst_frames, audit() ? "ok" : "MISMATCH");
 	return std::string(buf);

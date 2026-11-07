@@ -130,6 +130,7 @@ struct TexStats
 	uint32_t promotions_done = 0;
 	uint32_t promotions_deferred = 0;     // next_promotion() stopped on the GX rule with a slot waiting
 	uint32_t promotions_blocked = 0;      // M5: a promotion's allocation failed: the slot stays linear this generation
+	uint32_t promotions_blocked_land = 0; // M5: of those, landscape parts (the sky sampled from FCRAM)
 	uint32_t evictions = 0;
 	uint32_t deferred_frees = 0;          // blocks and retired slots freed by on_retired()
 	uint32_t generation = 0;
