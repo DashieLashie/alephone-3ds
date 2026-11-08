@@ -3899,7 +3899,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
-- **M6b specification (revision 1 of 2026-11-08, before code; critic round 1 applied, round 2 APPROVE with 3 minors folded: Review log "M6b pre-implementation").** Where the lines above
+- **M6b specification (revision 2 of 2026-11-08, before code; revision 1 = part 1, critic round 1 applied, round 2 APPROVE;
+  revision 2 adds parts 2 and 3 at the end of this block, user decision: Review log "M6b: every fade on the GPU").** Where the lines above
   and this block disagree, this block rules. Citations are the code at `c6dd77d30`. **No engine edit.** One session.
   - *What a fade is in a 32-bit build (checked).* `build_direct_color_table` (`screen.cpp`:2219-2232) makes the 256-entry
     colour table a **grey ramp**: entry *i* is `(i << 8, i << 8, i << 8)` (`default_gamma_*` = `i << 8`, :2205-2216; Brightness
@@ -4000,10 +4001,10 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     both.
   - *Tier 2:* **pause darkening** (`kDirectDarken`) is **out of M6b (user, 2026-11-08)**: SW draws black on every other pixel
     of the view (`darken_world_window`, `draw_pattern_rect` over `main_surface`, `screen.cpp`:2392-2450); a 2x2 checker quad
-    could reproduce it, but the frames are rare and static (63 of 1 799 in the user's session). It stays non-direct. **negate, dodge, burn**: `GPU_BLEND_MIN`
-    / `MAX` exist (`enums.h`:240-241) but each curve needs `min(f(d), d)` with *f* of the destination, which one blended quad
-    cannot form (the source cannot read the destination); a second target and a copy would. **Recorded as not direct.**
-    **randomize**: random per intensity level, not expressible without a dependent lookup (PICA has none): **not direct.**
+    could reproduce it, but the frames are rare and static (63 of 1 799 in the user's session). It stays non-direct.
+    ~~negate, dodge, burn and randomize: not direct~~ — **wrong, superseded by parts 2 and 3 below** (revision 2): the claim
+    that one blended quad cannot form `min(f(d), d)` holds, but the composite can rebuild the composited pixel in the TEV
+    from the view and overlay textures and leave only the min or max to the blend.
   - *Not in M6b:* readback mode (it keeps SW's `apply_gamma` on the CPU, exact); Classic (never direct); the SW `apply_gamma`
     fast path (backlog). *For M9:* the fade quad is drawn once per eye with the same constants.
   - *Needs console verification:* PICA's rounding of a `CONSTANT_COLOR` factor (the fit's model), **including A = 255 as the
@@ -4014,6 +4015,74 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     (`gpu_ms`).
   - *Housekeeping:* `a1_c3d.h`:47's comment on `kDirectGamma` ("brightness") is updated: since `PATCHES.md` 56 the bit means
     fades, flashes and tints only (critic, minor 8).
+  - **Revision 2 (user decision 2026-11-08: every fade on the GPU; static may look different from SW).** M6b has three parts,
+    built in order in one milestone; everything above is **part 1** (affine curves, one quad) and is unchanged. Parts 2 and 3
+    extend the fit (still no engine edit, still no fade-type knowledge: the curves are classified) and add passes to the
+    composite after part 1's. A frame whose curves match no part falls back exactly as today.
+  - **Part 2: negate, dodge, burn, exactly.** *The curves (checked, `fades.cpp`:632-723; `CEILING` = min, `FLOOR` = max).*
+    Every negate/dodge/burn colour in `fade_definitions` (:186-192) has channels 0 or 65535 only, so with *u* = 1 − *t*
+    each channel is one of: burn, *k* = 1: identity; *k* = 0: `min(c, u)`. Dodge, *k* = 1: `min(c, 1 − t)`; *k* = 0:
+    `min(c, 1 − t − c)` (a fold of the bright half). Negate, *k* = 0: identity; *k* = 1: `max(min(c, 1 + u − c), 1 − u − c)`
+    (equal to SW's two branches for every *c*, the boundary `c = ½` included). With a liquid underneath (the fade effect is
+    applied first, :519-531) *c* is replaced by part 1's affine `g(c) = A·c + B`. **One family covers all of them, per
+    channel:** `F = max(min(g, K1 − σ1·g), K2 − σ2·g)` with σ ∈ {0, 1} and K ∈ [0, 2] (identity: K1 ≥ 1 + max g with σ1 = 0,
+    K2 = 0 with σ2 = 0; a cap: σ1 = 0; a fold: σ1 = 1; negate: both).
+    *The fit.* After part 1 fails: per channel, g from the entries where the curve rises with slope ≈ A (or the identity when
+    there is no liquid), then σ1, σ2 ∈ {0, 1} tried, K1 and K2 read off the breakpoints, the result verified on all 256
+    entries against a model of the passes below (part 1's rounding model per blend, the TEV stages rounding to 8 bits each:
+    **UNVERIFIED**, see console list); within `fade_tol` it is accepted. The host test (replicas of the three faders at
+    *t* = 0 .. 1 in 1/64 steps, each colour of :186-192, alone and over each liquid) fixes how well the search finds them;
+    fits that the search cannot find fall back.
+    *The passes* (after part 1's quad, which applies g when there is a liquid; without one part 1's quad is not drawn).
+    Each pass is a full-screen draw whose TEV **rebuilds the composited pixel** C from the two textures, as SW composites
+    before `apply_gamma`: stage 0 `MODULATE(TEXTURE0, TEXTURE1 with operand ONE_MINUS_SRC_ALPHA)` (the view times one minus
+    the overlay's alpha), stage 1 `ADD(PREVIOUS, TEXTURE1)` (+ the premultiplied overlay) = M6's CPU composite
+    (`direct_check_compare`, `present.cpp`:449-452); stages 2-3 apply g (`MODULATE` by a constant A, `ADD` a constant B;
+    passthrough without a liquid); stage 4 `MODULATE(PREVIOUS, constant σ)`; stage 5 `K − PREVIOUS`, as `SUBTRACT(constant
+    K, PREVIOUS)` for K ≤ 1 or `ADD(PREVIOUS with ONE_MINUS operand, constant K − 1)` for K > 1 (the clamp at 1 is harmless:
+    it only happens where `min(g, ·)` already picks g). Ops and sources: `enums.h`:320-334, :365-374 (`GPU_TEXTURE1`,
+    `GPU_PREVIOUS`, `GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA`, `GPU_SUBTRACT`, `GPU_MODULATE`, `GPU_ADD`). That is **six stages,
+    PICA's whole TEV** (`C3D_GetTexEnv(0..5)`); the implementer confirms the count, and if a liquid + fold does not fit,
+    that combination alone falls back. **Pass MIN** (σ1, K1): blend `GPU_BLEND_MIN` with factors `ONE, ONE` (so whether PICA
+    applies factors in MIN mode, **UNVERIFIED**, cannot matter): `dst = min(dst, K1 − σ1·g)` where dst = g(C) after part 1.
+    **Pass MAX** (σ2, K2), drawn only for a channel set that needs it (negate): `GPU_BLEND_MAX`, factors `ONE, ONE`. Identity
+    channels get constants that leave dst unchanged (K1 = 1, σ1 = 0 in MIN; K2 = 0, σ2 = 0 in MAX). Alpha untouched.
+    *Two textures, two coordinate sets.* The view texture is sampled at `v = 1 − y/256` (`view_v_flip`), the overlay at
+    `v = y/256` (the band quads, `present.cpp`:583-590): unit 1 needs **texcoord1**. The present program outputs only
+    texcoord0 (`shaders/present.v.pica`): either a pass-through `texcoord1` output from a third vertex attribute, or a second
+    small program (`fade.v.pica`, picasso through CMake as the others); the world program already proves unit 1 reads
+    texcoord1 (`world.v.pica`:16, M3's shade LUT on unit 1). The implementer picks one and states the bind and restore
+    (the `C3D_BindProgram` wrap in `context.cpp`, M1). *The overlay texture holds data only in this frame's bands*
+    (`overlay_upload`, `overlay.cpp`:167-182; elsewhere it is stale): the passes are drawn per row range, with the
+    two-texture stages 0-1 inside the bands and a view-only stage 0 (`REPLACE TEXTURE0`) outside them. The vertex buffer
+    grows by those quads (`kCompositeQuads`, `present.cpp`:121).
+    *Accept:* the part 1 gate (≥ 99.9 % within Δ 2, max Δ ≤ 4 against SW, `direct_check` with the curves) for every negate,
+    dodge and burn type of the Fade Test and for one of them over water (the Liquid Test with `fade_screen` of
+    `_fade_negative` in place of the red flash on a second run).
+  - **Part 3: static (randomize), GPU-styled.** *SW* (:592-630): each table entry gets a random offset in [0, mask], mask =
+    all bits up to the top bit of the transparency, new random values every update, `uint16` wrap-around: a flickering
+    colour scramble, not spatial snow. **The user decided the GPU version may look different**: it draws **spatial static**
+    with M5's noise texture (`core/noise.h`: 256x256 RGBA8 of the LFSR states, `GPU_REPEAT`, `back/shade.cpp`:65,
+    `noise_get()` :194; in linear memory, promoted to VRAM when there is room).
+    *Detection from the curves:* g = the affine lower envelope (a line fitted through the minima of 16 windows of 16
+    entries; identity without a liquid), residuals `r(i) = (c[i] − g16(i)) mod 65536`; static when every residual lies in
+    [0, M] with M ≥ 0x00FF and the curve is not part 1's or part 2's. *Strength:* M (65 535 at the start, roughly halving
+    as the fade decays). *The pass* (after part 1's quad for g, which is drawn only with a liquid): one full-screen quad
+    textured by the noise on unit 0 at texcoords `(x + ox, y + oy) / 256` with a new pseudo-random (ox, oy) every frame, TEV
+    `REPLACE TEXTURE0`, the **alpha test** `GEQUAL noise_ref(65535 − M)` (M5's density rule, `core/noise.h`, so about M/65536
+    of the pixels become static), blend `ONE, ZERO`: those pixels show the noise's colour, the others the picture. The
+    noise must exist before the composite frame (`noise_get()` may build it and issues a transfer: the implementer calls it
+    where M5's rules allow, out of the composite's GX budget, and states where).
+    *Accept (functional, no SW gate):* in the Fade Test the `_fade_static` frames are direct (`fade_static=` counter), the
+    snow appears at the hit, thins out and is gone when the curves return to the identity (`fit identity` line; captures at
+    the start, middle and end); `direct_check` skips static frames (counted `fade_unchecked=`) instead of failing them.
+  - *Revision 2's counters and keys:* `fade_direct=` splits into `fade_affine=`, `fade_fold=` (part 2), `fade_static=`; the
+    `[c3d] fade:` line names the part (`fit affine|fold|static|identity|no`); `fades 0|1` stays the master switch and a test
+    key `fade_parts N` (bit mask 1|2|4, default 7) turns parts off for A/B runs. The Fade Test's acceptance becomes: every
+    fade type started shows its line, and **`blocked=gamma` is 0 for the whole run** except frames a fit could not classify
+    (each listed with its curves' first entries, for the next revision).
+  - *Revision 2's console list (adds to the above):* the TEV's per-stage precision over six stages; `GPU_BLEND_MIN`/`MAX`
+    on hardware (factors `ONE`); the three passes' GPU time on a fade frame (`gpu_ms`); the noise's look at 30 and 60 fps.
 
 ### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
 - **Open for its spec (2026-11-08):** M9 will have shipped first, so M7 inherits M9's VRAM budget (section 6 needs a second
@@ -5328,4 +5397,15 @@ All eight round-1 fixes confirmed. Folded: a `fit identity` log line, so fades w
 (`_end_cinematic_fade_out`, a repeated fade-in to black) satisfy the one-line-per-type acceptance, and the end fade ordered
 right after `_cinematic_fade_out`; Azahar's blue Δ on water recorded as a diagnostic, not a gate; the fit cache persists, only
 the per-frame hand-off is reset. **The specification is approved; next is the build.**
+
+### M6b: every fade on the GPU (coordinator, 2026-11-08; user decisions)
+
+The user asked whether negate, dodge and burn are really infeasible: they are not. Every colour of those faders has channels 0
+or full, which reduces each channel to the identity, a cap `min(c, K)`, a fold `min(c, K − c)` or a two-sided fold (negate),
+and the composite can rebuild the composited pixel in the TEV from the view and overlay textures, leaving the min/max to
+`GPU_BLEND_MIN`/`MAX`; revision 1's "recorded as not direct" was wrong and the critic had accepted it unchecked. For the
+compiler bolt's screen static (`_fade_static`, only when the player is hit by a compiler bolt, `player.cpp`:311; the static
+on compiler sprites is M5's and already direct) the user decided **the GPU version may look different**: spatial static from
+M5's noise texture, strength from the curves. **Decision: fold all three parts into M6b** (revision 2) and prepare a fresh
+session (`KICKOFF_M6B.md`).
 
