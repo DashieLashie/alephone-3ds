@@ -3889,9 +3889,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   from the port (`PATCHES.md` 56, user 2026-11-08), so the level is always the neutral default and never blocks a frame.
   **Tier 2 (bonus):** *negate* (fusion and hummer projectiles), *dodge* and *burn* (alien weapon,
   armageddon beast), *randomize* (compiler static), pause darkening.
-- **Likely engine edit:** the fade type, colour and transparency live in `fades.cpp` and only reach a renderer through the
-  OpenGL fader queue (not built on the 3DS: `HAVE_OPENGL` is undefined), so a small hook under `A1_PLATFORM_3DS` is expected
-  (`PATCHES.md` 56+, `ppcheck.sh`); to be confirmed in the spec.
+- **Likely engine edit:** ~~a small hook~~ **none** (the specification below: the port reads the engine's own final
+  colour curves, which are global).
 - **Why it matters beyond looks:** every non-direct frame is a readback frame (about 4 ms more busy than software) and, with
   M9, a frame without depth that restarts the ramp-up (section 6). Fewer non-direct frames = fewer of both.
 - **Order (user, 2026-11-08, accepting the proposal): after M8 and before M9**, because it shrinks how often stereo drops out and
@@ -3900,6 +3899,83 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
+- **M6b specification (DRAFT, revision 0 of 2026-11-08, before code; not yet reviewed by the critic).** Where the lines above
+  and this block disagree, this block rules. Citations are the code at `c6dd77d30`. **No engine edit.** One session.
+  - *What a fade is in a 32-bit build (checked).* `build_direct_color_table` (`screen.cpp`:2219-2232) makes the 256-entry
+    colour table a **grey ramp**: entry *i* is `(i << 8, i << 8, i << 8)` (`default_gamma_*` = `i << 8`, :2205-2216; Brightness
+    is pinned to the neutral level by `PATCHES.md` 56). Every fader function (`fades.cpp`:564-760) maps that table entry by
+    entry; `animate_screen_clut` copies the result into the global `current_gamma_r/g/b[256]` (`screen.cpp`:149-151,
+    :2255-2262) and sets `using_default_gamma`; `update_screen` then maps each pixel channel by channel,
+    `out = current_gamma_c[in] >> 8` (`apply_gamma`, :2060-2110). So **in this build every fade is three independent
+    256-entry curves**, one per channel, and the line above that soft_tint uses `max(r,g,b)` "of each pixel" is wrong: its
+    `max` is taken over a grey entry, so it never mixes channels. Per fader, with *t* the current transparency and *k* the
+    fade colour's channel (both in [0, 1]):
+    - *tint* (:564-590): `c' = c + (k − c)·t` = **(1 − t)·c + t·k**: affine, slope in [0, 1].
+    - *soft_tint* (:725-757; `ADJUSTED_TRANSPARENCY_DOWNSHIFT` 8, :84): `c' = c + (k·c − c)·t` = **(1 − t + t·k)·c**: linear,
+      slope in [0, 1].
+    - *negate* (:632-664), *dodge* (:666-693), *burn* (:695-723): the min or max of an affine function of *c* and *c* itself
+      (`CEILING` = min, `FLOOR` = max), with a bit-XOR in negate: **piecewise**, not affine (except at the end points of a
+      fade, where they can degenerate to the identity).
+    - *randomize* (:592-630): random bits per table entry: **no structure**.
+    - Two fades at once (a liquid's fade effect, then the other fade, :519-542) are a composition: two affine curves give an
+      affine curve, so **underwater + a damage flash is still affine**.
+  - *The mechanism: fit, then one blended quad.* In `direct_policy` (hook 3a, `front/frame.cpp`), when the engine's mask has
+    `kDirectGamma`, the front end reads the three global curves (`extern uint16 current_gamma_r[256]` etc., like the M6
+    `displaying_fps` externs; no engine edit) and fits each channel to `out = B + A·in` (core function below). If all
+    three fit within `fade_tol` and the mask has no other bit, the bit is cleared, the frame stays direct and the fit is
+    handed to the composite. Otherwise nothing changes (readback, or SW under `fallback sw`, as today). The composite
+    (`present_composite`, `back/present.cpp`:526-602) draws, **after the overlay bands**, one 400x240 quad with TEV stage 0
+    = REPLACE of `GPU_CONSTANT` (`C3D_TexEnvColor`, the `tev_constant` byte order settled in M1, `view.cpp`:116-125) holding
+    **B**, and the blend `C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_CONSTANT_COLOR, GPU_ZERO, GPU_ONE)` with
+    `C3D_BlendingColor` holding **A** per channel (`effect.h`:8, :12; `enums.h`:237-261: `GPU_CONSTANT_COLOR` = 10):
+    `dst' = B + A·dst`, dst alpha kept. Then the restore the composite already does (blend ONE/ZERO; the blend colour back to
+    0 as `draw.cpp`:447). **Why after the overlays:** in SW the crosshair and the text are drawn into `world_pixels` before
+    `update_screen` applies the curves (`screen.cpp`:1827-1915), so a flash tints them too; the composite's target holds the
+    composited view and overlay as plain RGB (`Swizzle::Plain`, `present.cpp`:360-367), which the blend reads. A soft_tint
+    has B = 0; the level-start black has A = B = 0.
+  - *Core: `core/fade_fit.{h,cpp}`, host-tested.* `FadeFit fade_fit(const uint16_t* r, const uint16_t* g, const uint16_t* b,
+    unsigned tol)`: per channel, the curve in 8 bits is `f(i) = c[i] >> 8`; candidates A8 ∈ [0, 255], B8 ∈ [0, 255] around
+    the end-point estimate (`B ≈ f(0)`, `A ≈ (f(255) − f(0)) / 255`, ±2 each); the GPU model `g(i) = min(255, B8 +
+    (i·A8 + 127) / 255)` (round to nearest: the model `direct_check` matched with Δ 0 for the overlay blend, M6; **UNVERIFIED**
+    that PICA rounds a `CONSTANT_COLOR` factor the same way); the candidate with the smallest `max |g(i) − f(i)|` wins; a
+    channel fits when that error ≤ `tol`. A negative slope or an A above 1 never fits (no blend form for them here). The result
+    keeps the per-channel errors for the counters. The three curves are fitted only when they changed since the last call
+    (a 1.5 KiB compare), so a 2 s fade costs one fit per fade step.
+  - *Keys.* `fades 0|1` (default 1; 0 = M6's behaviour, every fade frame non-direct: the A/B switch); `fade_tol N` (0..32,
+    default 2: the fit's tolerance in 8-bit steps). **Both stay as `debug-c3d` keys; the Renderer preference's bundle gets
+    `fades 1` by default** (no change to `config_apply_preference`).
+  - *Counters* (`[c3d] direct` lines): `fade_direct=` (direct frames with a fade quad), `fade_nofit=` (frames whose curves did
+    not fit; they stay `blocked=gamma`), `fade_err=` (the worst fitted error seen); `[c3d] composite`: `fade_quads=`.
+  - *Tests.* (1) Host: replicas of `tint`, `soft_tint` (and of negate, dodge, burn, randomize) applied to the grey ramp at
+    *t* = 0 .. 1 in 1/64 steps, for every colour of `fade_definitions` (`fades.cpp`:162-198) and every liquid effect
+    (:201-208) alone and composed with each tint flash: tint and soft_tint **fit within 1**, compositions within 2, the four
+    others **do not fit** except at the identity ends; the GPU model clamps; the cache returns the same fit. (2) Azahar, plugin
+    **"Fade Test"** (solo Lua, new, `scripts/3ds/tests/plugins/`): from 3 s in, `Players[0]:fade_screen(type)`
+    (`lua_player.cpp`:1610, :2117) for every fade type in order, one per 1.5 s, logged; with `direct_check 5`, whose CPU
+    reference gains the frame's curves (the read-back view and overlay composited as in M6, then `current_gamma_c[x] >> 8`,
+    i.e. exactly SW's `apply_gamma`), so the check compares the GPU picture with **SW's**, not with the fit. (3) Plugin
+    **"Liquid Test"** (solo Lua, new): 3 s in, the player is moved under the surface of the first polygon with water media
+    (`Polygons()`, `.media`, `Players[0]:position`), then 10 s later into lava if the level has any; a damage flash
+    (`fade_screen("red")`) every 2 s on top. Run on L0 (Waterloo Waterpark has water). (4) The red flash settles the
+    **blend colour's byte order** (**UNVERIFIED**: `C3D_BlendingColor` has no doc and M4 only used greys, `draw.cpp`:284-286):
+    a swap shows as a blue flash and fails `direct_check` at once. (5) Regression: M6's `direct_check` runs on L0/L6/L20 (no
+    fades: identical), `fades 0` reproduces M6's `blocked=gamma` counts on the L01 film.
+  - *Accept (proposal; **the tolerance is the user's decision**, as for M2-M5).* Per tint and soft_tint fade type, the liquid
+    effect and a liquid + flash composition: every `direct_check` ≥ **99.9 % of pixels within Δ 2** per channel against SW,
+    **max Δ ≤ 4**; on the L01 film `blocked=gamma` falls to the non-affine fades only (static, negate, dodge, burn), recorded
+    per type; the fade quad's cost in the bench (`c3d_composite`) recorded. Every gate on both Azahar backends where M6 ran
+    both.
+  - *Tier 2, in this milestone only if it comes cheap:* **pause darkening** (`kDirectDarken`): SW draws black on every other
+    pixel of the view (`darken_world_window`, `draw_pattern_rect` over `main_surface`, `screen.cpp`:2392-2450), which the
+    composite can reproduce exactly with a quad textured by a 2x2 A8 checker (wrap repeat) and an alpha test; frames are rare
+    and static (63 of 1 799 in the user's session, Review log "M9: non-stereo frames"). **negate, dodge, burn**: `GPU_BLEND_MIN`
+    / `MAX` exist (`enums.h`:240-241) but each curve needs `min(f(d), d)` with *f* of the destination, which one blended quad
+    cannot form (the source cannot read the destination); a second target and a copy would. **Recorded as not direct.**
+    **randomize**: random per intensity level, not expressible without a dependent lookup (PICA has none): **not direct.**
+  - *Not in M6b:* readback mode (it keeps SW's `apply_gamma` on the CPU, exact); Classic (never direct); the SW `apply_gamma`
+    fast path (backlog). *For M9:* the fade quad is drawn once per eye with the same constants.
+  - *Needs console verification:* PICA's rounding of a `CONSTANT_COLOR` factor (the fit's model); the blend colour's byte
+    order on hardware (Azahar settles it for Azahar); the fade quad's GPU time (`gpu_ms`).
 
 ### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
 - **Open for its spec (2026-11-08):** M9 will have shipped first, so M7 inherits M9's VRAM budget (section 6 needs a second
@@ -5180,4 +5256,14 @@ the Graphics dialog has no Brightness row and `validate_graphics_preferences` pi
 `kDirectGamma` now comes only from fades, flashes and tints, and **Brightness leaves M6b** (the entry above, "Brightness on the
 GPU", is superseded). The Software `apply_gamma` fast path stays an idea for the backlog: fades and flashes still pay it while
 they last.
+
+### M6b specification drafted (coordinator, 2026-11-08; user request)
+
+Written inline (no architect: the user is short on usage). Findings that changed the plan: in a 32-bit build every fade is
+**three per-channel 256-entry curves** over a grey ramp (`build_direct_color_table`), so tint is affine and soft_tint linear
+per channel (the earlier note that soft_tint mixes channels was wrong), and any composition of the two (underwater plus a
+flash) stays affine; PICA's `GPU_CONSTANT_COLOR` blend factor gives `B + A·dst` in one quad; the curves are engine globals
+(`current_gamma_*`), so **no engine edit** and no fade-type knowledge in the port (MML-redefined fades fit or fall back on
+their own). Open for the user: the gate's tolerance (proposed ≥ 99.9 % within Δ 2, max Δ ≤ 4) and whether pause darkening is
+in. Next: the critic's pre-implementation review, then the build.
 
