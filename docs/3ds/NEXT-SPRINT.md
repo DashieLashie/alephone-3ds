@@ -1915,7 +1915,7 @@ leave room for M7's 4× fill — record it, it does not decide.
 
 ## M8 console check (the Renderer preference; ~15 min, 4 launches; when the user is at the console)
 
-**Not run yet.** Written 2026-11-08 for `port-stage10-M8` (`PERF.md` "Stage 10 M8", design section 7 "M8"). Azahar passed
+**Not run yet; deferred by the user (2026-11-08).** Written 2026-11-08 for `port-stage10-M8` (`PERF.md` "Stage 10 M8", design section 7 "M8"). Azahar passed
 everything; the console answers what it cannot: a first switch-on **without any `debug-c3d` file** (the path players take),
 the cost of `fallback sw`'s one sync + one seed per fade, and the Software figure at a non-default Brightness (Azahar: 21.9 fps
 @60, `blit` 27.4 ms). Setup, driving and the `$H/m1/run.sh` helper as in "M1 console check, short version", with

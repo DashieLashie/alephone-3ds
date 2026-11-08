@@ -3885,9 +3885,10 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   destination colour): **a tolerance for the gate is the user's decision**, as for M2-M5.
 - **Tier 1 (required):** *tint* (damage red `_fade_red`/`_fade_big_red`, pickups, teleport `_fade_bright`, explosions,
   white/orange/green/cyan/purple flashes, and the cinematic fades in and out, including the level-start black) and
-  *soft_tint* (**underwater**, lava, goo, sewage, Jjaro: the liquids). **Tier 2 (bonus):** *negate* (fusion and hummer
-  projectiles), *dodge* and *burn* (alien weapon, armageddon beast), *randomize* (compiler static), pause darkening, a
-  non-default Brightness (an arbitrary per-channel curve, the hardest on PICA: probably a lookup).
+  *soft_tint* (**underwater**, lava, goo, sewage, Jjaro: the liquids), and **a non-default Brightness** (moved up from tier 2
+  by the user 2026-11-08 after M8's finding: it blocks every direct frame; an arbitrary per-channel curve, the hardest on
+  PICA: probably a lookup). **Tier 2 (bonus):** *negate* (fusion and hummer projectiles), *dodge* and *burn* (alien weapon,
+  armageddon beast), *randomize* (compiler static), pause darkening.
 - **Likely engine edit:** the fade type, colour and transparency live in `fades.cpp` and only reach a renderer through the
   OpenGL fader queue (not built on the 3DS: `HAVE_OPENGL` is undefined), so a small hook under `A1_PLATFORM_3DS` is expected
   (`PATCHES.md` 56+, `ppcheck.sh`); to be confirmed in the spec.
@@ -5164,4 +5165,10 @@ next launch), Software unchanged (`render` / `blit` / `present` identical to M6'
 Brightness** (`blit` 27.4 ms: the engine's per-pixel `apply_gamma`, also run on every fade or flash frame), against 59.6 at the
 default. Pre-existing and independent of the renderer; told to the user as a decision: M6b tier 2 (Brightness on the GPU) and/or
 a Software fast path for `apply_gamma` (rule 1: measure).
+
+### M8 follow-up: Brightness on the GPU, console check deferred (coordinator, 2026-11-08; user decisions)
+
+After M8's Brightness finding the user decided: **Brightness is done on the GPU, as a required (tier 1) part of M6b**, not a
+bonus. The M8 console check (`NEXT-SPRINT.md`) is **deferred**: not run before M6b. The Software fast path for `apply_gamma`
+was asked about, not decided.
 
