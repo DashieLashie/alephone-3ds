@@ -1209,6 +1209,15 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    **G2-b: readback costs +6.15 / +7.77 / +7.25 ms busy on L0 / L6 / L20** (Azahar +2.04 / +4.88 / +3.51).
    The 1 Hz stutter in play was the stats printing (verified with `quiet 1`: window maxima 65-93 → 40-53 ms, L0 busy
    −2 ms, C3D − SW +3.46; `PERF.md` "Stutter follow-up"); G2-b above is overstated by ~2 ms. **Next: M6** (`KICKOFF_M6.md`).
+   **M6 done (2026-11-07**, tag `port-stage10-M6`; `PERF.md` "Stage 10 M6", Azahar — non-authoritative; `stage10-bb`
+   merged first, user decision): direct mode — eligible HUD + Map frames stay on the GPU (a 512x256 texture target, never
+   cleared, seed/sync rules), the CPU overlays go to an RGBA8888 surface whose bands the present composites, `PATCHES.md`
+   47 (hooks 3a/3b/3c). `direct_check` exact on both backends, the frame-indexed test passes @30/@60, ineligible frames
+   (map, terminal, darken, fades, Classic) readback, M1-M5 gates unchanged; captures pass a recorded exception (user
+   decision: SDL's text blending rounds differently on a transparent surface). **First speedup:** @30 busy −6.0 / −4.2 /
+   −5.0 ms against SW, @60 59.7 fps on L0/L6/L20 (SW 54.4 on L0). G3-a holds. Console: "M6 console check, short version"
+   at the end of this file (not run). **Next (user decision 2026-11-07): M7** (2x2 supersampling), unless the user wants
+   the M6 console check first.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1845,3 +1854,52 @@ understates copies, so expect worse. Recorded, not deciding (user decision 2026-
 final` and `tex:` lines and the BENCH lines; then the design's M5 status, section 10 item 6 ("M5:") and the Review
 log.
 
+
+## M6 console check, short version (30-40 min; when the user is at the console)
+
+**Not run yet.** Written 2026-11-07 for `port-stage10-M6`. Azahar cannot answer M6's hardware questions (design section 7,
+M6 specification, and the code review's "Needs console verification"): the **texture target's orientations** on PICA
+(`view_v_flip 1`, `band_from_end 1`, the seed's linear→tiled flags: all right in Azahar), PICA's blend rounding against
+`direct_check`'s arithmetic, **the real `c3d_wait`** (Azahar runs the GPU inside `C3D_FrameEnd`: its `c3d_wait` is 0.01 ms),
+**two C3D frames in flight across HOME / sleep / Close**, the bottom screen's VBlank wait now before the composite
+(`bottom_pending`), and **the payoff**: HUD + Map @60 ≥ 55 fps on L0/L6/L20. Setup, driving and the `$H/m1/run.sh` helper as
+in "M1 console check, short version" (`cmake --build build-3ds-c3d-prof` at `port-stage10-M6`). **Press A at once at the
+menu.** Framerate Target is set in the game's Graphics preferences (30 unless a step says 60).
+
+**1. Frame-indexed test and orientation, @30 and @60** (~6 min). ftpd: `$H/sprint8/debug-perf-L0` as
+`/3ds/alephone/debug-perf`, `scripts/3ds/tests/c3d/m6-cal.cfg` as `/3ds/alephone/debug-c3d`; `$H/m1/run.sh
+build-3ds-c3d-prof m6c-cal30`; fetch `/3ds/alephone/screen-c3d-cal-*.bmp` into `$H/m6c-cal30/` and run
+`python3 -I scripts/3ds/tests/c3d-m6cal.py $H/m6c-cal30`. Set Framerate Target 60, repeat as `m6c-cal60` (the captures are
+overwritten: fetch the first set before). **Pass:** every capture `ok` (colour of N or N−1, the white band at row
+8·(N mod 30), the four corner colours red/green/blue/white, no magenta). Azahar: 12/12 @30, 18/18 @60, all frame N.
+**Reading it:** band at another row = `band_from_end` wrong (try `band_from_end 0` in the cfg); corners swapped top/bottom or
+magenta on screen = `view_v_flip` wrong (try `view_v_flip 0`). Record and stop if either is wrong.
+
+**2. In-frame equivalence, seed and sync** (~6 min). Framerate Target 30. `debug-perf-L0` + `m6-direct.cfg` →
+`$H/m1/run.sh build-3ds-c3d-prof m6c-direct`; `debug-perf-L6` + `m6-sync.cfg` → `m6c-sync`. **Pass:** every `[c3d]
+direct_check:` line `within_1` ≥ 99.9 % and `over_32=0`; `seed_check: 0 of 96000 pixels differ`; `composite final` with
+`leaks=0`; `m6c-sync`'s `direct final` with `syncs` > 0 and its checks passing too. Azahar: 100.000 % (Δ 0) everywhere.
+**Reading it:** a uniform Δ of 1-2 = PICA's blend rounding (record; 8.3's 99.9 % is the gate); a mirrored or shifted
+picture = orientation (step 1).
+
+**3. HOME, sleep and Close with two frames in flight** (~6 min). `debug-perf` removed, `m6-ineligible.cfg` as
+`debug-c3d` (direct mode, overlays on), launch with `$H/m1/run.sh build-3ds-c3d-prof m6c-home` and play: walk, press
+**HOME** and come back (×2), **close the lid** and reopen, open the **map** (it must show, then the view comes back), then
+**HOME > Close**. **Pass:** the picture after each return is the live view (not a frozen or old frame), the map and the
+overlays show, the launcher comes back after Close, no Luma screen; the card's `log.txt` ends with `release done` and
+`direct final … policy=… blocked=map:N` (N > 0), `gate_skipped` > 0 in `[c3d] stats`, no `release abandoned`.
+
+**4. The bench: direct vs SW vs readback, @30 and @60** (~15 min; the first real speed test). For each level N in 0, 6, 20
+and each of `m5-bench-sw.cfg`, `m5-bench-c3d.cfg`, `m6-bench-direct.cfg` **with a line `quiet 1` appended** (the 1 Hz stats
+printing costs ~2 ms on the console: `PERF.md` "Stutter follow-up"): `debug-perf-L<N>` as `debug-perf`, the cfg as
+`debug-c3d`, `$H/m1/run.sh build-3ds-c3d-prof m6c-<sw|rb|dir>-<30|60>-L<N>`. Then one more `m6-bench-direct.cfg` run on L0
+@60 **without** `quiet 1` for G3-b's `gpu_ms … view=` (the view frame's GPU time, `C3D_GetDrawingTime`). **Record** the
+BENCH lines (`fps`, `busy`, `render`, `c3d_draw`, `present`, `c3d_wait`, `c3d_composite`, `c3d_vblank`, `bottom`) and the
+`direct final` line (`direct=` must be ≥ 95 % of the frames, `bottom_pending`). **The goal** (design 0.5): HUD + Map @60 ≥
+55 fps on all three. Azahar @60: direct 59.6-59.7 fps (SW 54.4 / 59.7 / 59.6, readback 50.3 / 50.3 / 52.0); @30 busy direct
+10.4 / 10.5 / 9.4 ms against SW 16.5 / 14.7 / 14.4 (`PERF.md` "Stage 10 M6"). G3-b (design 0.5): the view's GPU time must
+leave room for M7's 4× fill — record it, it does not decide.
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d`, the `screen-c3d-cal-*.bmp`. **Record** in
+`PERF.md` ("Stage 10 M6 — console, short check") the step results and BENCH tables; then the design's M6 status, section 10
+(new item: M6's orientations and `c3d_wait`) and the Review log.

@@ -1965,3 +1965,63 @@ mirror and the SD write), so **G2-b above is overstated for L0 by about 2 ms (+6
 L20 were not re-run; the same ~2 ms is expected, not measured. A shipping build has none of these prints.
 Any later console busy comparison (M6) must use `quiet 1`. Not committed: the user decides whether `quiet` stays.
 
+
+## Stage 10 M6: direct mode (HUD + Map); G3-a; the first speed bench (Azahar — non-authoritative)
+
+Recorded 2026-11-07 on `stage10-c3d`: commits `d6b252cee` (M6), `896fbb3a9` (code review follow-ups), `b94124840` (the policy
+counted every frame), tag `port-stage10-M6`. Design `CITRO3D_DESIGN.md` section 7, "M6 specification" (revision 1).
+`stage10-bb` (B-b) was merged first (`02c6319d9`, user decision), so every series below has the zero-copy present.
+Binary of the acceptance: `896fbb3a9` (`build/m6/final-prof.3dsx`); the script 20/14/13 reruns, Classic and the bench on
+`b94124840` (`final2`; it only adds the policy counter). Logs `build/m6/`, bench `build/perf/fin-*` (not in git).
+
+**The texture-cache hash (prerequisite).** `c3d_draw` (readback mode, `m5-bench-c3d.cfg`, @30) before / after: 10.21 /
+10.20 / 8.41 → 10.19 / 10.21 / 8.41 ms on L0 / L6 / L20: no change. The spots make ~71 lookups a frame. Host, full cache
+(512 slots, half misses): 292 → 3.5 ns per lookup, longest chain 3-6. Kept as a worst-case bound with deterministic
+counters (`probes` / `probes_old` in the `tex:` line), not as a speedup.
+
+**Acceptance** (both backends where marked; "hw" = host GPU, "sw" = Azahar's software backend, `gxq_budget 3`):
+
+| Item | Result |
+| --- | --- |
+| (1) `direct_check` every 30th direct frame, overlays on (FPS, position, crosshair, messages) | L0 / L6 / L20 hw: 41 / 41 / 44 checks, **100.000 %, max Δ 0**; sw: 41 / 41 / 44, 100.000 % within Δ 1 (max 1); L01 film hw 610, sw 420 checks, all 100.000 %; `over_32` 0, `overlay_leaks` 0 everywhere; `seed_check` 0 of 96 000 |
+| (1b) sync path (`sw_every 50`, L6) | 25 forced SW frames: 25 syncs, 26 seeds, the 40 checks after them 100.000 % |
+| (2) captures, direct vs readback, `overlays 2` | 99.755 / 99.765 / 99.549 % within Δ 1, 0 over Δ 32, max 10 / 9 / 16 (anti-aliased text edges: SDL's two blend roundings); **passes the recorded exception** (≥ 99.5 %, user decision, design Review log "M6 acceptance, capture gate") |
+| (3) ineligible frames | policy `blocked=`: script 20 map 613; script 14 terminal 1 014; script 13 map 119, darken 30; Classic L20 `not_native` 975 of 975 (readback on the texture target at 480x240, 32 play checks, worst 99.61 % within Δ 2); damage flashes `gamma`: L01 film 776 (hw) / 197 (sw) frames readback; no direct frame while any held |
+| (4) frame-indexed test (`m6-cal.cfg`, `alt_load 1`) | @30 12 / 12, @60 18 / 18 captures: colour of frame **N** (never N − 1 here), the band at 8·(N mod 30), corners right, no magenta: `view_v_flip 1` and `band_from_end 1` right |
+| (5) `readback_cal 1` on the 512x256 texture target | 30 / 30 orientation, current frame, channels, alpha; 0 mismatched |
+| (6) GX high-water | 10-11 (hw), 4 (sw); composite frames ≤ 4 entries |
+| (7) scripts 07, 13, 14, 22 in mode direct | pass (07: 3 913 direct / 55 `gamma`; 22: HOME > Close, 709 direct frames, `release done`) |
+| (8) M1-M5 gates on the M6 binary (mode readback) | 25 gates pass (diff L0/L6 both backends, L20, look-up, film L01, play L0/L6/L20 + film, `vram_cap 512`, `fail_every 50` and `1`, M1-M3 diffs, `readback_cal`, script 07); `present_diff` 49 checks, 0 differences |
+| (9) OFF builds | `objdump -d` identical to the start of M6; `nm` 0; 4 builds, 0 warnings; `ppcheck.sh` IDENTICAL |
+
+**G3-a** (`g3a 1`: the direct view target 1 024x512, the view drawn at 800x480; pool VRAM cap 2 048 KiB = 9.1's M7 column):
+every allocation succeeds (0 `alloc-fail`, 0 discards, all frames direct); VRAM free at exit (targets and pool still held)
+**329 / 585 / 2 057 KiB** on L0 / L6 / L20 (without `g3a`: 373 / 1 609 / 3 593); GX high-water 3-10. On L0 the pool sits
+at its 2 048 KiB cap and the linear pool at 3 997 of 4 096 KiB with 58 evictions (the 2 MiB landscape part against the
+cap): **M7 should take the RGB8 landscape** (design 7, "M7's landscape budget"). Command-buffer use is resolution-independent
+(`usage_max` 0.030 with or without). **G3-a holds** (recorded, not deciding).
+
+**The bench** (`perf-bench.sh`, `RUNS=1`, HUD + Map, stats printing on as in M5; every world frame direct on each spot):
+
+| @30 | busy L0 | L6 | L20 | `render`+`c3d_draw` (L0) | `blit` | `present` | `bottom` (L0) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SW | 16.52 | 14.75 | 14.39 | 11.20 | 1.20 | 0.48 | 2.51 |
+| readback (M5) | 19.03 | 19.15 | 17.95 | 0.81 + 10.20 (+ 2.19 readback) | 1.20 | 0.51 | 3.02 |
+| **direct (M6)** | **10.48** | **10.55** | **9.38** | 0.81 + 4.87 | **0** | 0.27 (+ 0.09 composite) | 3.02 |
+
+| @60 | fps L0 | L6 | L20 | busy L0 | L6 | L20 | of it `c3d_vblank` (L0 / L6 / L20) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| SW | 54.37 | 59.62 | 59.53 | 17.44 | 15.31 | 15.23 | 0.03 / 0.37 / 0.14 |
+| readback (M5) | 50.43 | 50.26 | 52.07 | 19.64 | 19.85 | 18.48 | 0.01 |
+| **direct (M6)** | **59.71** | **59.66** | **59.71** | 14.81 | 14.75 | 14.72 | 4.30 / 4.08 / 5.37 |
+
+Direct − SW @30: **−6.04 / −4.20 / −5.01 ms** busy; direct − readback: −8.55 / −8.60 / −8.57 ms. @60 direct holds the cap
+on all three spots (busy without the VBlank wait ≈ 10.5 / 10.7 / 9.4 ms); SW misses it on L0. Where the time went: the
+readback (2.19 ms) and the blit (1.20 ms) are gone, `c3d_draw` halves (10.2 → 4.9 ms: in readback mode it included the
+wait for the GPU and the sentinel fill; in direct mode the view frame ends without waiting), the present drops to 0.27 +
+0.09 ms (no fill or upload of `main_surface`). Azahar runs the GPU work inside `C3D_FrameEnd`, so `c3d_wait` stays 0.01 ms
+and `gpu_ms view` 0.08: the console's `c3d_wait` (the view frame's GPU time not hidden by the bottom screen, hook 3c) is
+unknown. `bottom_pending` (direct frames whose bottom swap was still pending at hook 3b): 0-3 @30, 105-203 of ~1 670 @60.
+`c3d_overlay` 0.58 ms in the overlays-on runs (the dirty-tile clears: ~25 tiles a frame), 0 in the bench (no overlays).
+**The console decides** (`NEXT-SPRINT.md` "M6 console check, short version"; Azahar overstates `render` ~40 % and
+understates copies ~40 %, "How to read these numbers").

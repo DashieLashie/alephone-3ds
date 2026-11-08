@@ -3842,6 +3842,19 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   - *Not in M6:* supersampling (M7; `g3a` is only a budget probe), the preference (M8), stereo (M9), the clip-at-cut
     landscape fallback (a console decision pending since the M3-M5 checks), Classic in direct mode (5.4).
 
+- **Status (2026-11-07): M6 implemented and accepted** (`PERF.md` "Stage 10 M6", Azahar — non-authoritative; commits
+  `d6b252cee`, `896fbb3a9` review follow-ups, `b94124840` the policy counter; spec REVISE then APPROVE round 2, code APPROVE
+  with 6 minors folded). One session. `stage10-bb` merged first (user decision). On both Azahar backends: `direct_check`
+  100.000 % (host GPU Δ 0, software backend Δ ≤ 1) on L0/L6/L20 and the L01 film, `seed_check` 0, the sync path, overlay
+  leaks 0; frame-indexed captures 12/12 @30 and 18/18 @60 (frame N, band and corners right: `view_v_flip 1`, `band_from_end
+  1`); `readback_cal` 30/30 on the texture target; map, terminal, darken, gamma and Classic (`not_native`) frames readback;
+  captures 99.55-99.77 % within Δ 1, 0 over 32 (recorded exception, user decision: Review log "M6 acceptance, capture
+  gate"); the M1-M5 gates unchanged; OFF builds identical, `ppcheck.sh` IDENTICAL. **G3-a holds** (VRAM free 329 KiB at
+  M7's caps on L0; the 2 MiB landscape fills the 2 048 KiB pool: RGB8 for M7). **Bench:** @30 busy direct − SW −6.04 /
+  −4.20 / −5.01 ms; @60 direct 59.66-59.71 fps on all three (SW 54.37 / 59.62 / 59.53, readback 50.26-52.07). The hash:
+  no change in Azahar, kept as a worst-case bound. Console: `NEXT-SPRINT.md` "M6 console check, short version" (the
+  orientations, `c3d_wait`, HOME/sleep/Close with two frames in flight, the @60 goal, G3-b).
+
 ### M7 — 2x2 supersampling (to be built, after M6; user 2026-11-07, G3 measured but not deciding)
 - View at 800x480 (texture 1024x512), halved by `GX_TRANSFER_SCALE_XY`
   (`gx.h`:33-38, readback) or bilinear composite (direct); cache cap lowered
@@ -4069,6 +4082,11 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     **Console 2026-10-19 (P1):** 16 767 KiB of 19 904 KiB free (profile build);
     17 792-17 812 KiB after the release.
 13. Stereo comfort/ghosting; SSAA look.
+    **M6 (2026-11-07):** the texture target's orientations (`view_v_flip 1`, `band_from_end 1`, the seed's `OUT_TILED(1)`
+    with no flip: all right in Azahar), PICA's blend rounding against `direct_check` (Azahar Δ 0), the composite's
+    `c3d_wait` (Azahar runs the GPU inside `C3D_FrameEnd`), the bottom screen's VBlank wait before the composite at @60
+    (`bottom_pending` 105-203 of ~1 670 frames in Azahar), whether VRAM contents survive HOME for `tex_view`, contiguous
+    512 KiB / 2 MiB VRAM blocks after pool churn: `NEXT-SPRINT.md` "M6 console check, short version".
 14. 5.6.1: d1 confirms the binary facts (main thread, rights 1 at ONSUSPEND and
     ONRESTORE, no hook after Close); the post-close frame never retires in 5 s
     (run 1); HOME > Close in a game ×3, HOME and back, sleep in a game with the gate,
@@ -4969,3 +4987,18 @@ seeded view frame and `direct_check`'s own frames (which fit `gxq_budget 3`); (3
 cleared next frame (the dirty mask records bands, not writes); (4) `direct_check`'s frames re-check the gate; (5) a
 seed_check frame redrawn by SW is counted as SW, and a calibration view frame forgets the texture; (6) `FrameKind::Composite`
 with its own queue warning (≤ 6).
+
+### M6 acceptance, capture gate (coordinator, 2026-11-07; user decision; a recorded exception)
+
+The direct-vs-readback captures (acceptance (2), `overlays 2`, end-of-run top screens of the bench spots) measured
+**99.755 / 99.765 / 99.549 %** of pixels within Δ 1 on L0 / L6 / L20 against 8.3's 99.9 %, **0 pixels over Δ 32**, max Δ
+10 / 9 / 16. Every differing pixel is an anti-aliased edge of the overlay text (rows 6-69, the position readout), the direct
+picture 1-2 levels brighter. Cause, SDL 2.32.10's arithmetic, not the GPU: readback mode blends the TTF glyphs onto the
+opaque XRGB `world_pixels` with SDL's fast RGB blitter (÷ 256, floor), direct mode onto the transparent RGBA8888 overlay with
+the generic `ALPHA_BLEND_RGBA` (`SDL_blit.h`:460-466, ÷ 255, truncation toward zero), which the GPU then composites
+premultiplied; the two roundings differ by 1-2 per layer and compound where the 1-pixel shadow and the glyph overlap. The
+GPU composite itself is exact: `direct_check` (the composite against the read-back view with the overlay composited by exact
+arithmetic) is 100.000 %, Δ 0, on L0/L6/L20 and the L01 film on the host GPU (Δ ≤ 1 under the software backend), 610 and 420
+checks in the films. **User decision (2026-11-07): a recorded exception** — captures that carry overlay text are gated at
+**≥ 99.5 % within Δ 1 and 0 pixels over Δ 32**; 8.3's 99.9 % stays for everything else, `direct_check` keeps 99.9 % (it
+measured 100 %). Under the exception the three captures pass.

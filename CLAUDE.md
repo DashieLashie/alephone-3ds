@@ -36,8 +36,10 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   in readback mode; passes on both Azahar backends; sprites gated on L0 and the films, user decision); **M5 done**
   (2026-11-07, tag `port-stage10-M5`, `PERF.md` "Stage 10 M5", Azahar only, no engine edit: landscapes (two texture
   parts), static, eviction hardening; every play frame is C3D; passes on both Azahar backends; **G2-a fails** as
-  predicted, +2.0 / +4.9 / +3.5 ms busy on L0 / L6 / L20); **next (user decision 2026-11-07: M6 → M7 → M8 → M9, gates
-  measured, not deciding): M6** (kickoff `KICKOFF_M6.md`); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  predicted, +2.0 / +4.9 / +3.5 ms busy on L0 / L6 / L20); **M6 done** (2026-11-07, tag `port-stage10-M6`, `PERF.md`
+  "Stage 10 M6", Azahar only, `stage10-bb` merged first: direct mode, `PATCHES.md` 47; first speedup, @60 59.7 fps on
+  L0/L6/L20; captures pass a recorded exception, design Review log "M6 acceptance, capture gate"); **next (user decision
+  2026-11-07: M7 → M8 → M9, gates measured, not deciding): M7**, console check "M6 console check, short version" pending; **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
@@ -94,8 +96,8 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
 2. **Every engine edit** (anything under `Source_Files/`) is fenced with `#ifdef A1_PLATFORM_3DS`, gets a numbered
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
-   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's (both used), 47-48 are reserved by
-   stage 10 for M6/M8; 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07); take 56+ for anything else.
+   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's, 47 M6's (all used), 48 is reserved by
+   stage 10 for M8; 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07); take 56+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

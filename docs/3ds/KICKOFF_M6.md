@@ -1,5 +1,7 @@
 # Paste this into a fresh Claude Code session started in the stage10-c3d worktree
 
+**Status: done (2026-11-07, one session; tag `port-stage10-M6`, `PERF.md` "Stage 10 M6").** No session 2 was needed.
+
 (`/Users/dashielashie/Desktop/Aleph_3ds/.claude/worktrees/stage10-c3d`, branch `stage10-c3d`. Written
 2026-11-07 at the end of M5. Earlier prompts: `KICKOFF_PROMPT.md` (stage 10), `KICKOFF_M0.md` … `KICKOFF_M5.md`.)
 
