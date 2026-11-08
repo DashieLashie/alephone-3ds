@@ -187,6 +187,22 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 64, 512, cfg.land_cut);
 	if (key == "quiet")
 		return parse_flag(value, cfg.quiet);
+	if (key == "overlays")
+		return parse_unsigned(value, 0, 2, cfg.overlays);
+	if (key == "direct_check")
+		return parse_unsigned(value, 0, 100000, cfg.direct_check);
+	if (key == "overlay_audit")
+		return parse_unsigned(value, 0, 100000, cfg.overlay_audit);
+	if (key == "seed_check")
+		return parse_flag(value, cfg.seed_check);
+	if (key == "band_from_end")
+		return parse_flag(value, cfg.band_from_end);
+	if (key == "view_v_flip")
+		return parse_flag(value, cfg.view_v_flip);
+	if (key == "g3a")
+		return parse_flag(value, cfg.g3a);
+	if (key == "sw_every")
+		return parse_unsigned(value, 0, 100000, cfg.sw_every);
 	if (key == "film")
 	{
 		if (value.empty())

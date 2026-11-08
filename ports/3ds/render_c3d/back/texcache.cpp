@@ -15,6 +15,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 
+#include <algorithm>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -88,7 +89,8 @@ TexCache& texcache()
 		const Config& cfg = config();
 		TexCacheConfig c;
 		c.linear_cap_kib = cfg.linear_cap;
-		c.vram_cap_kib = cfg.vram_cap;
+		// M6 g3a (test only): 9.1's M7 column, the pool capped at 2 048 KiB next to the 2 MiB view target.
+		c.vram_cap_kib = cfg.g3a && cfg.mode == Mode::Direct ? std::min(cfg.vram_cap, 2048u) : cfg.vram_cap;
 		c.promote_max = cfg.promote_max;
 		c.fail_every = cfg.fail_every;
 		s_cache = new TexCache(s_alloc, c);

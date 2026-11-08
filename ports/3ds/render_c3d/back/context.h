@@ -146,7 +146,8 @@ void stats_tick();   // logs "[c3d] stats ..." once a second
 // frame (after the first or only frame's begin): in a two-frame present (two_frame 1 or zero-copy)
 // frame D (draw + framebuffer transfer), in a one-frame present the whole present (upload too);
 // `Upload`: frame U, the upload (after a two-frame present's frame D's begin).
-enum class GpuTime { Draw, Upload };
+// M6 `View`: after a composite frame's frame_begin, the direct view frame it waited for (G3-b's figure).
+enum class GpuTime { Draw, Upload, View };
 void sample_drawing_time(GpuTime which);
 
 // --- defined in front/frame.cpp (M0 piece 2b), called by release_and_fini() just before the final

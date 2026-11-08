@@ -34,6 +34,11 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 // quad at the top centre (core/calibrate.h). The target, staging and readback sequence are shared with
 // back/draw.cpp through the back-internal view_shared.h.
 
+// M6 calibrate 1 in mode direct: a direct view frame without the world into the w x h view's texture target (the
+// frame-indexed colour of present n, corner quads, rows h..255 in a fifth colour). False: skipped (down, gate, no texture
+// target). The composite then shows it like any direct frame.
+bool view_direct_calibrate(unsigned n, int w, int h);
+
 // After C3D_Fini (release_and_fini): forgets the view target pointer (C3D_Fini destroyed it) and
 // frees the readback staging, the vertex buffer and the converted copy. Idempotent.
 void view_free();

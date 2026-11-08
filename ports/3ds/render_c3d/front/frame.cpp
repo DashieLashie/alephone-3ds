@@ -28,17 +28,23 @@
 #include "preferences.h"
 #include "scottish_textures.h"
 #include "low_level_textures.h"   // texture_random_seed()
+#include "Crosshairs.h"            // M6 overlays test key
+#include "shell.h"                 // screen_printf
 
 #include "filter.h"
 #include "c3d_rasterizer.h"
 #include "../back/context.h"
 #include "../back/draw.h"
 #include "../back/view.h"
+#include "../back/view_shared.h"
+#include "../back/overlay.h"
 #include "../core/bmp.h"
 #include "../core/calibrate.h"
 #include "../core/classify.h"
 #include "../core/config.h"
 #include "../core/diff.h"
+#include "../core/direct_state.h"
+#include "../core/overlay_bands.h"
 #include "../core/shade_lut.h"
 #include "../core/stats.h"
 
@@ -54,6 +60,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+// RenderOther/screen_shared.h (in screen.cpp's TU, not static): the overlays the M6 test key switches on.
+extern bool displaying_fps;
+extern bool ShowPosition;
 
 namespace a1_c3d {
 
@@ -518,6 +528,124 @@ struct PlayState
 	uint32_t off_gen = 0;
 	bool logged_first = false;
 } s_play;
+
+// --- M6 direct mode (design 7, M6 specification) ---
+
+// Why a frame in mode direct was not direct: the policy's blocks (kDirectBlockCount), then the front end's own.
+enum FrontReason { kReasonPlay = kDirectBlockCount, kReasonOverlay, kReasonPolicy, kReasonCount };
+const char* reason_name(int r)
+{
+	static const char* const extra[] = {"play", "overlay", "no_policy"};
+	if (r < kDirectBlockCount)
+		return direct_block_name(1u << r);
+	return extra[r - kDirectBlockCount];
+}
+
+struct DirectFront
+{
+	unsigned policy = 0;
+	bool policy_set = false;
+	bool overlay_ok = false;
+	bool this_frame = false;          // direct_frame(): this frame's world view is on the GPU
+	DirectState st;
+	const void* dest0 = nullptr;
+	int dw = 0, dh = 0;
+	unsigned frames = 0, direct = 0, readback = 0, sw = 0, cal = 0;
+	unsigned reason[kReasonCount] = {};
+	unsigned seeds = 0, syncs = 0, sync_failed = 0, discard_stale = 0, forced_sw = 0, new_dest = 0;
+	unsigned sync_skipped[static_cast<int>(SyncSkip::kCount)] = {};
+	bool seed_checked = false;
+	int last_mode = -2;               // -1 direct, else a reason; for the mode-change lines
+	unsigned mode_lines = 0, mode_changes = 0;
+	bool overlays_done = false;
+	uint64_t last_msg_ms = 0;
+} s_d;
+
+// The kind of frame play mode makes this frame, logged on a change (at most 20 lines, then counted).
+void note_mode(int mode)
+{
+	if (mode == s_d.last_mode)
+		return;
+	s_d.last_mode = mode;
+	++s_d.mode_changes;
+	if (s_d.mode_lines < 20)
+	{
+		++s_d.mode_lines;
+		printf("[c3d] direct: frame %u %s%s\n", s_frame, mode < 0 ? "direct" : "readback/sw: ", mode < 0 ? "" : reason_name(mode));
+	}
+}
+
+C3dAvail c3d_avail()
+{
+	if (!back::is_up() || back::release_pending())
+		return C3dAvail::Off;
+	if (back::gate_closed())
+		return C3dAvail::Gate;
+	return C3dAvail::Ok;
+}
+
+// Before a frame SW draws into dest in mode direct: the sync of 5.x's rules (the texture holds a newer view). Then the
+// state says SW has drawn (direct_after(Sw)).
+void direct_sw_frame(bitmap_definition* dest, ViewKind kind = ViewKind::Sw)
+{
+	const DirectPlan plan = direct_plan(s_d.st, kind, s_play.off ? C3dAvail::Off : c3d_avail());
+	if (plan.sync)
+	{
+		if (back::view_sync(reinterpret_cast<uint8_t* const*>(dest->row_addresses)).ok)
+			++s_d.syncs;
+		else
+			++s_d.sync_failed;
+	}
+	else if (plan.skip != SyncSkip::None)
+		++s_d.sync_skipped[static_cast<int>(plan.skip)];
+	direct_after(s_d.st, kind, false);
+}
+
+int direct_counts_text(char* buf, size_t size)
+{
+	int n = snprintf(buf, size,
+	                 "frames=%u direct=%u readback=%u sw=%u cal=%u seeds=%u syncs=%u sync_failed=%u "
+	                 "sync_skipped=%u/%u/%u(gate/off/discard) discard_stale=%u forced_sw=%u new_dest=%u mode_changes=%u why=",
+	                 s_d.frames, s_d.direct, s_d.readback, s_d.sw, s_d.cal, s_d.seeds, s_d.syncs, s_d.sync_failed,
+	                 s_d.sync_skipped[1], s_d.sync_skipped[2], s_d.sync_skipped[3], s_d.discard_stale, s_d.forced_sw,
+	                 s_d.new_dest, s_d.mode_changes);
+	bool any = false;
+	for (int r = 0; r < kReasonCount && n > 0 && n < static_cast<int>(size); ++r)
+		if (s_d.reason[r])
+		{
+			n += snprintf(buf + n, size - n, "%s%s:%u", any ? "," : "", reason_name(r), s_d.reason[r]);
+			any = true;
+		}
+	if (!any && n > 0 && n < static_cast<int>(size))
+		n += snprintf(buf + n, size - n, "-");
+	if (n > 0 && n < static_cast<int>(size))
+		n += snprintf(buf + n, size - n, " ");
+	if (n > 0 && n < static_cast<int>(size))
+		n += back::overlay_stats_text(buf + n, static_cast<unsigned>(size - n));
+	return n;
+}
+
+// The overlays test key (M6 specification "Test-only keys"): the engine's own switches, once; a message every 2 s.
+void overlays_tick(const Config& cfg)
+{
+	if (!cfg.overlays)
+		return;
+	if (!s_d.overlays_done)
+	{
+		s_d.overlays_done = true;
+		displaying_fps = cfg.overlays == 1;
+		ShowPosition = true;
+		Crosshairs_SetActive(true);
+		printf("[c3d] overlays %u: fps %d, position 1, crosshair 1, messages %d\n", cfg.overlays, displaying_fps ? 1 : 0,
+		       cfg.overlays == 1 ? 1 : 0);
+	}
+	const uint64_t now = machine_tick_count();
+	if (cfg.overlays == 1 && now - s_d.last_msg_ms >= 2000)
+	{
+		s_d.last_msg_ms = now;
+		screen_printf("c3d overlay test");
+	}
+}
 C3dRasterizer s_play_rast;   // its own counters: the DIFF summary's stay the diff checks'
 std::vector<uint8_t> s_play_mask;   // M5: the play check's exclusion (SW's static coverage)
 
@@ -559,8 +687,8 @@ int play_counts_text(char* buf, size_t size)
 	                p.copied, p.empty_frames, p.static_frames, p.static_checks, p.static_px);
 }
 
-// Design 7, M4 "Play mode". True: the frame is in dest (C3D or the SW replay). False: the caller draws it in SW
-// (no recording was made).
+// Design 7, M4 "Play mode". True: the frame is in dest (C3D or the SW replay) or, M6, on the GPU (direct_frame()).
+// False: the caller draws it in SW (no recording was made).
 bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition* dest, RasterizerClass* sw)
 {
 	PlayState& P = s_play;
@@ -568,8 +696,35 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	if (!P.logged_first)
 	{
 		P.logged_first = true;
-		printf("[c3d] renderer c3d: play frames drawn by citro3d (readback mode, M5)\n");
+		printf("[c3d] renderer c3d: play frames drawn by citro3d (%s mode, M6)\n",
+		       cfg.mode == Mode::Direct ? "direct" : "readback");
 	}
+	const int w = dest->width, h = dest->height;
+	// M6: mode direct with its texture target. The view state follows dest: a new dest holds zeros, not the last view.
+	const bool dmode = cfg.mode == Mode::Direct && back::view_direct_ok();
+	if (dmode)
+	{
+		++s_d.frames;
+		if (dest->row_addresses[0] != s_d.dest0 || w != s_d.dw || h != s_d.dh)
+		{
+			s_d.dest0 = dest->row_addresses[0];
+			s_d.dw = w;
+			s_d.dh = h;
+			direct_forget_texture(s_d.st);
+			s_d.st.dest_view = true;
+			++s_d.new_dest;
+		}
+	}
+	// A frame SW draws into dest (return false: the caller draws it): in mode direct the sync first and the state after.
+	auto sw_frame = [&](int reason) {
+		if (dmode)
+		{
+			direct_sw_frame(dest);
+			++s_d.sw;
+			++s_d.reason[reason];
+			note_mode(reason);
+		}
+	};
 	if (P.off)
 	{
 		// collections_changed() (hook 2a: every level load) bumps the texture cache's generation.
@@ -577,6 +732,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		{
 			++P.off_frames;
 			++P.sw;
+			sw_frame(kReasonPlay);
 			return false;
 		}
 		P.off = false;
@@ -586,7 +742,6 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		fflush(stdout);
 	}
 	// (0) the cheap refusals: SW draws the frame directly.
-	const int w = dest->width, h = dest->height;
 	back::SkipReason why = back::SkipReason::Down;
 	int skip = -1;
 	if (!cfg.textures || !cfg.lit)
@@ -595,12 +750,31 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		skip = static_cast<int>(back::SkipReason::Pref);
 	else if (!back::view_play_ready(w, h, &why))
 		skip = static_cast<int>(why);
-	if (skip >= 0)
+	const bool forced_sw = dmode && cfg.sw_every && P.frames % cfg.sw_every == 0;
+	if (skip >= 0 || forced_sw)
 	{
-		++P.skip[skip];
+		if (skip >= 0)
+			++P.skip[skip];
+		else
+			++s_d.forced_sw;
 		++P.sw;
+		sw_frame(kReasonPlay);
 		return false;
 	}
+
+	// M6: direct when the engine's policy allows it (hook 3a) and the overlay surface exists; else readback.
+	int not_direct = -1;
+	if (dmode)
+	{
+		if (!s_d.policy_set)
+			not_direct = kReasonPolicy;
+		else if (s_d.policy)
+			not_direct = direct_block_index(s_d.policy);
+		else if (!s_d.overlay_ok)
+			not_direct = kReasonOverlay;
+	}
+	const bool direct = dmode && not_direct < 0;
+	const ViewKind kind = direct ? ViewKind::Direct : ViewKind::Readback;
 
 	Rasterizer_SW_Class* swr = static_cast<Rasterizer_SW_Class*>(sw);
 	const uint16 s0 = texture_random_seed();
@@ -610,10 +784,28 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		s_recorder.replay(sw);
 		++P.sw;
 	};
+	// A frame whose C3D side failed after the recording, redrawn by SW into dest: in mode direct dest was stale where the
+	// last frame was direct (counted: only uncovered pixels can differ), and the texture holds a partial frame.
+	auto discarded_replay = [&](bool c3d_drew) {
+		if (dmode)
+		{
+			if (!s_d.st.dest_view)
+				++s_d.discard_stale;
+			if (c3d_drew)
+				direct_after(s_d.st, kind, true);
+			else
+				direct_sw_frame(dest);
+			++s_d.sw;
+			++s_d.reason[kReasonPlay];
+			note_mode(kReasonPlay);
+		}
+		sw_replay();
+	};
 	back::ViewBegin vb{back::ViewBegin::Kind::Skipped, back::SkipReason::Down, back::DiscardReason::Unsupported};
 	back::ViewEnd ve{false, back::DiscardReason::Begin};
 	unsigned sentinel = 0, copied = 0, play_statics = 0;
-	const bool check = cfg.play_check && (P.c3d + 1) % cfg.play_check == 0;
+	const bool check = cfg.play_check && kind == ViewKind::Readback && (P.c3d + 1) % cfg.play_check == 0;
+	bool seeded = false;
 	{
 #ifdef A1_PROFILE
 		A1_PROF_SCOPE(C3dDraw);
@@ -625,6 +817,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		if (s_recorder.overflowed())
 		{
 			++P.overflow;
+			if (dmode)
+				sw_frame(kReasonPlay);
 			texture_random_seed() = s0;
 			swr->screen = dest;
 			draw(ctx, sw);
@@ -638,6 +832,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		if (scan.reason != ScanReason::None)
 		{
 			++P.scan[static_cast<int>(scan.reason)];
+			if (dmode)
+				sw_frame(kReasonPlay);
 			sw_replay();
 			return true;
 		}
@@ -649,33 +845,65 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			for (int y = 0; y < h; ++y)
 				memcpy(&s_a.pixels[static_cast<size_t>(y) * w], dest->row_addresses[y], static_cast<size_t>(w) * 4);
 		}
-		// (3) the C3D frame, read back into dest.
-		vb = back::view_begin(w, h, 0);
-		if (vb.kind == back::ViewBegin::Kind::Ok)
+		// (3) the C3D frame: M5's readback (cleared, covered pixels copied); M6's direct (no clear, no readback) or mode
+		// direct's readback (no clear, every pixel copied), each seeded first when the texture lost the view.
+		back::ViewOptions opt;
+		if (dmode)
 		{
-			s_play_rast.set_target(w, h);
-			s_play_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit, cfg.rect_bias);
-			s_recorder.replay(&s_play_rast);
-			ve = back::view_end_play(reinterpret_cast<uint8_t* const*>(dest->row_addresses), &sentinel, &copied);
+			const DirectPlan plan = direct_plan(s_d.st, kind, C3dAvail::Ok);
+			opt.clear = false;
+			if (plan.seed)
+			{
+				opt.seed_rows = reinterpret_cast<const uint8_t* const*>(dest->row_addresses);
+				seeded = true;
+			}
+			opt.sentinel = !direct && !plan.seed;
+		}
+		if (direct && cfg.calibrate)
+		{
+			// The frame-indexed test (M6 specification "Calibration"): no world, the present that will show it.
+			if (back::view_direct_calibrate(back::present_counter() + 1, w, h))
+			{
+				++s_d.cal;
+				vb.kind = back::ViewBegin::Kind::Ok;
+				ve.ok = true;
+			}
+		}
+		else
+		{
+			vb = back::view_begin(w, h, 0, opt);
+			if (vb.kind == back::ViewBegin::Kind::Ok)
+			{
+				s_play_rast.set_target(w, h);
+				s_play_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit, cfg.rect_bias);
+				s_recorder.replay(&s_play_rast);
+				uint8_t* const* rows = reinterpret_cast<uint8_t* const*>(dest->row_addresses);
+				if (direct)
+					ve = back::view_end_direct();
+				else if (dmode)
+					ve = back::view_end_play_full(rows, &sentinel, &copied);
+				else
+					ve = back::view_end_play(rows, &sentinel, &copied);
+			}
 		}
 	}
 	if (vb.kind == back::ViewBegin::Kind::Skipped)
 	{
 		++P.skip[static_cast<int>(vb.skip)];
-		sw_replay();
+		discarded_replay(false);
 		return true;
 	}
 	if (vb.kind == back::ViewBegin::Kind::Discarded)
 	{
 		play_discard(vb.discard);
-		sw_replay();
+		discarded_replay(true);
 		return true;
 	}
 	if (!ve.ok)
 	{
 		// (4) a discard: nothing was copied into dest.
 		play_discard(ve.discard);
-		sw_replay();
+		discarded_replay(true);
 		return true;
 	}
 	++P.c3d;
@@ -683,7 +911,44 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	P.run = 0;
 	P.sentinel += sentinel;
 	P.copied += copied;
-	P.empty_frames += copied == 0;
+	P.empty_frames += copied == 0 && !direct;
+	if (dmode)
+	{
+		s_d.seeds += seeded;
+		direct_after(s_d.st, kind, false);
+		if (direct)
+		{
+			++s_d.direct;
+			s_d.this_frame = true;
+			note_mode(-1);
+		}
+		else
+		{
+			++s_d.readback;
+			++s_d.reason[not_direct];
+			note_mode(not_direct);
+		}
+		if (seeded && cfg.seed_check && !s_d.seed_checked)
+		{
+			// The seed's orientation against the readback's (M6 specification): dest seeded and read straight back.
+			// Before the composite reads the texture: the check's frame re-seeds it from the same dest, then the view
+			// is drawn again by the next frame; this frame's direct picture is the check's (dest + nothing drawn).
+			s_d.seed_checked = true;
+			unsigned differ = 0;
+			if (back::view_seed_check(reinterpret_cast<const uint8_t* const*>(dest->row_addresses), &differ))
+				printf("[c3d] seed_check: %u of %d pixels differ after seed + readback\n", differ, w * h);
+			else
+				printf("[c3d] seed_check: not run\n");
+			direct_forget_texture(s_d.st);   // the texture now holds dest, not this frame's view
+			s_d.this_frame = false;           // so this frame goes the readback way: dest must hold it
+			if (direct)
+			{
+				// The world is in the texture no more: redraw it in SW into dest (the view this frame shows).
+				sw_replay();
+				direct_after(s_d.st, ViewKind::Sw, false);
+			}
+		}
+	}
 	if (check)
 	{
 		// SW's replay over the same previous frame, against what the play path left in dest.
@@ -781,6 +1046,12 @@ void stats_tick()
 		play_counts_text(buf, sizeof buf);
 		printf("[c3d] play %s\n", buf);
 	}
+	if (s_d.frames)
+	{
+		char buf[768];
+		direct_counts_text(buf, sizeof buf);
+		printf("[c3d] direct %s\n", buf);
+	}
 	fflush(stdout);
 }
 
@@ -817,12 +1088,23 @@ bool render_frame(view_data& view, bitmap_definition* dest, RasterizerClass* sw,
 	++s_frame;
 	stats_tick();
 
+	overlays_tick(cfg);
+	const bool dmode = cfg.renderer_c3d && cfg.mode == Mode::Direct && back::view_direct_ok();
 	if (cfg.readback_cal)
+	{
+		const unsigned before = s_cal_done + s_cal_skipped;
 		run_calibration(cfg, dest->width, dest->height);
+		if (dmode && s_cal_done + s_cal_skipped != before)
+			direct_forget_texture(s_d.st);   // a calibration frame ran: it cleared the texture target
+	}
 
 	if (cfg.diff && s_frame % cfg.diff == 0 &&
 	    (cfg.diff_frames == 0 || s_diff_done + s_diff_dropped < cfg.diff_frames))
+	{
+		if (dmode)
+			direct_sw_frame(dest, ViewKind::Clearing);   // the real frame is SW's replay into dest; the target is cleared
 		return run_diff_frame(cfg, draw, ctx, dest, sw);
+	}
 
 	if (cfg.renderer_c3d)
 	{
@@ -831,13 +1113,12 @@ bool render_frame(view_data& view, bitmap_definition* dest, RasterizerClass* sw,
 			run_null(draw, ctx);
 			return false;
 		}
-		if (cfg.mode == Mode::Readback && cfg.play)
+		if ((cfg.mode == Mode::Readback || cfg.mode == Mode::Direct) && cfg.play)
 			return run_play_frame(cfg, draw, ctx, dest, sw);
 		if (!s_logged_mode)
 		{
 			s_logged_mode = true;
-			printf("[c3d] renderer c3d: play frames are software (%s)\n",
-			       cfg.mode == Mode::Direct ? "mode direct: M6" : "play 0");
+			printf("[c3d] renderer c3d: play frames are software (play 0)\n");
 		}
 	}
 	return false;
@@ -864,8 +1145,61 @@ void frame_final_stats()
 	}
 	if ((s_diff_done || s_diff_dropped || s_diff_checks) && !s_diff_summary_printed)
 		diff_summary();
+	static bool direct_final = false;
+	if (s_d.frames && !direct_final)
+	{
+		direct_final = true;
+		char buf[768];
+		direct_counts_text(buf, sizeof buf);
+		printf("[c3d] direct final %s bottom_pending=%u\n", buf, overlay_bottom_pending());
+		fflush(stdout);
+	}
 }
 
 } // namespace back
+
+// --- M6 hook 3 (include/a1_c3d.h) ---
+
+void direct_policy(unsigned blocks)
+{
+	s_d.policy = blocks;
+	s_d.policy_set = true;
+	s_d.this_frame = false;
+	back::overlay_drop();   // a hand-out the last present did not consume (the gate skipped it)
+	const Config& cfg = back::config();
+	// The overlay surface must exist before a frame is decided direct (critic, M6 round 1 minor 5).
+	s_d.overlay_ok = !blocks && cfg.renderer_c3d && cfg.mode == Mode::Direct && back::is_up() && back::overlay_ensure();
+}
+
+bool direct_frame()
+{
+	return s_d.this_frame;
+}
+
+SDL_Surface* overlay_begin(int n, const OverlayBand* bands)
+{
+	if (!s_d.this_frame)
+		return nullptr;
+	Band in[kMaxBands * 2];
+	int k = 0;
+	for (int i = 0; i < n && k < kMaxBands * 2; ++i)
+		in[k++] = Band{bands[i].y0, bands[i].y1};
+	const int cal_row = back::config().calibrate ? 8 * static_cast<int>((back::present_counter() + 1) % 30) : -1;
+	SDL_Surface* surf;
+	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dOverlay);
+#endif
+		surf = back::overlay_begin(in, k, cal_row);
+	}
+	if (!surf)
+		s_d.this_frame = false;   // cannot happen (overlay_ok): the frame is then blitted from dest
+	return surf;
+}
+
+const SDL_Surface* overlay_target()
+{
+	return back::overlay_surface_now();
+}
 
 } // namespace a1_c3d

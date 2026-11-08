@@ -53,7 +53,17 @@ struct ViewBegin
 // (retired frees, VRAM promotions), the clear (before the first draw), C3D_FrameDrawOn, the state save, the
 // world program, attributes, buffers and GPU state; TEV stage 0 = texture 0 with `textures 1`, else the
 // vertex colour. The target is cleared to `clear_rgba` (0xRRGGBBAA; M4: the tinted check's grey, 8.1).
-ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0);
+// M6 (design 7, M6 specification "No clear in direct mode"): `clear` false = the target keeps what it holds (mode direct's
+// texture target); `seed_rows` (dest's row addresses, w x h ARGB) = the target is first seeded from them (the frame's
+// first GX operation); `sentinel` false = no sentinel fill of the staging (a direct frame reads nothing back; a seeded one
+// holds the seed there).
+struct ViewOptions
+{
+	bool clear = true;
+	const uint8_t* const* seed_rows = nullptr;
+	bool sentinel = true;
+};
+ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0, const ViewOptions& opt = ViewOptions());
 // The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
 ViewBegin view_skip(SkipReason reason);
 // M4 play frames (design 7, M4 specification "Play mode" (0)): view_begin's cheap refusals, tested before the
@@ -97,6 +107,17 @@ ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count);
 // pixel no primitive wrote keeps what dest held (SW never clears world_pixels), a sentinel pixel is counted
 // (*sentinel_count) and not copied; *copied = the pixels written.
 ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied);
+// M6: as view_end_play, but every pixel is copied (a texture target in mode direct holds the whole view, 5.2's form).
+ViewEnd view_end_play_full(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied);
+// M6 direct frames: the pending draw, the restore, the ranged flushes, C3D_FrameEnd: no readback, no retirement wait
+// (the composite frame's frame_begin waits for it). A discarded frame ends the same way and returns !ok.
+ViewEnd view_end_direct();
+// M6 sync (M6 specification): the texture target read back into `rows` (every pixel) without drawing: its own C3D frame,
+// the readback and the retirement pair. !ok: not done (citro3d down, the gate, no texture target, or the GX budget).
+ViewEnd view_sync(uint8_t* const* rows);
+// M6 seed_check: `rows` seeded into the texture target and read straight back; *differ = pixels whose RGB differs.
+// False: not done.
+bool view_seed_check(const uint8_t* const* rows, unsigned* differ);
 
 // After C3D_Fini (release_and_fini): frees the world program and the rings. Idempotent.
 void draw_free();

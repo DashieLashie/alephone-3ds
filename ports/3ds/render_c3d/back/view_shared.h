@@ -32,6 +32,26 @@ bool view_ensure(int w, int h);
 bool view_size_failed(int w, int h);
 // The target of the last successful view_ensure(); owned by citro3d's context.
 C3D_RenderTarget* view_target();
+// M6 (design 7, M6 specification "The view target in mode direct"): in mode direct a view of at most 512x256 is drawn
+// into a target on a 512x256 VRAM texture (g3a: 1024x512), read back through a 512x256 staging. True when the current
+// target is such a texture target; view_texture() is its texture (nullptr otherwise).
+bool view_is_texture();
+C3D_Tex* view_texture();
+// False once a texture target could not be made (logged once): direct frames are off for the run.
+bool view_direct_ok();
+// The projection's extent in pixels: the whole target for a texture target (512x256; g3a draws at 2x into its
+// 1024x512), else the view's size.
+int view_proj_width();
+int view_proj_height();
+// M6 seed: dest's rows (w x h ARGB, SW's form) into the staging as RGBA8 words and flushed (out of frame), then, inside
+// the frame as its first GX operation, transferred into the texture target's colour buffer (gx_op; false: refused).
+void view_seed_fill(const uint8_t* const* rows);
+bool view_seed_transfer();
+// M6 direct_check: the texture target's readback transfer queued inside the current frame behind its draws (gx_split +
+// gx_op; false: refused), and, after a frame_begin has confirmed it, the conversion of the view (w x h ARGB, alpha forced,
+// pitch w; valid until the next readback).
+bool view_queue_readback();
+const uint32_t* view_convert_readback();
 // Fills the staging of the current size with `rgba` (0xRRGGBBAA) and flushes it (out of frame, before
 // frame_begin()), so a pixel the transfer never wrote is recognisable and no dirty cache line is
 // written back over the GPU's output.

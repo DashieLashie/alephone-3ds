@@ -1057,6 +1057,43 @@ argument of `vassert` in `get_collection_headers` (`shapes.cpp`, 2314 → 2323: 
 it), no instruction changed; `nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds
 (`build-3ds-c3d`, `build-3ds-c3d-prof` included).
 
+## Stage 10 M6: direct mode, hook 3 (47)
+
+Added 2026-11-07 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M6 specification", "Hook 3"). Every edit is
+fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)` (one inner `#ifdef A1_RENDER_C3D` inside an existing
+`#ifdef A1_PLATFORM_3DS`), like 45.
+
+47. **`RenderOther/screen.cpp` and `RenderOther/screen_shared.h`: a direct frame's overlays go to the back end's overlay
+    surface and the world-view blit is skipped.**
+    - `screen.cpp`:1503-1587, two static helpers, placed **after the file's last `__LINE__` user** (`logWarning` in
+      `change_screen_mode`, :1208) so the OFF build's line constants do not move: `#include "a1_c3d.h"`;
+      `a1_c3d_direct_blocks()` returns the bit mask of the eligibility conditions that fail (not native, view rect /
+      interlace / low resolution, acceleration, overhead map, terminal, `!using_default_gamma`, darken, network, Lua HUD,
+      movie recording; 0 = the frame may stay on the GPU); `a1_c3d_overlay_bands()` returns up to 3 conservative row bands
+      the overlays may write (crosshair from `GetCrosshairData()`, the top text block from `ShowPosition`, the script HUD
+      line and the unexpired `Messages`, the bottom block from FPS / the input line).
+    - **3a** (:1784-1787), just before `render_view`: `a1_c3d::direct_policy(a1_c3d_direct_blocks(...))`.
+    - **3b** (:1825-1847, :1904-1907): after `render_view`, `a1_ov = a1_c3d::overlay_begin(bands)` when
+      `a1_c3d::direct_frame()`; the crosshair renders into `a1_ov ? a1_ov : world_pixels`, `disp_pixels` starts as
+      `a1_ov ? a1_ov : world_pixels`, and the world-view `update_screen()` condition gets `&& !a1_ov`.
+    - **3c** (:1957-1968, :1979-1981): when `a1_ov`, `a1_3ds::bottom_frame(...)` runs right after the darken test and
+      before `MainScreenUpdateRect(s)` (the present), and the later call is skipped (`if (!a1_ov)`), so the bottom
+      screen's CPU work overlaps the GPU's view frame.
+    - `screen_shared.h`:496-498 `#include "a1_c3d.h"`; `DisplayText` (:512-520) and `DisplayTextCursor` (:551-560) map
+      their colours with the destination's format when the destination is `a1_c3d::overlay_target()` (the RGBA8888
+      overlay surface: with `world_pixels->format` a bitmap font and the cursor would get alpha 0), else with
+      `world_pixels->format` as before.
+    Port side (no engine edit): `include/a1_c3d.h` declares `DirectBlock`, `direct_policy`, `direct_frame`,
+    `OverlayBand`, `overlay_begin`, `overlay_target`; `front/frame.cpp` and `back/overlay.cpp` define them.
+
+**Non-3DS check:** pending (Docker down on 2026-11-07; run `ppcheck.sh "Source_Files/RenderOther/screen.cpp
+Source_Files/RenderOther/screen_shared.h" "Source_Files/RenderOther/screen.cpp"` before the M6 commit).
+
+**3DS builds** (2026-11-07): `build-3ds` and `build-3ds-prof`: `objdump -d alephone.elf | tail -n +3` **identical** to the
+copies saved at the start of M6 (`build/m6/start/`, after the `stage10-bb` merge); a first placement of the helpers before
+`change_screen_mode` moved 7 `logWarning` line constants (and one literal-pool word), hence the placement above;
+`nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds.
+
 ## Stage 10 B: the zero-copy present (55)
 
 Added 2026-10-26 on branch `stage10-bb`, merged into `stage10-c3d` 2026-11-07 before M6 (user decision) (stage 10 plan B-b, `CITRO3D_DESIGN.md` 5.7.2; built on the

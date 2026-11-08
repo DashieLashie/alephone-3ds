@@ -14,6 +14,7 @@
 	(at your option) any later version.
 */
 #include "context.h"
+#include "overlay.h"
 
 #include "../core/gate.h"
 #include "../core/gx_queue.h"
@@ -95,8 +96,8 @@ unsigned s_cb_views_logged = 0;   // s_cb.frames[1] at the previous "[c3d] cmdbu
 
 unsigned s_presents = 0, s_odd = 0, s_false_returns = 0, s_releases = 0, s_gfx_exits = 0;
 unsigned s_stats_presents = 0;   // presents at the previous stats line
-double s_gpu_ms[2] = {0, 0};     // C3D_GetDrawingTime() sums since the previous stats line, by GpuTime
-unsigned s_gpu_n[2] = {0, 0};
+double s_gpu_ms[3] = {0, 0, 0};  // C3D_GetDrawingTime() sums since the previous stats line, by GpuTime
+unsigned s_gpu_n[3] = {0, 0, 0};
 uint64_t s_stats_tick = 0;
 
 constexpr uint64_t kTicksPerSecond = SYSCLOCK_ARM11;
@@ -119,7 +120,7 @@ void load_config()
 	       "two_frame %d, zero_copy %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
 	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
 	       "ring_indices %u, reserve_extra %u, textures %d, uv_half %d, diff_tol %u, vram_cap %u, "
-	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, film \"%s\"\n",
+	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, overlays %u, direct_check %u, overlay_audit %u, seed_check %d, band_from_end %d, view_v_flip %d, g3a %d, sw_every %u, film \"%s\"\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
 	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.zero_copy, s_cfg.renderer_c3d ? "c3d" : "sw",
@@ -128,7 +129,7 @@ void load_config()
 	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
 	       s_cfg.ring_vertices, s_cfg.ring_indices, s_cfg.reserve_extra, s_cfg.textures, s_cfg.uv_half,
 	       s_cfg.diff_tol, s_cfg.vram_cap, s_cfg.linear_cap, s_cfg.promote_max, s_cfg.lit, s_cfg.alpha_x2, s_cfg.play,
-	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.film.c_str());
+	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.overlays, s_cfg.direct_check, s_cfg.overlay_audit, s_cfg.seed_check, s_cfg.band_from_end, s_cfg.view_v_flip, s_cfg.g3a, s_cfg.sw_every, s_cfg.film.c_str());
 	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
 	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
 	// own atexit handlers, so it runs before close_outputs flushes the log.
@@ -324,6 +325,7 @@ void release_and_fini()
 	C3D_Fini();
 	present_free();
 	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
+	overlay_free();   // M6: the overlay texture, surface and buffer (overlay_target() is nullptr from now on)
 	texcache_log("final");
 	texcache_release_all();   // every texture slot and its C3D_Tex (C3D_TexDelete only frees memory)
 	shade_free();   // the shade LUT (unit 1 keeps it until C3D_Fini, M3)
@@ -648,7 +650,9 @@ void sample_drawing_time(GpuTime which)
 		s_view_frame_ran = false;
 		return;
 	}
-	const int i = which == GpuTime::Upload ? 1 : 0;
+	if (which == GpuTime::View)
+		s_view_frame_ran = false;   // this sample is the view frame's, on purpose
+	const int i = which == GpuTime::Upload ? 1 : which == GpuTime::View ? 2 : 0;
 	s_gpu_ms[i] += static_cast<double>(C3D_GetDrawingTime());
 	++s_gpu_n[i];
 }
@@ -665,10 +669,12 @@ void stats_tick()
 	// (two_frame 1 or zero-copy): `draw` = frame D (draw + framebuffer transfer), `upload` = frame U
 	// (printed when the period had such samples). One-frame presents: `draw` = the whole present
 	// (upload + draw + transfer), so across the modes compare it with draw + upload.
-	char gpu[64];
+	char gpu[96];
 	int n = snprintf(gpu, sizeof gpu, " gpu_ms draw=%.2f", s_gpu_n[0] ? s_gpu_ms[0] / s_gpu_n[0] : 0.0);
 	if (s_gpu_n[1] > 0)
-		snprintf(gpu + n, sizeof gpu - n, " upload=%.2f", s_gpu_n[1] ? s_gpu_ms[1] / s_gpu_n[1] : 0.0);
+		n += snprintf(gpu + n, sizeof gpu - n, " upload=%.2f", s_gpu_n[1] ? s_gpu_ms[1] / s_gpu_n[1] : 0.0);
+	if (s_gpu_n[2] > 0)
+		snprintf(gpu + n, sizeof gpu - n, " view=%.2f", s_gpu_ms[2] / s_gpu_n[2]);
 	printf("[c3d] stats presents=%u (+%u) odd_surface=%u gx_high_water=%d gx_refused=%u "
 	       "cmdbuf_usage=%.4f present_screen_false_returns=%u gate_skipped=%u%s\n",
 	       s_presents, s_presents - s_stats_presents, s_odd, s_gx.high_water(), s_gx.refused(),
@@ -680,8 +686,8 @@ void stats_tick()
 		cmdbuf_log("stats");
 		texcache_log("stats");
 	}
-	s_gpu_ms[0] = s_gpu_ms[1] = 0;
-	s_gpu_n[0] = s_gpu_n[1] = 0;
+	s_gpu_ms[0] = s_gpu_ms[1] = s_gpu_ms[2] = 0;
+	s_gpu_n[0] = s_gpu_n[1] = s_gpu_n[2] = 0;
 }
 
 } // namespace back

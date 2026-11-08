@@ -38,6 +38,7 @@ staging, readback and conversion are the shared functions of view_shared.h, used
 #include "context.h"
 #include "view_shared.h"
 #include "../core/calibrate.h"
+#include "../core/config.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -72,9 +73,28 @@ constexpr u32 kReadbackFlags =
 	GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
 	GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
+// g3a 1 (test only, M6 specification "G3-a"): the 1024x512 target is read back halved (2x2 box), 1024x512 -> 512x256.
+constexpr u32 kReadbackHalfFlags =
+	GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+	GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+	GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY);
+// M6 seed: the readback's inverse (linear -> tiled into the colour buffer, no flip). UNVERIFIED until seed_check passes.
+constexpr u32 kSeedFlags =
+	GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
+	GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+	GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+
 C3D_RenderTarget* s_target = nullptr;   // owned by citro3d's context: C3D_Fini destroys it
-int s_w = 0, s_h = 0;                   // the target's size
-u32* s_staging = nullptr;               // linear, w*h*4 bytes
+int s_w = 0, s_h = 0;                   // the view's size
+// M6 (design 7, M6 specification "The view target in mode direct"): in mode direct a view that fits 512x256 is drawn
+// into a target on a VRAM texture (the composite samples it). The target is then tw x th (512x256; g3a: 1024x512)
+// and the readback staging sw x sh (512x256: g3a's readback halves). Else tw = sw = w, th = sh = h, as since M0.
+C3D_Tex s_vtex;
+bool s_vtex_ready = false;
+bool s_is_tex = false;
+int s_tw = 0, s_th = 0, s_sw = 0, s_sh = 0;
+bool s_tex_failed = false;              // a texture target could not be made: logged once, not retried
+u32* s_staging = nullptr;               // linear, sw*sh*4 bytes
 uint32_t* s_argb = nullptr;             // malloc, w*h: the converted readback handed to the caller
 CalVertex* s_vbo = nullptr;             // linear, kQuads*4 vertices
 int s_uloc_projection = -1;             // the present shader's "projection" uniform
@@ -100,6 +120,18 @@ C3D_Mtx s_proj;
 inline u32 tev_constant(uint32_t argb)
 {
 	return ((argb >> 24) << 24) | ((argb & 0xFF) << 16) | (((argb >> 8) & 0xFF) << 8) | ((argb >> 16) & 0xFF);
+}
+
+// Deletes the target (out of frame: C3D_RenderTargetDelete panics inside one) and, for a texture target, its texture.
+void delete_target()
+{
+	if (s_target)
+		C3D_RenderTargetDelete(s_target);   // renderqueue.h:63; never linked, so no output to detach
+	s_target = nullptr;
+	if (s_vtex_ready)
+		C3D_TexDelete(&s_vtex);
+	s_vtex_ready = false;
+	s_is_tex = false;
 }
 
 void release_buffers()
@@ -184,27 +216,52 @@ bool view_ensure(int w, int h)
 {
 	if (w == s_fail_w && h == s_fail_h)
 		return false;
-	if (s_target && s_w == w && s_h == h)
+	// M6: in mode direct every view that fits 512x256 (HUD + Map's 400x240) goes to the texture target; any other size,
+	// and mode readback, to M0's unlinked target. g3a: a 1024x512 texture (G3-a's budget probe).
+	const bool want_tex = config().mode == Mode::Direct && !s_tex_failed && w <= 512 && h <= 256;
+	const bool g3a = want_tex && config().g3a;
+	if (s_target && s_w == w && s_h == h && s_is_tex == want_tex)
 		return true;
 	if (s_target)
 	{
-		C3D_RenderTargetDelete(s_target);   // renderqueue.h:63; unlinked, so no output to detach
-		s_target = nullptr;
+		delete_target();
 		release_buffers();
 		printf("[c3d] view: %dx%d target deleted (the next size is %dx%d)\n", s_w, s_h, w, h);
 	}
+	const int tw = want_tex ? (g3a ? 1024 : 512) : w, th = want_tex ? (g3a ? 512 : 256) : h;
+	const int sw = want_tex ? 512 : w, sh = want_tex ? 256 : h;
+	if (want_tex)
+	{
+		s_vtex_ready = C3D_TexInitVRAM(&s_vtex, tw, th, GPU_RGBA8);   // texture.h; render targets live in VRAM
+		if (s_vtex_ready)
+		{
+			C3D_TexSetFilter(&s_vtex, GPU_NEAREST, GPU_NEAREST);
+			C3D_TexSetWrap(&s_vtex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+			s_target = C3D_RenderTargetCreateFromTex(&s_vtex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(-1));   // renderqueue.h:63
+		}
+		if (!s_target)
+		{
+			// Direct mode needs it; readback frames work on M0's target (logged once; the front end sees view_direct_ok()).
+			printf("[c3d] view: no %dx%d texture target (texture %d): direct frames off, readback on the unlinked target\n",
+			       tw, th, s_vtex_ready ? 1 : 0);
+			delete_target();
+			s_tex_failed = true;
+			return view_ensure(w, h);
+		}
+		s_is_tex = true;
+	}
+	else
+		// renderqueue.h:62; C3D_DEPTHTYPE(-1) = no depth buffer, as present.cpp. Never SetOutput.
+		s_target = C3D_RenderTargetCreate(w, h, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
+	const size_t staging_bytes = static_cast<size_t>(sw) * sh * sizeof(u32);
 	const size_t bytes = static_cast<size_t>(w) * h * sizeof(u32);
-	// renderqueue.h:62; C3D_DEPTHTYPE(-1) = no depth buffer, as present.cpp. Never SetOutput.
-	s_target = C3D_RenderTargetCreate(w, h, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
-	s_staging = static_cast<u32*>(linearAlloc(bytes));
+	s_staging = static_cast<u32*>(linearAlloc(staging_bytes));
 	s_argb = static_cast<uint32_t*>(malloc(bytes));
 	if (!s_vbo)
 		s_vbo = static_cast<CalVertex*>(linearAlloc(kQuads * 4 * sizeof(CalVertex)));
 	if (!s_target || !s_staging || !s_argb || !s_vbo)
 	{
-		if (s_target)
-			C3D_RenderTargetDelete(s_target);   // out of frame here too
-		s_target = nullptr;
+		delete_target();   // out of frame here too
 		release_buffers();
 		s_fail_w = w;
 		s_fail_h = h;
@@ -212,22 +269,80 @@ bool view_ensure(int w, int h)
 		{
 			s_logged_nomem = true;
 			printf("[c3d] view: no memory for the %dx%d target and readback (%lu KiB linear, %lu KiB malloc): "
-			       "view frames skipped\n", w, h, static_cast<unsigned long>(bytes / 1024),
+			       "view frames skipped\n", w, h, static_cast<unsigned long>(staging_bytes / 1024),
 			       static_cast<unsigned long>(bytes / 1024));
 		}
 		return false;
 	}
 	s_w = w;
 	s_h = h;
+	s_tw = tw;
+	s_th = th;
+	s_sw = sw;
+	s_sh = sh;
 	if (!s_uloc_known)
 	{
 		s_uloc_projection = find_projection_location();
 		s_uloc_known = true;
 	}
-	printf("[c3d] view: %dx%d unlinked RGBA8 target, readback staging %lu KiB, projection uniform %d\n", w, h,
-	       static_cast<unsigned long>(bytes / 1024), s_uloc_projection);
+	if (s_is_tex)
+		printf("[c3d] view: %dx%d view on a %dx%d VRAM texture target, readback staging %dx%d (%lu KiB), projection "
+		       "uniform %d\n", w, h, tw, th, sw, sh, static_cast<unsigned long>(staging_bytes / 1024), s_uloc_projection);
+	else
+		printf("[c3d] view: %dx%d unlinked RGBA8 target, readback staging %lu KiB, projection uniform %d\n", w, h,
+		       static_cast<unsigned long>(staging_bytes / 1024), s_uloc_projection);
 	fflush(stdout);
 	return true;
+}
+
+bool view_is_texture()
+{
+	return s_target && s_is_tex;
+}
+
+C3D_Tex* view_texture()
+{
+	return s_target && s_is_tex ? &s_vtex : nullptr;
+}
+
+bool view_direct_ok()
+{
+	return !s_tex_failed;
+}
+
+int view_proj_width()
+{
+	return s_is_tex ? 512 : s_w;
+}
+
+int view_proj_height()
+{
+	return s_is_tex ? 256 : s_h;
+}
+
+void view_seed_fill(const uint8_t* const* rows)
+{
+	// dest's ARGB (SW's form, alpha 0xFF) -> the RGBA8 word, into the staging's top-left w x h, flushed (out of frame).
+	for (int y = 0; y < s_h; ++y)
+	{
+		const uint32_t* in = reinterpret_cast<const uint32_t*>(rows[y]);
+		u32* out = s_staging + static_cast<size_t>(y) * s_sw;
+		for (int x = 0; x < s_w; ++x)
+			out[x] = (in[x] << 8) | 0xFFu;
+	}
+	GSPGPU_FlushDataCache(s_staging, static_cast<u32>(static_cast<size_t>(s_sw) * s_sh * sizeof(u32)));
+}
+
+bool view_seed_transfer()
+{
+	// The frame's first GX operation (an empty command buffer: 1 entry, 2.4). g3a's 2x target cannot be seeded by a
+	// transfer (they only shrink): it is cleared instead (test-only deviation, M6 specification "G3-a").
+	if (s_tw != s_sw || s_th != s_sh)
+		return gx_op([&] { C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0x000000FFu, 0); });
+	return gx_op([&] {
+		C3D_SyncDisplayTransfer(s_staging, GX_BUFFER_DIM(s_sw, s_sh), static_cast<u32*>(s_target->frameBuf.colorBuf),
+		                        GX_BUFFER_DIM(s_tw, s_th), kSeedFlags);
+	});
 }
 
 C3D_RenderTarget* view_target()
@@ -252,7 +367,7 @@ const uint32_t* view_argb()
 
 void view_fill_staging(uint32_t rgba)
 {
-	const size_t n = static_cast<size_t>(s_w) * s_h;
+	const size_t n = static_cast<size_t>(s_sw) * s_sh;
 	for (size_t i = 0; i < n; ++i)
 		s_staging[i] = rgba;
 	GSPGPU_FlushDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));   // gspgpu.h
@@ -292,8 +407,8 @@ Readback view_readback(bool keep_alpha)
 	const int w = s_w, h = s_h;
 	const uint32_t* const pos0 = gpuCmdBuf + gpuCmdBufOffset;   // M1: the readback's own command words
 	const bool queued = gx_split([] { C3D_FrameSplit(GX_CMDLIST_FLUSH); }) && gx_op([&] {
-		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(w, h), s_staging,
-		                        GX_BUFFER_DIM(w, h), kReadbackFlags);
+		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(s_tw, s_th), s_staging,
+		                        GX_BUFFER_DIM(s_sw, s_sh), s_tw != s_sw ? kReadbackHalfFlags : kReadbackFlags);
 	});
 	const uint32_t* const pos1 = gpuCmdBuf + gpuCmdBufOffset;
 	if (queued)
@@ -326,15 +441,42 @@ Readback view_readback(bool keep_alpha)
 	frame_end(0, false, FrameKind::View);
 
 	// The GPU wrote the staging: drop any stale cached copy before reading (gspgpu.h:246).
-	const size_t n = static_cast<size_t>(w) * h;
-	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(n * sizeof(u32)));
-	if (keep_alpha)
-		for (size_t i = 0; i < n; ++i)
-			s_argb[i] = rgba_to_argb_keep(s_staging[i]);
-	else
-		for (size_t i = 0; i < n; ++i)
-			s_argb[i] = rgba_to_argb(s_staging[i]);
+	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(static_cast<size_t>(s_sw) * s_sh * sizeof(u32)));
+	for (int y = 0; y < h; ++y)
+	{
+		const u32* in = s_staging + static_cast<size_t>(y) * s_sw;   // M6: a texture target's staging is 512 wide
+		uint32_t* out = s_argb + static_cast<size_t>(y) * w;
+		if (keep_alpha)
+			for (int x = 0; x < w; ++x)
+				out[x] = rgba_to_argb_keep(in[x]);
+		else
+			for (int x = 0; x < w; ++x)
+				out[x] = rgba_to_argb(in[x]);
+	}
 	return Readback::Ok;
+}
+
+bool view_queue_readback()
+{
+	// M6 direct_check: the readback transfer of the texture target queued behind the composite's draws (the flushing
+	// split first, 0.3); confirmed by the next frame_begin.
+	return gx_split([] { C3D_FrameSplit(GX_CMDLIST_FLUSH); }) && gx_op([&] {
+		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(s_tw, s_th), s_staging,
+		                        GX_BUFFER_DIM(s_sw, s_sh), s_tw != s_sw ? kReadbackHalfFlags : kReadbackFlags);
+	});
+}
+
+const uint32_t* view_convert_readback()
+{
+	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(static_cast<size_t>(s_sw) * s_sh * sizeof(u32)));
+	for (int y = 0; y < s_h; ++y)
+	{
+		const u32* in = s_staging + static_cast<size_t>(y) * s_sw;
+		uint32_t* out = s_argb + static_cast<size_t>(y) * s_w;
+		for (int x = 0; x < s_w; ++x)
+			out[x] = rgba_to_argb(in[x]);
+	}
+	return s_argb;
 }
 
 // --- M0's calibration ---
@@ -411,7 +553,9 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	// Pixels, x right, y down: left 0, right w, bottom h, top 0 (maths.h:492, the design's starting
 	// value for an untilted unlinked target). If the calibration shows flipped rows or columns, this
 	// is the one place that changes (design 7, M0).
-	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 0.0f, 1.0f, true);
+	// M6: a texture target's projection covers the whole target (the view in its top-left corner).
+	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(view_proj_width()), static_cast<float>(view_proj_height()), 0.0f, 0.0f,
+	          1.0f, true);
 	if (s_uloc_projection >= 0)
 		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_proj);   // uniforms.h:38
 	else if (!s_logged_nouniform)
@@ -458,11 +602,72 @@ bool view_calibrate(unsigned k, int w, int h, CalResult& out, const uint32_t** p
 	return true;
 }
 
+// M6 calibrate 1 in mode direct (design 7, M6 specification "Calibration"): a direct view frame without the world: the
+// texture target cleared to the frame-indexed colour of present `n` (present.cpp's calibrate formula), M0's four corner
+// quads at the view's corners and rows h..255 in a fifth colour, so a flipped or shifted composite shows. No readback.
+bool view_direct_calibrate(unsigned n, int w, int h)
+{
+	if (!is_up() || release_pending() || gate_closed() || !view_ensure(w, h) || !view_is_texture())
+		return false;
+	if (frame_begin(FrameZone::Wait) != FrameStart::Ok)
+		return false;
+	const u32 colour = ((n & 0xFF) << 24) | (((n >> 8) & 0xFF) << 16) | (0xA5u << 8) | 0xFF;
+	if (!view_clear_target(colour) || !C3D_FrameDrawOn(s_target))
+	{
+		frame_end(0, false, FrameKind::View);
+		note_view_frame();
+		return false;
+	}
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(view_proj_width()), static_cast<float>(view_proj_height()), 0.0f, 0.0f,
+	          1.0f, true);
+	if (s_uloc_projection >= 0)
+		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_proj);
+	// The corners as fill_vbo; the fifth quad is the band below the view (rows h..255, all 512 columns).
+	fill_vbo(w, h);
+	CalVertex* v = s_vbo + 4 * (kQuads - 1);
+	const float x1 = static_cast<float>(view_proj_width()), y0 = static_cast<float>(h),
+	            y1 = static_cast<float>(view_proj_height());
+	v[0] = CalVertex{0.0f, y0, 0.5f, 0.0f, 0.0f};
+	v[1] = CalVertex{0.0f, y1, 0.5f, 0.0f, 0.0f};
+	v[2] = CalVertex{x1, y0, 0.5f, 0.0f, 0.0f};
+	v[3] = CalVertex{x1, y1, 0.5f, 0.0f, 0.0f};
+	GSPGPU_FlushDataCache(s_vbo, kQuads * 4 * sizeof(CalVertex));
+	s_saved_buf = *C3D_GetBufInfo();
+	BufInfo_Init(&s_view_buf);
+	BufInfo_Add(&s_view_buf, s_vbo, sizeof(CalVertex), 2, 0x10);
+	C3D_SetBufInfo(&s_view_buf);
+	static const uint32_t quad_colour[kQuads] = {kCalTopLeft, kCalTopRight, kCalBottomLeft, kCalBottomRight, 0xFFFF00FFu};
+	for (int q = 0; q < kQuads; ++q)
+	{
+		C3D_TexEnv* env = C3D_GetTexEnv(0);
+		C3D_TexEnvInit(env);
+		C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+		C3D_TexEnvColor(env, tev_constant(quad_colour[q]));
+		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * q, 4);
+	}
+	C3D_SetBufInfo(&s_saved_buf);
+	frame_end(0, false, FrameKind::View);
+	note_view_frame();
+	return true;
+}
+
 void view_free()
 {
-	// C3D_Fini destroyed the target with the rest of the context (as present_free notes).
+	// C3D_Fini destroyed the target with the rest of the context (as present_free notes), but not the texture under a
+	// texture target (C3D_TexDelete: vramFree, no citro3d context needed).
 	s_target = nullptr;
-	s_w = s_h = 0;
+	if (s_vtex_ready)
+		C3D_TexDelete(&s_vtex);
+	s_vtex_ready = false;
+	s_is_tex = false;
+	s_tex_failed = false;
+	s_w = s_h = s_tw = s_th = s_sw = s_sh = 0;
 	release_buffers();
 	if (s_vbo)
 		linearFree(s_vbo);

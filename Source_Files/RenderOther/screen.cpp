@@ -1500,6 +1500,92 @@ void update_world_view_camera()
 
 extern bool is_network_pregame;
 
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+#include "a1_c3d.h"
+
+/*
+ *  Stage 10 M6, hook 3 (docs/3ds/CITRO3D_DESIGN.md section 7, M6 specification; PATCHES.md 47). Placed
+ *  after this file's last __LINE__ user (logWarning in change_screen_mode), so the OFF build's objects do not move.
+ *  a1_c3d_direct_blocks(): the conditions under which this frame's world view must pass through
+ *  world_pixels and update_screen() (0 = the citro3d back end may keep it on the GPU).
+ *  a1_c3d_overlay_bands(): the rows the CPU overlays of render_screen() may write (conservative).
+ */
+static unsigned a1_c3d_direct_blocks(const SDL_Rect &view, const SDL_Rect &buffer, bool high_res, bool every_other_line)
+{
+	unsigned b = 0;
+	if (!native_screen())
+		b |= a1_c3d::kDirectNotNative;
+	else if (view.x != 0 || view.y != 0 || view.w != main_surface->w || view.h != main_surface->h ||
+	         buffer.w != view.w || buffer.h != view.h || !high_res || every_other_line)
+		b |= a1_c3d::kDirectViewRect;
+	if (screen_mode.acceleration != _no_acceleration)
+		b |= a1_c3d::kDirectAccel;
+	if (world_view->overhead_map_active)
+		b |= a1_c3d::kDirectMap;
+	if (world_view->terminal_mode_active)
+		b |= a1_c3d::kDirectTerminal;
+	if (!using_default_gamma)
+		b |= a1_c3d::kDirectGamma;
+	if (!get_keyboard_controller_status())
+		b |= a1_c3d::kDirectDarken;
+	if (game_is_networked || is_network_pregame)
+		b |= a1_c3d::kDirectNetwork;
+	if (alephone::Screen::instance()->lua_hud())
+		b |= a1_c3d::kDirectLuaHud;
+	if (Movie::instance()->IsRecording())
+		b |= a1_c3d::kDirectMovie;
+	return b;
+}
+
+static int a1_c3d_overlay_bands(a1_c3d::OverlayBand *out)
+{
+	extern bool chat_input_mode;
+	int n = 0;
+	const int h = world_pixels->h;
+	FontSpecifier& Font = GetOnScreenFont();
+	auto margins = alephone::Screen::instance()->lua_text_margins;
+	const int ls = Font.LineSpacing;
+	// Crosshair (Crosshairs_SDL.cpp): centred on h/2 - 1, arms of FromCenter + Length, or a circle of Length.
+	if (NetAllowCrosshair() && Crosshairs_IsActive())
+	{
+		CrosshairData &c = GetCrosshairData();
+		const int ycen = h / 2 - 1;
+		const int r = (c.Shape == CHShape_Circle ? c.Length : c.FromCenter + c.Length) + c.Thickness + 1;
+		out[n].y0 = static_cast<short>(ycen - r);
+		out[n].y1 = static_cast<short>(ycen + r + 1);
+		++n;
+	}
+	// Top: position, the script HUD line, the unexpired messages (DisplayPosition, DisplayMessages).
+	int lines = ShowPosition ? 6 : 0, extra = 0;
+	const short view = nonlocal_script_hud ? local_player_index : current_player_index;
+	for (int i = 0; i < MAXIMUM_NUMBER_OF_SCRIPT_HUD_ELEMENTS; ++i)
+		if (!ScriptHUDElements[view][i].text.empty())
+		{
+			++lines;
+			extra = ls;   // the icon drop, at most a line
+			break;
+		}
+	for (int k = 0; k < NumScreenMessages; ++k)
+		if (static_cast<int32_t>(Messages[k].ExpirationTime - machine_tick_count()) >= 0)
+			++lines;
+	if (lines)
+	{
+		out[n].y0 = 0;
+		out[n].y1 = static_cast<short>(margins.top + ls * (lines + 1) + extra + 2);
+		++n;
+	}
+	// Bottom: FPS, the input line (update_fps_display, DisplayInputLine).
+	if ((displaying_fps && !player_in_terminal_mode(current_player_index) && !chat_input_mode) ||
+	    (Console::instance()->input_active() && !Console::instance()->displayBuffer().empty()))
+	{
+		out[n].y0 = static_cast<short>(h - margins.bottom - 2 * ls - Font.Ascent - 2);
+		out[n].y1 = static_cast<short>(h);
+		++n;
+	}
+	return n;
+}
+#endif
+
 void render_screen(short ticks_elapsed)
 {
 #ifdef A1_PLATFORM_3DS
@@ -1695,6 +1781,10 @@ void render_screen(short ticks_elapsed)
 		software_render_dest = bitmap_definition_of_sdl_surface(world_pixels);
 	
 	// Render world view
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	// Stage 10 M6 hook 3a (PATCHES.md 47): may this frame's world view stay on the GPU?
+	a1_c3d::direct_policy(a1_c3d_direct_blocks(ViewRect, BufferRect, HighResolution, DrawEveryOtherLine));
+#endif
 #ifdef A1_PROFILE
 	a1_3ds::prof::push(a1_3ds::prof::Render);
 #endif
@@ -1732,15 +1822,33 @@ void render_screen(short ticks_elapsed)
 	}
     
 	// Render crosshairs
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	// Stage 10 M6 hook 3b (PATCHES.md 47): a direct frame's overlays go to the back end's overlay surface.
+	SDL_Surface *a1_ov = NULL;
+	if (a1_c3d::direct_frame())
+	{
+		a1_c3d::OverlayBand a1_bands[4];
+		const int a1_n = a1_c3d_overlay_bands(a1_bands);
+		a1_ov = a1_c3d::overlay_begin(a1_n, a1_bands);
+	}
+#endif
 	if (!world_view->overhead_map_active && !world_view->terminal_mode_active)
 	  if (NetAllowCrosshair())
 	    if (Crosshairs_IsActive())
 #ifdef HAVE_OPENGL
 			if (!OGL_RenderCrosshairs())
 #endif
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+				Crosshairs_Render(a1_ov ? a1_ov : world_pixels);
+#else
 				Crosshairs_Render(world_pixels);
+#endif
 
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	SDL_Surface *disp_pixels = a1_ov ? a1_ov : world_pixels;
+#else
 	SDL_Surface *disp_pixels = world_pixels;
+#endif
 	if (world_view->overhead_map_active)
 		disp_pixels = Map_Buffer;
 	
@@ -1792,7 +1900,11 @@ void render_screen(short ticks_elapsed)
 	} else {
 		// Update world window
 		if (!world_view->terminal_mode_active &&
-			(!world_view->overhead_map_active || MapIsTranslucent))
+			(!world_view->overhead_map_active || MapIsTranslucent)
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+			&& !a1_ov	// M6 hook 3b: the world view is on the GPU
+#endif
+			)
 #ifdef A1_PROFILE
 		{
 			a1_3ds::prof::push(a1_3ds::prof::Blit);
@@ -1842,6 +1954,18 @@ void render_screen(short ticks_elapsed)
 			darken_world_window();
 		}
 
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+		// Stage 10 M6 hook 3c (PATCHES.md 47): on a direct frame the bottom screen goes before the
+		// present, while the GPU draws the view.
+		if (a1_ov)
+		{
+#ifdef A1_PROFILE
+			A1_PROF_SCOPE(Bottom);
+#endif
+			a1_3ds::bottom_frame(native_screen() ? bottom_mode() : a1_3ds::BottomClassic,
+			                     hud_to_bottom || update_full_screen);
+		}
+#endif
 		if (update_full_screen || Screen::instance()->lua_hud())
 		{
 			MainScreenUpdateRect(0, 0, 0, 0);
@@ -1852,6 +1976,9 @@ void render_screen(short ticks_elapsed)
 			MainScreenUpdateRects(1, &ViewRect);
 		}
 #ifdef A1_PLATFORM_3DS
+#ifdef A1_RENDER_C3D
+		if (!a1_ov)	// M6 hook 3c: already drawn
+#endif
 		{
 #ifdef A1_PROFILE
 			A1_PROF_SCOPE(Bottom);

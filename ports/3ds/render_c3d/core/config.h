@@ -120,6 +120,23 @@
                     printing or flushing, to see whether that logging causes a play-mode hitch each second
                     (console short checks 2026-11-07: one 70-87 ms frame per 1 s window)
 
+	Keys of M6 (design 7, M6 specification; `mode direct`):
+	  overlays 0|1|2    default 0; test only: 1 = FPS, position, crosshair and a constant message every 2 s switched
+	                    on through the engine's own globals at the first world frame; 2 = position and crosshair only
+	                    (deterministic, for the direct-vs-readback captures)
+	  direct_check N    0..100000, default 0 = off: every N-th direct frame the composite is compared with the read-back
+	                    view and the overlay composited on the CPU ("[c3d] direct_check:" lines)
+	  overlay_audit N   0..100000, default 0 = off: every N-th direct frame the overlay surface is scanned for pixels
+	                    outside the frame's bands (overlay_leaks)
+	  seed_check 0|1    default 0: after the first seed of the run, the seeded texture is read back and compared with
+	                    the view it was seeded from
+	  band_from_end 0|1 default 1: a band of rows [y0, y1) goes to texture rows from the end (256 - y1); 0 = from y0
+	  view_v_flip 0|1   default 1: the composite samples the view texture at v = 1 - y/256; 0 = y/256
+	  g3a 0|1           default 0; test only (G3-a's budget probe): the direct view target is 1024x512 and the pool's
+	                    VRAM cap 2048 KiB
+	  sw_every N        0..100000, default 0 = off; test only: every N-th play frame is drawn by SW (counted forced_sw),
+	                    so the sync and the seed after it run
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -188,6 +205,15 @@ struct Config
 	bool quiet = false;                     // test only: no once-a-second [c3d] stats lines (the final ones stay)
 	std::string film;
 	bool zero_copy = true;
+	// M6
+	unsigned overlays = 0;                  // test only: 0 off, 1 all, 2 position + crosshair
+	unsigned direct_check = 0;
+	unsigned overlay_audit = 0;
+	bool seed_check = false;
+	bool band_from_end = true;
+	bool view_v_flip = true;
+	bool g3a = false;                       // test only
+	unsigned sw_every = 0;                  // test only
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.

@@ -34,6 +34,8 @@
 	(at your option) any later version.
 */
 #include "context.h"
+#include "overlay.h"
+#include "view_shared.h"
 
 #include "../include/a1_c3d_port.h"
 #include "a1_3ds_platform.h"
@@ -51,6 +53,10 @@
 #include <vector>
 
 #include "a1_c3d_shaders_shbin.h"
+
+// back/context.cpp's wrap of C3D_TexBind: the composite binds the view and overlay textures through the real one, so the
+// record keeps the present's texture (M6 specification, critic round 1 minor 10).
+extern "C" void __real_C3D_TexBind(int unitId, C3D_Tex* tex);
 
 #ifdef A1_PROFILE
 #include "a1_3ds_profile.h"
@@ -111,6 +117,21 @@ int s_uloc_projection = -1;
 C3D_Mtx s_projection;
 Vertex* s_vbo = nullptr;
 u32* s_staging = nullptr;
+// M6: the composite frame's quads (the view, then one per overlay band), rewritten each composite after its frame_begin.
+constexpr int kCompositeQuads = 1 + kMaxBands;
+Vertex* s_cvbo = nullptr;
+C3D_BufInfo s_cbuf, s_saved_cbuf;
+
+// M6 counters ("[c3d] composite" in the stats and at exit).
+struct CompositeCounters
+{
+	unsigned composites = 0, band_quads = 0, not_checkable = 0, audits = 0, leaks = 0;
+	unsigned checks = 0, check_bad = 0, check_big = 0, check_skipped = 0;
+	unsigned check_max[3] = {0, 0, 0};
+	double check_min_within = 100.0;
+} s_cn;
+uint32_t* s_check_ref = nullptr;
+u32 s_vram_free_at_exit = 0;           // vramSpaceFree() noted by present_detach (G3-a)   // malloc'd 400x240 XRGB: direct_check's reference before present_reference
 
 unsigned s_present = 0;       // present counter (0 = none yet), the frame index of calibrate
 int s_layout = -1;            // what the staging holds around the picture: 0 = 640x480 path, 1 = other
@@ -426,6 +447,223 @@ Begin begin_present_frame(FrameZone zone)
 	return Begin::Ok;
 }
 
+// M6 direct_check: the composite's framebuffer against the read-back view with the overlay's bands composited on the CPU
+// (premultiplied over: c = ov + view * (255 - A) / 255, rounded to nearest), through the CPU present's own conversion
+// (present_reference). `fb` is the framebuffer the composite's transfer wrote (retired).
+void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands, int nb)
+{
+	if (!s_check_ref)
+		s_check_ref = static_cast<uint32_t*>(malloc(kFbPixels * sizeof(uint32_t)));
+	if (!s_diff_ref)
+		s_diff_ref = static_cast<u32*>(malloc(kFbPixels * sizeof(u32)));
+	const uint32_t* ov = overlay_pixels();
+	if (!s_check_ref || !s_diff_ref || !ov)
+	{
+		++s_cn.check_skipped;
+		return;
+	}
+	memcpy(s_check_ref, view, kFbPixels * sizeof(uint32_t));
+	for (int i = 0; i < nb; ++i)
+		for (int y = bands[i].y0; y < bands[i].y1; ++y)
+			for (int x = 0; x < kScreenW; ++x)
+			{
+				const uint32_t o = ov[static_cast<size_t>(y) * kTexW + x];   // 0xRRGGBBAA, premultiplied
+				const unsigned a = o & 0xFF;
+				if (!a && !(o >> 8))
+					continue;
+				uint32_t& v = s_check_ref[static_cast<size_t>(y) * kScreenW + x];   // 0xAARRGGBB
+				uint32_t out = 0xFF000000u;
+				for (int ch = 0; ch < 3; ++ch)
+				{
+					const unsigned oc = (o >> (24 - 8 * ch)) & 0xFF, vc = (v >> (16 - 8 * ch)) & 0xFF;
+					const unsigned c = oc + (vc * (255 - a) + 127) / 255;
+					out |= (c > 255 ? 255 : c) << (16 - 8 * ch);
+				}
+				v = out;
+			}
+	if (!a1_3ds::present_reference(s_diff_ref, s_check_ref, kScreenW * 4, kScreenW, kScreenH, SDL_PIXELFORMAT_ARGB8888))
+	{
+		++s_cn.check_skipped;
+		return;
+	}
+	GSPGPU_InvalidateDataCache(fb, kFbPixels * sizeof(u32));
+	unsigned over1 = 0, over32 = 0, mx[3] = {0, 0, 0};
+	for (size_t i = 0; i < kFbPixels; ++i)
+	{
+		const u32 g = fb[i], c = s_diff_ref[i];
+		if (!((g ^ c) & 0xFFFFFF00u))
+			continue;
+		unsigned m = 0;
+		for (int ch = 0; ch < 3; ++ch)
+		{
+			const int shift = 24 - 8 * ch;
+			const int x = (g >> shift) & 0xFF, y = (c >> shift) & 0xFF;
+			const unsigned d = static_cast<unsigned>(x > y ? x - y : y - x);
+			if (d > mx[ch])
+				mx[ch] = d;
+			if (d > m)
+				m = d;
+		}
+		over1 += m > 1;
+		over32 += m > 32;
+	}
+	const double within = 100.0 * (kFbPixels - over1) / kFbPixels;
+	++s_cn.checks;
+	s_cn.check_bad += within < 99.9 || over32 > 0;
+	s_cn.check_big += over32;
+	for (int ch = 0; ch < 3; ++ch)
+		if (mx[ch] > s_cn.check_max[ch])
+			s_cn.check_max[ch] = mx[ch];
+	if (within < s_cn.check_min_within)
+		s_cn.check_min_within = within;
+	printf("[c3d] direct_check: present %u: within_1=%.3f%% over_1=%u over_32=%u max R %u G %u B %u bands=%d\n",
+	       s_present, within, over1, over32, mx[0], mx[1], mx[2], nb);
+}
+
+// M6 (design 7, M6 specification "The composite frame"): a direct frame's present. One C3D frame: the band uploads, the
+// view quad (view texture, ONE/ZERO), one quad per band (overlay texture, ONE/ONE_MINUS_SRC_ALPHA), the restore, the
+// VBlank guard, C3D_FrameEnd. No staging fill, no upload of main_surface.
+bool present_composite(const Config& cfg, unsigned n, bool trace)
+{
+	C3D_Tex* const vtex = view_texture();
+	C3D_Tex* const otex = overlay_texture();
+	switch (begin_present_frame(FrameZone::Wait))   // the view frame's GPU time not hidden by the CPU: c3d_wait
+	{
+	case Begin::Ok:
+		break;
+	case Begin::ReturnTrue:
+		overlay_drop();
+		return true;
+	case Begin::ReturnFalse:
+		overlay_drop();
+		return false;
+	}
+	sample_drawing_time(GpuTime::View);
+	if (s_diff_fb)
+		diff_compare();   // a check of the last non-direct present
+	if (cfg.present_diff && n % cfg.present_diff == 0)
+		++s_cn.not_checkable;
+	const bool check = cfg.direct_check && (s_cn.composites + 1) % cfg.direct_check == 0;
+	Band bands[kMaxBands];
+	int nb = 0;
+	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dComposite);
+#endif
+		if (cfg.overlay_audit && (s_cn.composites + 1) % cfg.overlay_audit == 0)
+		{
+			++s_cn.audits;
+			const unsigned leaks = overlay_leaks_now();
+			s_cn.leaks += leaks;
+			if (leaks)
+				printf("[c3d] overlay_audit: present %u: %u pixels outside the bands\n", n, leaks);
+		}
+		nb = overlay_upload(bands);   // before any draw: each transfer one GX entry (empty command buffer)
+
+		// The quads: positions in screen pixels (Mtx_OrthoTilt, as the present), texcoords in the 512x256 textures.
+		const float u1 = static_cast<float>(kScreenW) / kTexW;
+		const float vt = cfg.view_v_flip ? 1.0f : 0.0f;
+		const float vb = cfg.view_v_flip ? 1.0f - static_cast<float>(kScreenH) / kTexH : static_cast<float>(kScreenH) / kTexH;
+		Vertex* q = s_cvbo;
+		q[0] = Vertex{0.0f, 0.0f, 0.5f, 0.0f, vt};
+		q[1] = Vertex{0.0f, static_cast<float>(kScreenH), 0.5f, 0.0f, vb};
+		q[2] = Vertex{static_cast<float>(kScreenW), 0.0f, 0.5f, u1, vt};
+		q[3] = Vertex{static_cast<float>(kScreenW), static_cast<float>(kScreenH), 0.5f, u1, vb};
+		for (int i = 0; i < nb; ++i)
+		{
+			const float y0 = static_cast<float>(bands[i].y0), y1 = static_cast<float>(bands[i].y1);
+			Vertex* b = s_cvbo + 4 * (1 + i);
+			b[0] = Vertex{0.0f, y0, 0.5f, 0.0f, y0 / kTexH};
+			b[1] = Vertex{0.0f, y1, 0.5f, 0.0f, y1 / kTexH};
+			b[2] = Vertex{static_cast<float>(kScreenW), y0, 0.5f, u1, y0 / kTexH};
+			b[3] = Vertex{static_cast<float>(kScreenW), y1, 0.5f, u1, y1 / kTexH};
+		}
+		GSPGPU_FlushDataCache(s_cvbo, static_cast<u32>((1 + nb) * 4 * sizeof(Vertex)));
+		s_saved_cbuf = *C3D_GetBufInfo();
+		BufInfo_Init(&s_cbuf);
+		BufInfo_Add(&s_cbuf, s_cvbo, sizeof(Vertex), 2, 0x10);
+		C3D_SetBufInfo(&s_cbuf);
+
+		set_present_draw(Swizzle::Plain);
+		C3D_CullFace(GPU_CULL_NONE);
+		C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+		C3D_FrameDrawOn(s_target);
+		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
+		__real_C3D_TexBind(0, vtex);
+		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+		if (nb)
+		{
+			__real_C3D_TexBind(0, otex);
+			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE,
+			               GPU_ONE_MINUS_SRC_ALPHA);
+			for (int i = 0; i < nb; ++i)
+				C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * (1 + i), 4);
+			s_cn.band_quads += nb;
+		}
+		// The restore: the present's texture (the record), its buffer info, the plain blend.
+		__real_C3D_TexBind(0, static_cast<C3D_Tex*>(tex_recorded()));
+		C3D_SetBufInfo(&s_saved_cbuf);
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	}
+
+	if (trace)
+		crumb("composite: before the VBlank wait");
+	if (gspIsPresentPending(GSP_SCREEN_TOP))
+	{
+#ifdef A1_PROFILE
+		A1_PROF_SCOPE(C3dVblank);
+#endif
+		gspWaitForVBlank();
+	}
+	const u32* check_fb = nullptr;
+	if (check)
+	{
+		u16 fb_w = 0, fb_h = 0;
+		check_fb = reinterpret_cast<const u32*>(gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fb_w, &fb_h));
+		if (fb_w != kScreenH || fb_h != kScreenW)
+			check_fb = nullptr;
+	}
+	frame_end(1, trace);
+	++s_cn.composites;
+	if (check)
+	{
+		// Test only, after the composite and in frames of its own (so the composite is the same with or without the check,
+		// and the software backend's gxq_budget 3 holds): the composite retires (its framebuffer transfer done), the view
+		// texture (unchanged until the next view frame) is read back, retires, and the two are compared.
+		bool done = false;
+		if (frame_begin(FrameZone::Wait) == FrameStart::Ok)
+		{
+			const bool queued = view_queue_readback();
+			frame_end(0, false, FrameKind::View);
+			note_view_frame();
+			if (queued && frame_begin(FrameZone::Wait) == FrameStart::Ok)
+			{
+				frame_end(0, false, FrameKind::View);
+				if (check_fb)
+				{
+					direct_check_compare(check_fb, view_convert_readback(), bands, nb);
+					done = true;
+				}
+			}
+		}
+		if (!done)
+			++s_cn.check_skipped;
+	}
+	bool burst = false;
+	for (unsigned first : {120u, 600u, 1200u, 1800u})
+		burst = burst || (n >= first && n < first + 6);
+	if (cfg.calibrate && burst)
+	{
+		printf("[c3d] calibrate: capture after present %u (colour R=%u G=%u, band row %u; composite)\n", n, n & 0xFF,
+		       (n >> 8) & 0xFF, 8 * (n % 30));
+		a1_3ds::save_screens("c3d-cal-" + std::to_string(n));
+	}
+	stats_tick();
+	return true;
+}
+
 } // namespace
 
 bool present_close_frame()
@@ -459,7 +697,8 @@ bool present_init()
 {
 	s_staging = static_cast<u32*>(linearAlloc(kStagingBytes));
 	s_vbo = static_cast<Vertex*>(linearAlloc(4 * sizeof(Vertex)));
-	if (!s_staging || !s_vbo)
+	s_cvbo = static_cast<Vertex*>(linearAlloc(kCompositeQuads * 4 * sizeof(Vertex)));
+	if (!s_staging || !s_vbo || !s_cvbo)
 	{
 		printf("[c3d] linearAlloc failed (staging %lu KiB)\n", static_cast<unsigned long>(kStagingBytes / 1024));
 		return false;
@@ -522,6 +761,7 @@ bool present_init()
 
 void present_detach()
 {
+	s_vram_free_at_exit = vramSpaceFree();   // the targets and textures still allocated (G3-a)
 	if (s_target)
 		C3D_RenderTargetDetachOutput(s_target);
 }
@@ -542,6 +782,18 @@ void present_free()
 	if (s_vbo)
 		linearFree(s_vbo);
 	s_vbo = nullptr;
+	if (s_cvbo)
+		linearFree(s_cvbo);
+	s_cvbo = nullptr;
+	if (s_cn.composites)
+		printf("[c3d] composite final: composites=%u band_quads=%u present_diff_not_checkable=%u audits=%u leaks=%u "
+		       "direct_checks=%u bad=%u big=%u skipped=%u min_within=%.3f%% max R %u G %u B %u bottom_pending=%u "
+		       "vram_free_kib=%lu (at exit, before the release)\n",
+		       s_cn.composites, s_cn.band_quads, s_cn.not_checkable, s_cn.audits, s_cn.leaks, s_cn.checks, s_cn.check_bad,
+		       s_cn.check_big, s_cn.check_skipped, s_cn.check_min_within, s_cn.check_max[0], s_cn.check_max[1],
+		       s_cn.check_max[2], overlay_bottom_pending(), static_cast<unsigned long>(s_vram_free_at_exit / 1024));
+	free(s_check_ref);
+	s_check_ref = nullptr;
 	if (s_staging)
 		linearFree(s_staging);
 	s_staging = nullptr;
@@ -652,6 +904,14 @@ bool a1_c3d_present(const void* pixels, int pitch, int width, int height, uint32
 
 	if (cfg.alt_load && (n & 1))
 		busy_wait_ms(20);
+
+	// M6: a direct frame (hook 3b handed out the overlay surface this frame): the composite, not main_surface.
+	if (overlay_surface_now())
+	{
+		if (width == kScreenW && height == kScreenH && view_texture() && overlay_texture())
+			return present_composite(cfg, n, trace);
+		overlay_drop();   // not expected: the surface changed between hook 3b and the present
+	}
 
 	// The picture to show: the engine's, or (odd_surface, once a second) a 300x200 RGB565 one.
 	std::vector<uint16_t> odd;

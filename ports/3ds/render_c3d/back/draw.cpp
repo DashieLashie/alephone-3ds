@@ -118,6 +118,7 @@ struct Counters
 	unsigned tex1_restore_mismatch = 0, tev1_not_init = 0, unit1_left_bound = 0;   // M3
 	unsigned blend_sets = 0, blend_restores = 0;   // M4: tinted/world blend switches between draws; restores
 	unsigned static_sets = 0, static_restores = 0, static_frames_ended = 0;   // M5: Lit/Static switches
+	unsigned direct_frames = 0, seeds = 0, syncs = 0, seed_checks = 0;   // M6
 } s_n;
 
 // --- helpers ---
@@ -506,7 +507,7 @@ bool view_play_ready(int w, int h, SkipReason* why)
 	return ok;
 }
 
-ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
+ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 {
 	s_f = Frame();
 	// Design 5.6.1 a: no citro3d call without the GPU rights, while suspended or closing, or with a
@@ -558,7 +559,11 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 	s_f.w = w;
 	s_f.h = h;
 	s_f.sentinel_argb = rgba_to_argb_keep(view_sentinel_rgba(s_k));
-	view_fill_staging(view_sentinel_rgba(s_k));
+	// M6: a seeded frame's staging holds the seed; a direct frame reads nothing back.
+	if (opt.seed_rows)
+		view_seed_fill(opt.seed_rows);
+	else if (opt.sentinel)
+		view_fill_staging(view_sentinel_rgba(s_k));
 	++s_n.frames;
 
 	const FrameStart fs = frame_begin(FrameZone::Wait);
@@ -566,6 +571,19 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 		return discarded_at_begin(DiscardReason::Begin);
 	s_f.open = true;
 	s_f.tex_binds0 = tex_binds();
+
+	// M6 seed: the view the texture must start from, as the frame's first GX operation (empty command buffer: 1 entry).
+	if (opt.seed_rows)
+	{
+		if (!view_seed_transfer())
+		{
+			frame_end(0, false, FrameKind::View);
+			note_view_frame();
+			s_f.open = false;
+			return discarded_at_begin(DiscardReason::Gx);
+		}
+		++s_n.seeds;
+	}
 
 	// M3: the shade LUT first (built once; its one promotion, before the cache's, with the command buffer
 	// still empty), then the texture cache's frame: what retired frames left is freed now (frame_begin
@@ -590,7 +608,7 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
 	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered" (M4: the tinted check's grey,
 	// 8.1).
-	if (!view_clear_target(clear_rgba))
+	if (opt.clear && !view_clear_target(clear_rgba))
 	{
 		frame_end(0, false, FrameKind::View);
 		note_view_frame();
@@ -650,7 +668,9 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba)
 	}
 
 	// Pixels, x right, y down (M0's calibrated value); after the bind, which reloads the constants.
-	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 0.0f, 1.0f, true);
+	// M6: on a texture target the projection covers the whole target (view_proj_*), the view in its top-left corner.
+	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(view_proj_width()), static_cast<float>(view_proj_height()), 0.0f, 0.0f,
+	          1.0f, true);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_proj, &s_proj);
 	if (s_uloc_stereo >= 0)
 		C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_stereo, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -804,7 +824,9 @@ ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count)
 	return e;
 }
 
-ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied)
+namespace {
+
+ViewEnd play_copy(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied, bool full)
 {
 	if (sentinel_count)
 		*sentinel_count = 0;
@@ -813,6 +835,21 @@ ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* 
 	const ViewEnd e = end_and_read_back();
 	if (!e.ok)
 		return e;
+	if (full)
+	{
+		// M6: the texture target holds the whole view (never cleared in mode direct): every pixel, 5.2's form.
+		const uint32_t* src = view_argb();
+		for (int y = 0; y < s_f.h; ++y)
+		{
+			const uint32_t* row = src + static_cast<size_t>(y) * s_f.w;
+			uint32_t* dst = reinterpret_cast<uint32_t*>(rows[y]);
+			for (int x = 0; x < s_f.w; ++x)
+				dst[x] = row[x] | 0xFF000000u;
+		}
+		if (copied)
+			*copied = static_cast<unsigned>(s_f.w * s_f.h);
+		return e;
+	}
 	const uint32_t* src = view_argb();
 	unsigned sentinel = 0, n = 0;
 	for (int y = 0; y < s_f.h; ++y)
@@ -836,6 +873,92 @@ ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* 
 	if (copied)
 		*copied = n;
 	return e;
+}
+
+} // namespace
+
+ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied)
+{
+	return play_copy(rows, sentinel_count, copied, false);
+}
+
+ViewEnd view_end_play_full(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied)
+{
+	return play_copy(rows, sentinel_count, copied, true);
+}
+
+ViewEnd view_end_direct()
+{
+	if (!s_f.open)
+		return ViewEnd{false, DiscardReason::Begin};
+	issue_pending();
+	restore_state();
+	flush_rings();   // the draws run at C3D_FrameEnd(GX_CMDLIST_FLUSH), which skips the whole-heap flush (0.3)
+	if (s_f.discarded)
+		return finish_discarded();
+	frame_end(0, false, FrameKind::View);
+	note_view_frame();
+	s_f.open = false;
+	++s_n.direct_frames;
+	return ViewEnd{true, DiscardReason::Unsupported};
+}
+
+ViewEnd view_sync(uint8_t* const* rows)
+{
+	if (s_off || !is_up() || release_pending() || gate_closed() || !view_is_texture())
+		return ViewEnd{false, DiscardReason::Begin};
+	if (frame_begin(FrameZone::Wait) != FrameStart::Ok)
+		return ViewEnd{false, DiscardReason::Begin};
+	switch (view_readback(true))   // the split, the transfer, the frame's end, the retirement pair, the conversion
+	{
+	case Readback::GxRefused:
+		return ViewEnd{false, DiscardReason::Gx};
+	case Readback::WaitFailed:
+		return ViewEnd{false, DiscardReason::Begin};
+	case Readback::Ok:
+		break;
+	}
+	const uint32_t* src = view_argb();
+	const int w = view_width(), h = view_height();
+	for (int y = 0; y < h; ++y)
+	{
+		const uint32_t* row = src + static_cast<size_t>(y) * w;
+		uint32_t* dst = reinterpret_cast<uint32_t*>(rows[y]);
+		for (int x = 0; x < w; ++x)
+			dst[x] = row[x] | 0xFF000000u;
+	}
+	++s_n.syncs;
+	return ViewEnd{true, DiscardReason::Unsupported};
+}
+
+bool view_seed_check(const uint8_t* const* rows, unsigned* differ)
+{
+	if (s_off || !is_up() || release_pending() || gate_closed() || !view_is_texture())
+		return false;
+	view_seed_fill(rows);
+	if (frame_begin(FrameZone::Wait) != FrameStart::Ok)
+		return false;
+	if (!view_seed_transfer())
+	{
+		frame_end(0, false, FrameKind::View);
+		note_view_frame();
+		return false;
+	}
+	if (view_readback(true) != Readback::Ok)
+		return false;
+	const uint32_t* src = view_argb();
+	const int w = view_width(), h = view_height();
+	unsigned n = 0;
+	for (int y = 0; y < h; ++y)
+	{
+		const uint32_t* a = src + static_cast<size_t>(y) * w;
+		const uint32_t* b = reinterpret_cast<const uint32_t*>(rows[y]);
+		for (int x = 0; x < w; ++x)
+			n += ((a[x] ^ b[x]) & 0x00FFFFFFu) != 0;
+	}
+	*differ = n;
+	++s_n.seed_checks;
+	return true;
 }
 
 void draw_free()
@@ -868,14 +991,15 @@ int draw_stats_text(char* buf, size_t size)
 	                "discards=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) skips=%u/%u/%u/%u(down/gate/size/pref) "
 	                "prog_restore_mismatch=%u tex_bind_calls=%u tex_restore_mismatch=%u lut=%s lut_builds=%u "
 	                "tex1_restore_mismatch=%u tev1_not_init=%u unit1_left_bound=%u blend_sets=%u blend_restores=%u "
-	                "static_sets=%u static_restores=%u static_frames_ended=%u noise=%s",
+	                "static_sets=%u static_restores=%u static_frames_ended=%u noise=%s direct_views=%u seeds=%u syncs=%u "
+	                "seed_checks=%u",
 	                n.frames, n.draws, n.polygons, n.vertices, n.indices, s_ring.high_water_vertices(0),
 	                s_ring.high_water_vertices(1), s_ring.high_water_indices(0), s_ring.high_water_indices(1),
 	                n.discards[0], n.discards[1], n.discards[2], n.discards[3], n.discards[4], n.discards[5],
 	                n.skips[0], n.skips[1], n.skips[2], n.skips[3], n.prog_restore_mismatch, n.tex_bind_calls,
 	                n.tex_restore_mismatch, shade_state_name(), shade_builds(), n.tex1_restore_mismatch, n.tev1_not_init, n.unit1_left_bound,
 	                n.blend_sets, n.blend_restores, n.static_sets, n.static_restores, n.static_frames_ended,
-	                noise_state_name());
+	                noise_state_name(), n.direct_frames, n.seeds, n.syncs, n.seed_checks);
 }
 
 } // namespace back

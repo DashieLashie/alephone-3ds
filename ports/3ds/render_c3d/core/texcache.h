@@ -122,6 +122,8 @@ struct TexCacheConfig
 struct TexStats
 {
 	uint32_t hits = 0, misses = 0;
+	uint64_t probes = 0;                  // M6: slots examined by lookup()'s index walk
+	uint64_t probes_old = 0;              // M6: what M2-M5's scan would have examined (hit: the slot's index + 1; miss: kTexSlots)
 	uint32_t conversions = 0;
 	uint64_t bytes_converted = 0;
 	uint32_t frame_bytes_max = 0;         // most bytes converted in one view frame
@@ -212,6 +214,10 @@ public:
 	uint32_t used_bytes(TexPool pool) const { return used_[static_cast<int>(pool)]; }
 	uint32_t cap_bytes(TexPool pool) const { return cap_[static_cast<int>(pool)]; }
 
+	// M6: the lookup index (below) agrees with the slots: every Live slot of the current generation is on its key's
+	// chain exactly once and every chained slot is such a slot. `chain_max` (optional) gets the longest chain.
+	bool audit_index(unsigned* chain_max = nullptr) const;
+
 	// "[c3d] tex entries L/V KiB L/V conv N KiB max/frame gen0..9 promo done/deferred evict
 	// deferred-free gen alloc-fail discards" (one line, no newline).
 	std::string stats_line() const;
@@ -226,6 +232,20 @@ private:
 	TexSlot* take_free_slot();
 	void* alloc_with_eviction(TexPool pool, const TexSlot& shape, uint32_t victims_used_below);
 	void* alloc_promotion(TexSlot& s);
+
+	// M6 (M4 commit review, minor 4: lookup() scanned all kTexSlots slots per new draw key): the Live slots of the
+	// current generation, chained per bucket of their key. A slot is inserted when create() makes it Live and
+	// removed when it stops being Live (free_slot_memory, the one place a Live slot becomes Free); bump_generation()
+	// and release_all() empty the index (no Live slot is left).
+	static constexpr unsigned kBuckets = 1024;
+	static constexpr uint16_t kNoSlot = 0xFFFF;
+	static unsigned bucket_of(const TexKey& key);
+	void index_insert(unsigned i);
+	void index_remove(unsigned i);
+	void index_clear();
+	uint16_t head_[kBuckets];
+	uint16_t next_[kTexSlots];
+	bool indexed_[kTexSlots];
 
 	TexAllocator& alloc_;
 	TexCacheConfig cfg_;

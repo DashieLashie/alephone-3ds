@@ -26,6 +26,8 @@ COLS = ["fps", "frame", "busy", "max", "world", "render", "hud", "blit", "presen
 C3D_COLS = ["c3d_wait", "c3d_fill", "c3d_upload", "c3d_vblank"]
 # M0 zones, nested in "render" (null mode, the diff harness, the view readback); not part of "present total".
 M0_COLS = ["c3d_null", "c3d_diff", "c3d_readback", "c3d_draw", "c3d_tex"]
+# M6 zones: c3d_overlay (top level, hook 3b) and c3d_composite (inside "present", added to "present total").
+M6_COLS = ["c3d_overlay", "c3d_composite"]
 
 
 def load(path):
@@ -38,7 +40,7 @@ def load(path):
         r["busy"] = r["frame"] - r["idle"]
         r.setdefault("bottom", 0.0)   # results from before the bottom zone (STAGE7.md)
         if all(c in r for c in C3D_COLS):   # a build from before the plan B zones has c3d_wait only
-            r["present total"] = r["present"] + sum(r[c] for c in C3D_COLS)
+            r["present total"] = r["present"] + sum(r[c] for c in C3D_COLS) + r.get("c3d_composite", 0.0)
         runs[int(kv["level"])].append(r)
     return runs
 
@@ -56,6 +58,9 @@ def main(paths):
     if any(c in r for _, runs in data for rs in runs.values() for r in rs for c in M0_COLS):
         i = cols.index("c3d_vblank") + 1 if "c3d_vblank" in cols else cols.index("present") + 1
         cols[i:i] = M0_COLS
+    if any(c in r for _, runs in data for rs in runs.values() for r in rs for c in M6_COLS):
+        i = cols.index("c3d_tex") + 1 if "c3d_tex" in cols else cols.index("present") + 1
+        cols[i:i] = M6_COLS
     print("| results | level | runs | " + " | ".join(cols) + " | frame spread |")
     print("| --- " * (len(cols) + 4) + "|")
     for path, runs in data:

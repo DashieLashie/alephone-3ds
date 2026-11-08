@@ -28,8 +28,12 @@
 #include "tex_convert.h"
 #include "texcache.h"
 #include "tiling.h"
+#include "overlay_bands.h"
+#include "direct_state.h"
+#include "a1_c3d.h"
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -4476,6 +4480,243 @@ static void test_m5_core()
 	test_m5_promotion_pressure();
 }
 
+
+// M6 (M4 commit review, minor 4): the chained lookup index against a linear scan of the slots (today's lookup), under
+// random creates, hits, misses, evictions (small caps), forgets, retirements and generation bumps; then the lookup's
+// cost, old scan against the index, on a full cache.
+static const TexSlot* reference_lookup(const TexCache& c, const TexKey& k)
+{
+	for (unsigned i = 0; i < kTexSlots; ++i)
+	{
+		const TexSlot& s = c.slot(i);
+		if (s.state == TexSlotState::Live && s.generation == c.generation() && s.key.bitmap == k.bitmap &&
+		    s.key.tables == k.tables && s.key.kind == k.kind && s.key.wrap == k.wrap && s.key.part == k.part)
+			return &s;
+	}
+	return nullptr;
+}
+
+static void test_m6_hash()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 1024, 8));
+	GxQueue gx;
+	std::mt19937 rng(6);
+	uint32_t frame = 1;
+	unsigned agree = 0, ops = 0, hits = 0, audits_ok = 0, audits = 0;
+	run_frame(c, gx, frame);
+	for (int step = 0; step < 200000; ++step)
+	{
+		const unsigned r = rng() % 1000;
+		// Keys: 60 bitmaps, two tables, three wraps, two parts: collisions and near misses on every field.
+		TexKey k = K(static_cast<int>(rng() % 60), (rng() & 1) ? &bm[4095] : &bm[4094]);
+		k.wrap = static_cast<TexWrap>(rng() % 3);
+		k.part = static_cast<uint8_t>(rng() & 1);
+		const TexSlot* ref = reference_lookup(c, k);
+		if (r < 1 && rng() % 4 == 0)
+		{
+			c.bump_generation();
+			run_frame(c, gx, ++frame);
+		}
+		else if (r < 60)
+			run_frame(c, gx, ++frame);
+		else if (r < 70)
+		{
+			if (TexSlot* s = c.lookup(k))
+				c.forget(s);
+		}
+		else
+		{
+			TexSlot* got = c.lookup(k);
+			agree += got == ref;
+			hits += got != nullptr;
+			++ops;
+			if (!got)
+				c.create(k, 64 << (rng() % 3));   // 16..256 KiB: the caps evict
+		}
+		if (step % 997 == 0)
+		{
+			++audits;
+			audits_ok += c.audit_index() && c.audit();
+		}
+	}
+	CHECK(agree == ops);
+	CHECK(audits_ok == audits);
+	std::printf("texcache index vs scan: %u lookups, %u hits, %u evictions, %u generations\n", ops, hits, c.stats().evictions, c.generation());
+	CHECK(hits > 1000 && hits < ops);   // both paths exercised
+	CHECK(c.stats().evictions > 1000);
+	unsigned chain = 0;
+	CHECK(c.audit_index(&chain));
+	c.release_all();
+	CHECK(c.audit_index() && fa.live.empty());
+
+	// The cost: a full cache (512 live 16 KiB slots), one lookup per key, half of them misses.
+	FakeAlloc fb;
+	TexCache d(fb, cfg_of(16384, 0, 0));
+	run_frame(d, gx, 1);
+	for (int i = 0; i < static_cast<int>(kTexSlots); ++i)
+		CHECK(d.create(K(i), 64) != nullptr);
+	CHECK(d.audit_index(&chain));
+	const int rounds = 400;
+	volatile uintptr_t sink = 0;
+	auto t0 = std::chrono::steady_clock::now();
+	for (int n = 0; n < rounds; ++n)
+		for (int i = 0; i < 1024; ++i)
+			sink += reinterpret_cast<uintptr_t>(reference_lookup(d, K(i)));
+	auto t1 = std::chrono::steady_clock::now();
+	for (int n = 0; n < rounds; ++n)
+		for (int i = 0; i < 1024; ++i)
+			sink += reinterpret_cast<uintptr_t>(d.lookup(K(i)));
+	auto t2 = std::chrono::steady_clock::now();
+	const double scan_ns = std::chrono::duration<double, std::nano>(t1 - t0).count() / (rounds * 1024.0);
+	const double index_ns = std::chrono::duration<double, std::nano>(t2 - t1).count() / (rounds * 1024.0);
+	std::printf("texcache lookup (512 live, half misses): scan %.1f ns, index %.1f ns per lookup, longest chain %u\n",
+	            scan_ns, index_ns, chain);
+	CHECK(index_ns < scan_ns);
+	d.release_all();
+}
+
+
+// M6 "Overlay bands": clamping, tile rounding, merging, the kMaxBands rule, the tile mask.
+static void test_m6_bands()
+{
+	Band out[kMaxBands];
+	auto one = [&](std::initializer_list<Band> in, std::initializer_list<Band> want) {
+		std::vector<Band> v(in);
+		const int n = bands_normalise(v.data(), static_cast<int>(v.size()), 240, out);
+		bool ok = n == static_cast<int>(want.size());
+		int i = 0;
+		for (const Band& w : want)
+			ok = ok && i < n && out[i].y0 == w.y0 && out[i].y1 == w.y1, ++i;
+		if (!ok)
+			for (int j = 0; j < n; ++j)
+				std::printf("bands: got [%d, %d)\n", out[j].y0, out[j].y1);
+		CHECK(ok);
+	};
+	one({}, {});
+	one({{5, 5}, {300, 400}, {-20, -1}}, {});                         // empty, below, above
+	one({{3, 9}}, {{0, 16}});                                          // rounded out to tiles
+	one({{-5, 250}}, {{0, 240}});                                      // clamped
+	one({{86, 154}}, {{80, 160}});                                     // a 68-row crosshair band
+	one({{0, 40}, {200, 240}, {86, 154}}, {{0, 40}, {80, 160}, {200, 240}});   // sorted
+	one({{0, 41}, {44, 60}}, {{0, 64}});                               // touching after rounding: merged
+	one({{0, 8}, {8, 16}}, {{0, 16}});                                 // touching: merged
+	one({{0, 8}, {16, 24}, {40, 48}, {64, 72}, {100, 108}, {200, 208}}, // 6 bands: the smallest gaps go first (8,
+	    {{0, 48}, {64, 72}, {96, 112}, {200, 208}});                      // then the first of two 16s; 100-108 rounds out)
+	CHECK(bands_normalise(nullptr, 0, 240, out) == 0);
+	// The worst cases stay within kMaxBands, cover their input and are tile-aligned.
+	std::mt19937 rng(66);
+	unsigned bad = 0;
+	for (int r = 0; r < 20000; ++r)
+	{
+		Band in[8];
+		const int n = 1 + static_cast<int>(rng() % 8);
+		for (int i = 0; i < n; ++i)
+		{
+			const int a = static_cast<int>(rng() % 260) - 10, len = static_cast<int>(rng() % 60);
+			in[i] = Band{a, a + len};
+		}
+		const int k = bands_normalise(in, n, 240, out);
+		const uint32_t m = bands_tile_mask(out, k);
+		bad += k > kMaxBands;
+		for (int i = 0; i < k; ++i)
+			bad += (out[i].y0 % 8) || (out[i].y1 % 8) || out[i].y0 >= out[i].y1 || out[i].y1 > 240 ||
+			       (i && out[i].y0 <= out[i - 1].y1);
+		for (int i = 0; i < n; ++i)
+			for (int y = std::max(in[i].y0, 0); y < std::min(in[i].y1, 240); ++y)
+				bad += !(m >> (y / 8) & 1);
+	}
+	CHECK(bad == 0);
+	const Band two[] = {{0, 16}, {232, 240}};
+	CHECK(bands_tile_mask(two, 2) == (3u | 1u << 29));
+}
+
+
+static void test_config_m6()
+{
+	Config c;
+	CHECK(c.overlays == 0 && c.direct_check == 0 && c.overlay_audit == 0 && !c.seed_check && c.band_from_end &&
+	      c.view_v_flip && !c.g3a);
+	std::vector<std::string> problems;
+	config_parse(c, "overlays 2\ndirect_check 30\noverlay_audit 15\nseed_check 1\nband_from_end 0\nview_v_flip 0\n"
+	                "g3a 1\nsw_every 50\noverlays 3\ndirect_check -1\n", problems);
+	CHECK(c.overlays == 2 && c.direct_check == 30 && c.overlay_audit == 15 && c.seed_check && !c.band_from_end &&
+	      !c.view_v_flip && c.g3a && c.sw_every == 50);
+	CHECK(problems.size() == 2);
+}
+
+
+// M6 "No clear in direct mode": the tex_view / dest_view transitions, the sync guard, the reason table.
+static void test_m6_direct_state()
+{
+	DirectState st;   // start: dest is the view, the texture holds nothing
+	CHECK(!st.tex_view && st.dest_view);
+	DirectPlan p = direct_plan(st, ViewKind::Direct, C3dAvail::Ok);
+	CHECK(p.seed && !p.sync);                                       // first direct frame: seeded from dest
+	direct_after(st, ViewKind::Direct, false);
+	CHECK(st.tex_view && !st.dest_view);
+	p = direct_plan(st, ViewKind::Direct, C3dAvail::Ok);
+	CHECK(!p.seed && !p.sync);                                      // the next one draws over the last view
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Ok);
+	CHECK(p.sync && p.skip == SyncSkip::None);                      // SW after direct: dest synced first
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Gate);
+	CHECK(!p.sync && p.skip == SyncSkip::Gate);                     // never a citro3d call with the gate closed
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Off);
+	CHECK(!p.sync && p.skip == SyncSkip::Off);
+	p = direct_plan(st, ViewKind::Clearing, C3dAvail::Ok);
+	CHECK(p.sync && !p.seed);                                       // a diff frame: synced, never seeded
+	direct_after(st, ViewKind::Sw, false);
+	CHECK(!st.tex_view && st.dest_view);
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Ok);
+	CHECK(!p.sync && p.skip == SyncSkip::None);                     // dest already holds it
+	p = direct_plan(st, ViewKind::Readback, C3dAvail::Ok);
+	CHECK(p.seed);                                                  // readback in mode direct draws without a clear
+	direct_after(st, ViewKind::Readback, false);
+	CHECK(st.tex_view && st.dest_view);
+	direct_after(st, ViewKind::Direct, false);
+	direct_after(st, ViewKind::Direct, true);                       // a discarded direct frame: partial texture
+	CHECK(!st.tex_view && st.tex_partial && st.dest_view);
+	CHECK(!direct_plan(st, ViewKind::Clearing, C3dAvail::Ok).sync);
+	DirectState d2;
+	direct_after(d2, ViewKind::Direct, false);
+	direct_after(d2, ViewKind::Readback, true);                     // discarded with dest stale: SW redrew dest
+	CHECK(!d2.tex_view && d2.dest_view);
+	DirectState d3;
+	direct_after(d3, ViewKind::Direct, false);
+	d3.tex_view = false;                                            // forgotten while dest is stale (a release)
+	p = direct_plan(d3, ViewKind::Sw, C3dAvail::Ok);
+	CHECK(!p.sync && p.skip == SyncSkip::Discard);
+	direct_forget_texture(d3);
+	CHECK(!d3.tex_view);
+	direct_after(d3, ViewKind::Clearing, false);
+	CHECK(!d3.tex_view && d3.dest_view);
+	// The reasons follow include/a1_c3d.h's bits.
+	CHECK(std::string(direct_block_name(0)) == "none" && direct_block_index(0) == -1);
+	CHECK(std::string(direct_block_name(kDirectNotNative)) == "not_native");
+	CHECK(std::string(direct_block_name(kDirectMap | kDirectGamma)) == "map");
+	CHECK(std::string(direct_block_name(kDirectGamma)) == "gamma");
+	CHECK(std::string(direct_block_name(kDirectMovie)) == "movie");
+	CHECK(direct_block_index(kDirectDarken) == 6 && direct_block_index(1u << 20) == kDirectBlockCount - 1);
+	// The dirty-tile rule (overlay.cpp): a shrinking band leaves nothing outside the new bands.
+	uint32_t dirty = 0, cleared_total = 0;
+	Band b1[kMaxBands], b2[kMaxBands];
+	const Band big{0, 100}, small{0, 20};
+	const int n1 = bands_normalise(&big, 1, 240, b1), n2 = bands_normalise(&small, 1, 240, b2);
+	dirty = bands_tile_mask(b1, n1);              // frame 1 wrote rows 0-103
+	const uint32_t cur = bands_tile_mask(b2, n2); // frame 2 composites rows 0-23
+	cleared_total = dirty;                        // every dirty tile cleared
+	dirty = cur;
+	CHECK((cleared_total & ~cur) == (bands_tile_mask(b1, n1) & ~cur) && dirty == cur);
+}
+
+static void test_m6_core()
+{
+	test_m6_direct_state();
+	test_config_m6();
+	test_m6_hash();
+	test_m6_bands();
+}
+
 int main()
 {
 	test_config();
@@ -4503,6 +4744,7 @@ int main()
 	test_m3_core();
 	test_m4_core();
 	test_m5_core();
+	test_m6_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

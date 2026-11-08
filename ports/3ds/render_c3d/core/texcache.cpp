@@ -23,6 +23,47 @@ TexCache::TexCache(TexAllocator& alloc, const TexCacheConfig& cfg) : alloc_(allo
 {
 	cap_[pi(TexPool::Linear)] = cfg.linear_cap_kib * 1024u;
 	cap_[pi(TexPool::Vram)] = cfg.vram_cap_kib * 1024u;
+	index_clear();
+}
+
+unsigned TexCache::bucket_of(const TexKey& key)
+{
+	// The pointers' low bits are alignment; the multipliers spread the rest (Fibonacci hashing), the top bits pick.
+	const uint32_t b = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(key.bitmap) >> 2);
+	const uint32_t t = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(key.tables) >> 2);
+	const uint32_t x = b * 0x9E3779B1u ^ t * 0x85EBCA77u ^
+	                   (static_cast<uint32_t>(key.kind) << 16 | static_cast<uint32_t>(key.wrap) << 8 | key.part) * 0xC2B2AE3Du;
+	return (x ^ (x >> 15)) * 0x27D4EB2Fu >> 22;   // 10 bits: kBuckets
+}
+
+void TexCache::index_insert(unsigned i)
+{
+	const unsigned b = bucket_of(slots_[i].key);
+	next_[i] = head_[b];
+	head_[b] = static_cast<uint16_t>(i);
+	indexed_[i] = true;
+}
+
+void TexCache::index_remove(unsigned i)
+{
+	for (uint16_t* p = &head_[bucket_of(slots_[i].key)]; *p != kNoSlot; p = &next_[*p])
+		if (*p == i)
+		{
+			*p = next_[i];
+			break;
+		}
+	indexed_[i] = false;
+}
+
+void TexCache::index_clear()
+{
+	for (uint16_t& h : head_)
+		h = kNoSlot;
+	for (unsigned i = 0; i < kTexSlots; ++i)
+	{
+		next_[i] = kNoSlot;
+		indexed_[i] = false;
+	}
 }
 
 TexCache::~TexCache() {}
@@ -54,6 +95,9 @@ TexSlot* TexCache::lru_victim(bool any_pool, TexPool pool, uint32_t last_used_be
 
 void TexCache::free_slot_memory(TexSlot& s)
 {
+	const unsigned i = static_cast<unsigned>(&s - slots_);
+	if (indexed_[i])
+		index_remove(i);   // before the key is cleared below
 	if (s.handle && !s.handle_deferred)
 	{
 		alloc_.release(s.pool, s.handle);
@@ -214,17 +258,21 @@ void TexCache::begin_frame(uint32_t frame)
 
 TexSlot* TexCache::lookup(const TexKey& key)
 {
-	for (TexSlot& s : slots_)
+	for (uint16_t i = head_[bucket_of(key)]; i != kNoSlot; i = next_[i])
 	{
+		TexSlot& s = slots_[i];
+		++stats_.probes;
 		if (s.state == TexSlotState::Live && s.generation == stats_.generation && s.key.bitmap == key.bitmap &&
 		    s.key.tables == key.tables && s.key.kind == key.kind && s.key.wrap == key.wrap && s.key.part == key.part)
 		{
 			s.last_used_frame = frame_;
 			++stats_.hits;
+			stats_.probes_old += i + 1u;   // the scan stopped at the first match: keys are unique among live slots
 			return &s;
 		}
 	}
 	++stats_.misses;
+	stats_.probes_old += kTexSlots;
 	return nullptr;
 }
 
@@ -263,6 +311,7 @@ TexSlot* TexCache::create(const TexKey& key, unsigned S, unsigned T)
 	s->seq = next_seq_++;
 	const uint32_t bytes = shape.bytes;
 	s->promote_pending = cfg_.promote_max > 0 && bytes <= cap_[pi(TexPool::Vram)];
+	index_insert(static_cast<unsigned>(s - slots_));
 
 	++stats_.conversions;
 	stats_.bytes_converted += bytes;
@@ -352,6 +401,7 @@ unsigned TexCache::bump_generation()
 			++n;
 		}
 	}
+	index_clear();   // no Live slot is left
 	++stats_.generation;
 	++stats_.collections_changed;
 	frames_since_gen_ = -1;
@@ -371,6 +421,35 @@ void TexCache::release_all()
 	for (TexSlot& s : slots_)
 		if (s.state != TexSlotState::Free)
 			free_slot_memory(s);
+	index_clear();
+}
+
+bool TexCache::audit_index(unsigned* chain_max) const
+{
+	bool ok = true;
+	unsigned chained = 0, longest = 0;
+	for (unsigned b = 0; b < kBuckets; ++b)
+	{
+		unsigned len = 0;
+		for (uint16_t i = head_[b]; i != kNoSlot; i = next_[i])
+		{
+			const TexSlot& s = slots_[i];
+			if (++len > kTexSlots || !indexed_[i] || s.state != TexSlotState::Live ||
+			    s.generation != stats_.generation || bucket_of(s.key) != b)
+			{
+				ok = false;
+				break;
+			}
+		}
+		chained += len;
+		longest = std::max(longest, len);
+	}
+	unsigned live = 0;
+	for (const TexSlot& s : slots_)
+		live += s.state == TexSlotState::Live && s.generation == stats_.generation;
+	if (chain_max)
+		*chain_max = longest;
+	return ok && chained == live;
 }
 
 bool TexCache::audit(uint32_t* expected_linear, uint32_t* expected_vram) const
@@ -423,6 +502,8 @@ unsigned TexCache::retiring_count() const
 
 std::string TexCache::stats_line() const
 {
+	unsigned chain = 0;
+	const bool index_ok = audit_index(&chain);
 	char buf[768];
 	int n = std::snprintf(buf, sizeof buf, "[c3d] tex: entries %u/%u KiB %u/%u conv %u (%llu KiB, max/frame %u KiB, over %u) gen-window KiB",
 	                      live_count(TexPool::Linear), live_count(TexPool::Vram), used_[0] / 1024, used_[1] / 1024,
@@ -433,11 +514,13 @@ std::string TexCache::stats_line() const
 	if (n > 0 && n < static_cast<int>(sizeof buf))
 		std::snprintf(buf + n, sizeof buf - n,
 		              " promo %u/%u/%u(land %u) evict %u dfree %u gen %u alloc-fail %u discards %u hits %u misses %u creates %u "
-		              "forced %u bursts %u audit %s",
+		              "forced %u bursts %u audit %s index %s chain %u probes %llu/%llu(index/scan)",
 		              stats_.promotions_done, stats_.promotions_deferred, stats_.promotions_blocked,
 		              stats_.promotions_blocked_land, stats_.evictions, stats_.deferred_frees,
 		              stats_.generation, stats_.alloc_failed_free, stats_.discards_tex, stats_.hits, stats_.misses,
-		              stats_.creates, stats_.forced_fails, stats_.burst_frames, audit() ? "ok" : "MISMATCH");
+		              stats_.creates, stats_.forced_fails, stats_.burst_frames, audit() ? "ok" : "MISMATCH",
+		              index_ok ? "ok" : "MISMATCH", chain, static_cast<unsigned long long>(stats_.probes),
+		              static_cast<unsigned long long>(stats_.probes_old));
 	return std::string(buf);
 }
 
