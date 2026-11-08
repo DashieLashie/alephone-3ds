@@ -36,6 +36,13 @@ int bands_normalise(const Band* in, int n, int height, Band* out);
 // The tiles (bit t = rows [8t, 8t + 8)) the bands cover; height <= 32 tiles.
 uint32_t bands_tile_mask(const Band* b, int n);
 
+// The overlay surface's dirty-tile rule (M6 specification, critic round 1 major 2): before the engine draws a frame's
+// overlays, every tile written since its last clear is cleared, so the surface is transparent outside the frame's bands.
+// `dirty` = tiles possibly written (in: the last frame's; out: this frame's bands, or every tile after a leak). Returns the
+// tiles to clear now. `leaked`: the last audit found a pixel outside the last frame's bands (an overlay the band helper
+// missed): every tile is cleared next time.
+uint32_t overlay_tiles_to_clear(uint32_t& dirty, uint32_t current, bool leaked, uint32_t all_tiles);
+
 } // namespace a1_c3d
 
 #endif

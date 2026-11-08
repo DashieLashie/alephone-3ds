@@ -513,11 +513,15 @@ FrameStart frame_begin(FrameZone zone)
 	return FrameStart::Ok;
 }
 
+constexpr int kMaxBandsForWarning = 4;   // core/overlay_bands.h kMaxBands
+
 void frame_end(int drawn_linked_targets, bool gate_was_closed, FrameKind kind)
 {
 	const int total = s_gx.end_frame(drawn_linked_targets);
 	if (kind == FrameKind::Present && total > 4)
 		printf("[c3d] warning: %d GX queue entries in one present frame (design: <= 4)\n", total);
+	else if (kind == FrameKind::Composite && total > kMaxBandsForWarning + 2)
+		printf("[c3d] warning: %d GX queue entries in one composite frame (M6: <= %d)\n", total, kMaxBandsForWarning + 2);
 	else if (kind == FrameKind::View && total > 27)
 		printf("[c3d] warning: %d GX queue entries in one view frame (design 2.4: <= 27)\n", total);
 	if (gate_was_closed)

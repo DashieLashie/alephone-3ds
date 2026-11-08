@@ -61,4 +61,11 @@ uint32_t bands_tile_mask(const Band* b, int n)
 	return mask;
 }
 
+uint32_t overlay_tiles_to_clear(uint32_t& dirty, uint32_t current, bool leaked, uint32_t all_tiles)
+{
+	const uint32_t clear = leaked ? all_tiles : dirty;
+	dirty = current;
+	return clear;
+}
+
 } // namespace a1_c3d

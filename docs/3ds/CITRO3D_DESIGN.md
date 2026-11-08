@@ -4957,3 +4957,15 @@ On revision 1: all round-1 findings fixed. Folded: (1) hook 3c moves `present_bo
 counted as `bottom_pending` (upper bound) and reported with the @60 bench; (2) 9.2's wording on when the overlay buffer is
 made aligned with the spec; (3) `sync_skipped_off` also counts play off with citro3d up (noted). Console items unchanged,
 plus whether the bottom screen's VBlank wait ever happens at @60.
+
+### M6 code review (critic: APPROVE, 0 major, 6 minor; folded before the acceptance)
+
+On `d6b252cee`. Patch 47's fencing and OFF identity, eligibility, bands, hook 3c, every citro3d call behind the gate, the
+index, target/texture lifetimes, the composite's binds and restore and the zero-copy interplay checked. Folded: (1) mode
+direct's readback frames fill no sentinel (`view_end_play_full` checks none; it cost a 512 KiB fill and flush on every
+ineligible frame, Classic included); (2) the dirty-tile rule moved into core (`overlay_tiles_to_clear`) and tested on a
+simulated 400x240 surface over 5 000 random band sequences, plus the GX accounting of the composite (4 bands + 2), the
+seeded view frame and `direct_check`'s own frames (which fit `gxq_budget 3`); (3) after an audit finds a leak every tile is
+cleared next frame (the dirty mask records bands, not writes); (4) `direct_check`'s frames re-check the gate; (5) a
+seed_check frame redrawn by SW is counted as SW, and a calibration view frame forgets the texture; (6) `FrameKind::Composite`
+with its own queue warning (≤ 6).

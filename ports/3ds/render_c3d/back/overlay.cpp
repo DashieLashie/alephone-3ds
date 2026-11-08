@@ -42,6 +42,7 @@ uint32_t s_dirty = 0;                      // tiles written since they were last
 Band s_bands[kMaxBands];
 int s_nb = 0;
 bool s_handed = false;
+bool s_leaked = false;                     // the last audit found pixels outside the bands
 unsigned s_bottom_pending = 0;
 
 struct Counters
@@ -120,8 +121,10 @@ SDL_Surface* overlay_begin(const Band* bands, int n, int cal_row)
 	else
 		s_nb = bands_normalise(bands, n, kH, s_bands);
 	const uint32_t cur = bands_tile_mask(s_bands, s_nb);
-		clear_tiles(s_dirty);   // every dirty tile: the surface is transparent outside the bands (M6 spec, critic round 1)
-	s_dirty = cur;
+		// Every dirty tile (the surface is transparent outside the bands: M6 specification, critic round 1); every tile after a
+	// leak, since the dirty mask records bands, not writes (critic, M6 code minor 3).
+	clear_tiles(overlay_tiles_to_clear(s_dirty, cur, s_leaked, (1u << (kH / kBandTile)) - 1));
+	s_leaked = false;
 	if (cal_row >= 0)
 		for (int y = s_bands[0].y0; y < s_bands[0].y1; ++y)
 			for (int x = 0; x < kW; ++x)
@@ -211,6 +214,7 @@ unsigned overlay_leaks_now()
 			leaks += row[x] != 0;
 	}
 	s_n.leaks += leaks;
+	s_leaked = s_leaked || leaks;
 	return leaks;
 }
 

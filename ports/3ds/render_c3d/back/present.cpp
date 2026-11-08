@@ -625,7 +625,7 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		if (fb_w != kScreenH || fb_h != kScreenW)
 			check_fb = nullptr;
 	}
-	frame_end(1, trace);
+	frame_end(1, trace, FrameKind::Composite);
 	++s_cn.composites;
 	if (check)
 	{
@@ -633,7 +633,8 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		// and the software backend's gxq_budget 3 holds): the composite retires (its framebuffer transfer done), the view
 		// texture (unchanged until the next view frame) is read back, retires, and the two are compared.
 		bool done = false;
-		if (frame_begin(FrameZone::Wait) == FrameStart::Ok)
+		// The gate can close between frames (as between a two-frame present's U and D, 5.7.6): no test frame then.
+		if (!(cfg.suspend_gate && gate_closed()) && frame_begin(FrameZone::Wait) == FrameStart::Ok)
 		{
 			const bool queued = view_queue_readback();
 			frame_end(0, false, FrameKind::View);

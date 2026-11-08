@@ -4697,16 +4697,72 @@ static void test_m6_direct_state()
 	CHECK(std::string(direct_block_name(kDirectGamma)) == "gamma");
 	CHECK(std::string(direct_block_name(kDirectMovie)) == "movie");
 	CHECK(direct_block_index(kDirectDarken) == 6 && direct_block_index(1u << 20) == kDirectBlockCount - 1);
-	// The dirty-tile rule (overlay.cpp): a shrinking band leaves nothing outside the new bands.
-	uint32_t dirty = 0, cleared_total = 0;
-	Band b1[kMaxBands], b2[kMaxBands];
-	const Band big{0, 100}, small{0, 20};
-	const int n1 = bands_normalise(&big, 1, 240, b1), n2 = bands_normalise(&small, 1, 240, b2);
-	dirty = bands_tile_mask(b1, n1);              // frame 1 wrote rows 0-103
-	const uint32_t cur = bands_tile_mask(b2, n2); // frame 2 composites rows 0-23
-	cleared_total = dirty;                        // every dirty tile cleared
-	dirty = cur;
-	CHECK((cleared_total & ~cur) == (bands_tile_mask(b1, n1) & ~cur) && dirty == cur);
+	// The dirty-tile rule (overlay_tiles_to_clear, used by back/overlay.cpp) on a simulated 400x240 surface: random band
+	// sequences, the engine writing anywhere inside each frame's bands (and, rarely, a leak outside them): after each
+	// clear, no pixel outside the frame's bands is set, except a leak's, which the next frame clears entirely.
+	{
+		std::mt19937 rng(616);
+		std::vector<uint8_t> surf(400 * 240, 0);
+		uint32_t dirty = 0;
+		bool leaked = false;
+		unsigned outside = 0, leaks_made = 0, leaks_cleared = 0;
+		const uint32_t all = (1u << 30) - 1;
+		for (int f = 0; f < 5000; ++f)
+		{
+			Band in[3], out[kMaxBands];
+			const int n = static_cast<int>(rng() % 4);
+			for (int i = 0; i < n; ++i)
+			{
+				const int a0 = static_cast<int>(rng() % 240);
+				in[i] = Band{a0, a0 + 1 + static_cast<int>(rng() % 80)};
+			}
+			const int k = bands_normalise(in, n, 240, out);
+			const uint32_t cur = bands_tile_mask(out, k);
+			const bool had_leak = leaked;
+			const uint32_t clear = overlay_tiles_to_clear(dirty, cur, leaked, all);
+			leaked = false;
+			for (int t = 0; t < 30; ++t)
+				if (clear >> t & 1)
+					std::fill(surf.begin() + t * 8 * 400, surf.begin() + (t + 1) * 8 * 400, 0);
+			for (int y = 0; y < 240; ++y)   // before drawing: nothing outside the bands
+				if (!(cur >> (y / 8) & 1))
+					for (int x = 0; x < 400; ++x)
+						outside += surf[static_cast<size_t>(y) * 400 + x] != 0;
+			leaks_cleared += had_leak;
+			for (int i = 0; i < k; ++i)     // the engine draws inside the bands
+				for (int j = 0; j < 20; ++j)
+				{
+					const int y = out[i].y0 + static_cast<int>(rng() % (out[i].y1 - out[i].y0));
+					surf[static_cast<size_t>(y) * 400 + rng() % 400] = 1;
+				}
+			if (rng() % 97 == 0)             // a missed overlay writes outside: the audit sees it, the next frame clears all
+			{
+				surf[static_cast<size_t>(rng() % 240) * 400 + rng() % 400] = 1;
+				leaked = true;
+				++leaks_made;
+			}
+		}
+		CHECK(outside == 0);
+		CHECK(leaks_made > 10 && leaks_cleared >= leaks_made - 1);
+	}
+	// GX accounting (2.4) of M6's frames: a composite with 4 band uploads + C3D_FrameEnd + the linked target; a direct view
+	// frame with its seed; direct_check's readback runs in frames of its own (split + transfer + end).
+	{
+		GxQueue q;
+		q.begin_frame();
+		for (int i = 0; i < kMaxBands; ++i)
+			CHECK(q.take(false));
+		CHECK(q.end_frame(1) == kMaxBands + 2 && q.end_frame(1) <= GxQueue::kMaxBudget);
+		q.begin_frame();
+		CHECK(q.take(false));                                    // the seed, first in the frame
+		CHECK(q.used() + 1 + kViewReserveEntries <= q.budget());  // promotions still fit behind it
+		q.begin_frame();
+		CHECK(q.take_split() && q.take(false) && q.end_frame(0) == 3);
+		GxQueue sw;
+		sw.set_budget(3);                                         // the software backend's configs
+		sw.begin_frame();
+		CHECK(sw.take_split() && sw.take(false));                 // direct_check's frame fits gxq_budget 3
+	}
 }
 
 static void test_m6_core()

@@ -857,7 +857,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				opt.seed_rows = reinterpret_cast<const uint8_t* const*>(dest->row_addresses);
 				seeded = true;
 			}
-			opt.sentinel = !direct && !plan.seed;
+			opt.sentinel = false;   // mode direct's readback copies every pixel and checks no sentinel (critic, M6 code minor 1)
 		}
 		if (direct && cfg.calibrate)
 		{
@@ -921,6 +921,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			++s_d.direct;
 			s_d.this_frame = true;
 			note_mode(-1);
+			if (cfg.calibrate)
+				direct_forget_texture(s_d.st);   // it holds the calibration picture, not the view (critic, M6 code minor 5)
 		}
 		else
 		{
@@ -943,9 +945,15 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			s_d.this_frame = false;           // so this frame goes the readback way: dest must hold it
 			if (direct)
 			{
-				// The world is in the texture no more: redraw it in SW into dest (the view this frame shows).
+				// The world is in the texture no more: redraw it in SW into dest (the view this frame shows), and count the
+				// frame as SW (critic, M6 code minor 5).
 				sw_replay();
 				direct_after(s_d.st, ViewKind::Sw, false);
+				--s_d.direct;
+				--P.c3d;
+				++s_d.sw;
+				++s_d.reason[kReasonPlay];
+				note_mode(kReasonPlay);
 			}
 		}
 	}

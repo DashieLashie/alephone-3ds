@@ -56,7 +56,8 @@ FrameStart frame_begin(FrameZone zone = FrameZone::Wait);
 // What a frame is, for the queue warning of frame_end(): a present (design: <= 4 entries) or an M0
 // view frame (back/view.cpp: the calibration frame, whose readback transfer is queued inside it and
 // counted by gx_op; design 2.4: <= 27).
-enum class FrameKind { Present, View };
+// M6: Composite = a direct frame's present (band uploads + end + 1 linked: <= 6).
+enum class FrameKind { Present, View, Composite };
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) with the queue accounting of the frame closed.
 // `gate_was_closed`: the gate condition held when the present began (diagnostic d2).
 void frame_end(int drawn_linked_targets, bool gate_was_closed = false, FrameKind kind = FrameKind::Present);
