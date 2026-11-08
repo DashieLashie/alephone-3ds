@@ -552,6 +552,8 @@ struct DirectFront
 	int dw = 0, dh = 0;
 	unsigned frames = 0, direct = 0, readback = 0, sw = 0, cal = 0;
 	unsigned reason[kReasonCount] = {};
+	unsigned policy_calls = 0, policy_blocked[kDirectBlockCount] = {};   // every frame hook 3a saw (map and terminal
+	                                                                      // frames never reach render_frame)
 	unsigned seeds = 0, syncs = 0, sync_failed = 0, discard_stale = 0, forced_sw = 0, new_dest = 0;
 	unsigned sync_skipped[static_cast<int>(SyncSkip::kCount)] = {};
 	bool seed_checked = false;
@@ -614,6 +616,17 @@ int direct_counts_text(char* buf, size_t size)
 		if (s_d.reason[r])
 		{
 			n += snprintf(buf + n, size - n, "%s%s:%u", any ? "," : "", reason_name(r), s_d.reason[r]);
+			any = true;
+		}
+	if (!any && n > 0 && n < static_cast<int>(size))
+		n += snprintf(buf + n, size - n, "-");
+	if (n > 0 && n < static_cast<int>(size))
+		n += snprintf(buf + n, size - n, " policy=%u blocked=", s_d.policy_calls);
+	any = false;
+	for (int r = 0; r < kDirectBlockCount && n > 0 && n < static_cast<int>(size); ++r)
+		if (s_d.policy_blocked[r])
+		{
+			n += snprintf(buf + n, size - n, "%s%s:%u", any ? "," : "", direct_block_name(1u << r), s_d.policy_blocked[r]);
 			any = true;
 		}
 	if (!any && n > 0 && n < static_cast<int>(size))
@@ -1054,7 +1067,7 @@ void stats_tick()
 		play_counts_text(buf, sizeof buf);
 		printf("[c3d] play %s\n", buf);
 	}
-	if (s_d.frames)
+	if (s_d.frames || s_d.policy_calls)
 	{
 		char buf[768];
 		direct_counts_text(buf, sizeof buf);
@@ -1154,7 +1167,7 @@ void frame_final_stats()
 	if ((s_diff_done || s_diff_dropped || s_diff_checks) && !s_diff_summary_printed)
 		diff_summary();
 	static bool direct_final = false;
-	if (s_d.frames && !direct_final)
+	if ((s_d.frames || s_d.policy_calls) && !direct_final)
 	{
 		direct_final = true;
 		char buf[768];
@@ -1172,6 +1185,9 @@ void direct_policy(unsigned blocks)
 {
 	s_d.policy = blocks;
 	s_d.policy_set = true;
+	++s_d.policy_calls;
+	if (blocks)
+		++s_d.policy_blocked[direct_block_index(blocks)];
 	s_d.this_frame = false;
 	back::overlay_drop();   // a hand-out the last present did not consume (the gate skipped it)
 	const Config& cfg = back::config();
