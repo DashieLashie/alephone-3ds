@@ -3899,8 +3899,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
-- **M6b specification (revision 2 of 2026-11-08, before code; revision 1 = part 1, critic round 1 applied, round 2 APPROVE;
-  revision 2 adds parts 2 and 3 at the end of this block, user decision: Review log "M6b: every fade on the GPU").** Where the lines above
+- **M6b specification (revision 3 of 2026-11-08, before code; revision 1 = part 1, critic rounds 1-2; revision 2 adds parts 2
+  and 3 at the end of this block, user decision: Review log "M6b: every fade on the GPU"; revision 3 = critic round 3 applied).** Where the lines above
   and this block disagree, this block rules. Citations are the code at `c6dd77d30`. **No engine edit.** One session.
   - *What a fade is in a 32-bit build (checked).* `build_direct_color_table` (`screen.cpp`:2219-2232) makes the 256-entry
     colour table a **grey ramp**: entry *i* is `(i << 8, i << 8, i << 8)` (`default_gamma_*` = `i << 8`, :2205-2216; Brightness
@@ -4037,32 +4037,38 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     *The fit.* After part 1 fails: per channel, g from the entries where the curve rises with slope ≈ A (or the identity when
     there is no liquid), then σ1, σ2 ∈ {0, 1} tried, K1 and K2 read off the breakpoints, the result verified on all 256
     entries against a model of the passes below (part 1's rounding model per blend, the TEV stages rounding to 8 bits each:
-    **UNVERIFIED**, see console list); within `fade_tol` it is accepted. The host test (replicas of the three faders at
+    **UNVERIFIED**, see console list); within `fade_tol` it is accepted. **Dodge's wrapped entries first** (critic round 3,
+    major 1): before the verification, entries that differ from the candidate's clamped form by more than half the range
+    (SW's `uint16` wrap, below) are replaced by the clamped value and counted; the verification then runs on the result, and
+    `direct_check` uses the same normalised curve. A channel set may not mix, in one pass, a σ = 1 channel with K ≤ 1 and a
+    channel with K > 1 (stage 4's operation is shared by the three channels: `SUBTRACT` vs `ADD` with a one-minus operand);
+    such a fit is rejected (no stock fade does this; round 3, minor 6). The host test (replicas of the three faders at
     *t* = 0 .. 1 in 1/64 steps, each colour of :186-192, alone and over each liquid) fixes how well the search finds them;
     fits that the search cannot find fall back.
     *The passes* (after part 1's quad, which applies g when there is a liquid; without one part 1's quad is not drawn).
     Each pass is a full-screen draw whose TEV **rebuilds the composited pixel** C from the two textures, as SW composites
-    before `apply_gamma`: stage 0 `MODULATE(TEXTURE0, TEXTURE1 with operand ONE_MINUS_SRC_ALPHA)` (the view times one minus
-    the overlay's alpha), stage 1 `ADD(PREVIOUS, TEXTURE1)` (+ the premultiplied overlay) = M6's CPU composite
-    (`direct_check_compare`, `present.cpp`:449-452); stages 2-3 apply g (`MODULATE` by a constant A, `ADD` a constant B;
-    passthrough without a liquid); stage 4 `MODULATE(PREVIOUS, constant σ)`; stage 5 `K − PREVIOUS`, as `SUBTRACT(constant
-    K, PREVIOUS)` for K ≤ 1 or `ADD(PREVIOUS with ONE_MINUS operand, constant K − 1)` for K > 1 (the clamp at 1 is harmless:
-    it only happens where `min(g, ·)` already picks g). Ops and sources: `enums.h`:320-334, :365-374 (`GPU_TEXTURE1`,
-    `GPU_PREVIOUS`, `GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA`, `GPU_SUBTRACT`, `GPU_MODULATE`, `GPU_ADD`). That is **six stages,
-    PICA's whole TEV** (`C3D_GetTexEnv(0..5)`); the implementer confirms the count, and if a liquid + fold does not fit,
-    that combination alone falls back. **Pass MIN** (σ1, K1): blend `GPU_BLEND_MIN` with factors `ONE, ONE` (so whether PICA
+    before `apply_gamma` (round 3, minor 6: five stages, one spare): stage 0 `MULTIPLY_ADD(TEXTURE0, TEXTURE1 with operand
+    ONE_MINUS_SRC_ALPHA, TEXTURE1)` = view·(1 − overlay alpha) + premultiplied overlay = M6's CPU composite
+    (`direct_check_compare`, `present.cpp`:449-452; `GPU_MULTIPLY_ADD` = 8, `enums.h`:373); stages 1-2 apply g (`MODULATE`
+    by a constant A, `ADD` a constant B: each stage has one constant, `texenv.h`:85, so B cannot share A's stage without a
+    vertex colour; passthrough without a liquid); stage 3 `MODULATE(PREVIOUS, constant σ)`; stage 4 `K − PREVIOUS`, as
+    `SUBTRACT(constant K, PREVIOUS)` for K ≤ 1 or `ADD(PREVIOUS with ONE_MINUS operand, constant K − 1)` for K > 1 (the clamp
+    at 1 is harmless: it only happens where `min(g, ·)` already picks g); stage 5 passthrough. Ops and sources:
+    `enums.h`:320-334, :365-374 (`GPU_TEXTURE1`, `GPU_PREVIOUS`, `GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA`, `GPU_SUBTRACT`,
+    `GPU_MODULATE`, `GPU_ADD`, `GPU_MULTIPLY_ADD`). **Pass MIN** (σ1, K1): blend `GPU_BLEND_MIN` with factors `ONE, ONE` (so whether PICA
     applies factors in MIN mode, **UNVERIFIED**, cannot matter): `dst = min(dst, K1 − σ1·g)` where dst = g(C) after part 1.
     **Pass MAX** (σ2, K2), drawn only for a channel set that needs it (negate): `GPU_BLEND_MAX`, factors `ONE, ONE`. Identity
     channels get constants that leave dst unchanged (K1 = 1, σ1 = 0 in MIN; K2 = 0, σ2 = 0 in MAX). Alpha untouched.
     *Two textures, two coordinate sets.* The view texture is sampled at `v = 1 − y/256` (`view_v_flip`), the overlay at
     `v = y/256` (the band quads, `present.cpp`:583-590): unit 1 needs **texcoord1**. The present program outputs only
-    texcoord0 (`shaders/present.v.pica`): either a pass-through `texcoord1` output from a third vertex attribute, or a second
-    small program (`fade.v.pica`, picasso through CMake as the others); the world program already proves unit 1 reads
-    texcoord1 (`world.v.pica`:16, M3's shade LUT on unit 1). The implementer picks one and states the bind and restore
-    (the `C3D_BindProgram` wrap in `context.cpp`, M1). *The overlay texture holds data only in this frame's bands*
-    (`overlay_upload`, `overlay.cpp`:167-182; elsewhere it is stale): the passes are drawn per row range, with the
-    two-texture stages 0-1 inside the bands and a view-only stage 0 (`REPLACE TEXTURE0`) outside them. The vertex buffer
-    grows by those quads (`kCompositeQuads`, `present.cpp`:121).
+    texcoord0 (`shaders/present.v.pica`): it gains an output **`texcoord1 = (u, flip − v)`** with `flip` a uniform set from
+    `view_v_flip` (1 or 0), so the composite's vertices stay 5 floats and the AttrInfo set once at `present_init`
+    (`present.cpp`:740-743) does not change (round 3, minor 5); the present quad and the composite's other draws ignore
+    texcoord1. The world program already proves unit 1 reads texcoord1 (`world.v.pica`:16, M3's shade LUT on unit 1).
+    *The overlay texture holds data only in this frame's bands* (`overlay_upload`, `overlay.cpp`:167-182; elsewhere it is
+    stale): the passes are drawn per row range, with stage 0's two-texture form inside the bands and, outside them, stage
+    0 `REPLACE TEXTURE0` with **no stage reading TEXTURE1** (round 3, minor 4). The vertex buffer grows by those quads
+    (`kCompositeQuads`, `present.cpp`:121).
     *Accept:* the part 1 gate (≥ 99.9 % within Δ 2, max Δ ≤ 4 against SW, `direct_check` with the curves; for dodge against
     the clamped curve on its wrapped entries, above) for every negate, dodge and burn type of the Fade Test and for one of them over water (the Liquid Test with `fade_screen` of
     `_fade_negative` in place of the red flash on a second run).
@@ -4071,24 +4077,46 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     colour scramble, not spatial snow. **The user decided the GPU version may look different**: it draws **spatial static**
     with M5's noise texture (`core/noise.h`: 256x256 RGBA8 of the LFSR states, `GPU_REPEAT`, `back/shade.cpp`:65,
     `noise_get()` :194; in linear memory, promoted to VRAM when there is room).
-    *Detection from the curves:* g = the affine lower envelope (a line fitted through the minima of 16 windows of 16
-    entries; identity without a liquid), residuals `r(i) = (c[i] − g16(i)) mod 65536`; static when every residual lies in
-    [0, M] with M ≥ 0x00FF and the curve is not part 1's or part 2's. *Strength:* M (65 535 at the start, roughly halving
-    as the fade decays). *The pass* (after part 1's quad for g, which is drawn only with a liquid): one full-screen quad
+    *Detection from the curves (round 3, major 2: the test must be able to fail).* Tried **last**, after part 1 and part 2
+    (with dodge's wrap normalised) have both rejected the curves. g = the affine lower envelope (a line through the minima
+    of 16 windows of 16 entries) and g must itself pass part 1's affine test (identity without a liquid); residuals
+    `r(i) = c[i] − g16(i)` as signed values, **no modulo** (an entry that wrapped above 65 535 shows as a large negative
+    residual and is allowed only within `mask` of 0 after adding 65 536, SW's own wrap); then SW's structure must hold:
+    one **mask = 2^k − 1** (k ≥ 8) **shared by the three channels** (SW computes one mask from the transparency,
+    `fades.cpp`:613-623), every residual in [0, mask], the residuals **spread** over it (each channel's mean in
+    [mask/4, 3·mask/4] and its maximum ≥ mask/2). Anything else is unclassified and stays non-direct. *Strength:* mask
+    (65 535 at the start, halving as the fade decays). Host tests: every part 1 and part 2 replica, composed or not, and
+    the dodge replicas at every *t*, **never** classify as static; randomize replicas at every *t* (alone and over each
+    liquid) always do. *The pass* (after part 1's quad for g, which is drawn only with a liquid): one full-screen quad
     textured by the noise on unit 0 at texcoords `(x + ox, y + oy) / 256` with a new pseudo-random (ox, oy) every frame, TEV
     `REPLACE TEXTURE0`, the **alpha test** `GEQUAL noise_ref(65535 − M)` (M5's density rule, `core/noise.h`, so about M/65536
-    of the pixels become static), blend `ONE, ZERO`: those pixels show the noise's colour, the others the picture. The
-    noise must exist before the composite frame (`noise_get()` may build it and issues a transfer: the implementer calls it
-    where M5's rules allow, out of the composite's GX budget, and states where).
+    of the pixels become static), blend `ONE, ZERO`: those pixels show the noise's colour, the others the picture. **The
+    noise is fetched in `direct_policy`** (round 3, minor 7: outside any frame, safe; `resident_build` is a CPU fill and a
+    cache flush, `shade.cpp`:78-100, the VRAM promotion happens later in `resident_frame_start`): when the curves classify
+    as static, `noise_get()` is called there and, if it returns nullptr (no linear memory), `kDirectGamma` is **kept** (the
+    frame falls back) instead of committing to a direct frame with no noise. `s_noise_frame` stays valid until the next
+    `noise_frame_start`, so the composite may sample it.
     *Accept (functional, no SW gate):* in the Fade Test the `_fade_static` frames are direct (`fade_static=` counter), the
     snow appears at the hit, thins out and is gone when the curves return to the identity (`fit identity` line; captures at
     the start, middle and end); `direct_check` skips static frames (counted `fade_unchecked=`) instead of failing them.
+  - **State after parts 2 and 3 (round 3, major 3).** `set_present_draw` rebuilds only TEV stage 0 (`present.cpp`:356-357)
+    and every other draw of the present and of the world assumes stages 1-5 passthrough; `resident_frame_start` assumes unit
+    1 is NULL between frames (`shade.cpp`:110-113), and `draw.cpp` counts `tex1_restore_mismatch`. So after the last fade
+    pass of a composite: `C3D_TexEnvInit` on every stage 1-5 that was used (`C3D_GetTexEnv(i)` marks it dirty), **unit 1
+    unbound the way shade does it** (`shade_unbind_unit1()`, `shade.cpp`:218-225; with the layout not confirmed, the same
+    fallback as M3), the alpha test off (`C3D_AlphaTest(false, ...)`), the blend back to `ONE, ZERO` and the blend colour to
+    0, the `flip` uniform left as set (only the fade passes read texcoord1), the program unchanged (the present program is
+    still bound). A counter `fade_restores=` on the `[c3d] composite` line, and the existing `tex1_restore_mismatch` must stay
+    0 through the Fade Test.
+  - **Work split (round 3, minor 8).** Parts 1, 2 and 3 land as **three commits** in that order, each behind `fade_parts`
+    (bit 1, 2, 4) with its own gate run before the next starts; the tag `port-stage10-M6b` goes on the last. If part 2 or 3
+    proves impossible "within reason", the user is asked, and part 1 stands on its own.
   - *Revision 2's counters and keys:* `fade_direct=` splits into `fade_affine=`, `fade_fold=` (part 2), `fade_static=`; the
     `[c3d] fade:` line names the part (`fit affine|fold|static|identity|no`); `fades 0|1` stays the master switch and a test
     key `fade_parts N` (bit mask 1|2|4, default 7) turns parts off for A/B runs. The Fade Test's acceptance becomes: every
     fade type started shows its line, and **`blocked=gamma` is 0 for the whole run** except frames a fit could not classify
     (each listed with its curves' first entries, for the next revision).
-  - *Revision 2's console list (adds to the above):* the TEV's per-stage precision over six stages; `GPU_BLEND_MIN`/`MAX`
+  - *Revision 2's console list (adds to the above):* the TEV's per-stage precision over five stages; `GPU_BLEND_MIN`/`MAX`
     on hardware (factors `ONE`); the three passes' GPU time on a fade frame (`gpu_ms`); the noise's look at 30 and 60 fps.
 
 ### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
@@ -5418,4 +5446,18 @@ session (`KICKOFF_M6B.md`).
 Same day, after a replica check: SW's dodge wraps around in `uint16` (pixels brighter than `1 − t` come out bright); **user
 decision: the GPU clamps** (the OpenGL renderer does not wrap either); `direct_check` measures dodge against the clamped curve
 on the wrapped entries and counts them.
+
+### M6b pre-implementation, round 3 (critic: REVISE, 3 major, 5 minor; applied as revision 3)
+
+On revision 2 (parts 2 and 3). Majors: (1) part 2's verification on all 256 entries could never accept dodge (SW's wrapped
+entries miss the clamped form by ~200), which part 3 would then have drawn as static: wrapped entries are normalised before
+the verification; (2) part 3's test could not fail (M was its own maximum, negative residuals wrapped to ~0xFFxx): it now
+needs SW's structure (one power-of-two mask shared by the channels, residuals spread over it, an affine envelope) and runs
+last; host tests forbid part 1/2 replicas from classifying as static; (3) nothing restored TEV stages 1-5, unit 1 (which
+`resident_frame_start` and M3's checks assume NULL) or the alpha test after the new passes: an explicit restore and a
+counter. Minors: stage 1 outside the bands no longer reads the stale overlay; texcoord1 from the shader with a `flip`
+uniform (no new attribute); stage 0 as one `MULTIPLY_ADD` (five stages, one spare) and the shared-operation rule;
+`noise_get()` in `direct_policy` with a fallback on nullptr; three commits behind `fade_parts`. Confirmed by the critic: the
+TEV sources and operands, K > 1, the negate closed form. Revision 3 goes to the critic once more (round 4) before the
+fresh session.
 
