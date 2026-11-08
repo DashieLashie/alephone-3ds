@@ -1086,8 +1086,9 @@ fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)` (one inner `#ifd
     Port side (no engine edit): `include/a1_c3d.h` declares `DirectBlock`, `direct_policy`, `direct_frame`,
     `OverlayBand`, `overlay_begin`, `overlay_target`; `front/frame.cpp` and `back/overlay.cpp` define them.
 
-**Non-3DS check:** pending (Docker down on 2026-11-07; run `ppcheck.sh "Source_Files/RenderOther/screen.cpp
-Source_Files/RenderOther/screen_shared.h" "Source_Files/RenderOther/screen.cpp"` before the M6 commit).
+**Non-3DS check** (2026-11-07, `ppcheck.sh "Source_Files/RenderOther/screen.cpp Source_Files/RenderOther/screen_shared.h"
+"Source_Files/RenderOther/screen.cpp"`, both volumes): **IDENTICAL** (197 087 and 125 183 preprocessed lines, stderr 0);
+`-fsyntax-only` exit 0, 0 diagnostics.
 
 **3DS builds** (2026-11-07): `build-3ds` and `build-3ds-prof`: `objdump -d alephone.elf | tail -n +3` **identical** to the
 copies saved at the start of M6 (`build/m6/start/`, after the `stage10-bb` merge); a first placement of the helpers before
