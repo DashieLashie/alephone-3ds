@@ -4024,7 +4024,14 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     each channel is one of: burn, *k* = 1: identity; *k* = 0: `min(c, u)`. Dodge, *k* = 1: `min(c, 1 − t)`; *k* = 0:
     `min(c, 1 − t − c)` (a fold of the bright half). Negate, *k* = 0: identity; *k* = 1: `max(min(c, 1 + u − c), 1 − u − c)`
     (equal to SW's two branches for every *c*, the boundary `c = ½` included). With a liquid underneath (the fade effect is
-    applied first, :519-531) *c* is replaced by part 1's affine `g(c) = A·c + B`. **One family covers all of them, per
+    applied first, :519-531) *c* is replaced by part 1's affine `g(c) = A·c + B`. Checked numerically (a replica of the three
+    faders over the grey ramp, *t* in 1/64 steps, both channel values): negate and burn match these forms within 1 step
+    everywhere. **Dodge wraps:** its intermediate goes negative where `c > 1 − t` (channels at 0; and at *t* = 1 for channels at
+    full) and is stored into a `uint16`, so SW shows those pixels **bright** (`2 − t − c`), a sawtooth (8 257 of 16 640 sampled
+    entries). The engine's OpenGL dodge does not reproduce it either (a two-pass approximation, `OGL_Faders.cpp`:164-174).
+    **User decision (2026-11-08): the GPU clamps** (the forms above, those pixels dark); `direct_check`'s reference uses the
+    clamped curve on the entries where SW's wraps (detected as a jump of more than half the range against the clamped form)
+    and counts those pixels (`fade_wrap_px=`), so the gate measures everything else. **One family covers all of them, per
     channel:** `F = max(min(g, K1 − σ1·g), K2 − σ2·g)` with σ ∈ {0, 1} and K ∈ [0, 2] (identity: K1 ≥ 1 + max g with σ1 = 0,
     K2 = 0 with σ2 = 0; a cap: σ1 = 0; a fold: σ1 = 1; negate: both).
     *The fit.* After part 1 fails: per channel, g from the entries where the curve rises with slope ≈ A (or the identity when
@@ -4056,8 +4063,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     (`overlay_upload`, `overlay.cpp`:167-182; elsewhere it is stale): the passes are drawn per row range, with the
     two-texture stages 0-1 inside the bands and a view-only stage 0 (`REPLACE TEXTURE0`) outside them. The vertex buffer
     grows by those quads (`kCompositeQuads`, `present.cpp`:121).
-    *Accept:* the part 1 gate (≥ 99.9 % within Δ 2, max Δ ≤ 4 against SW, `direct_check` with the curves) for every negate,
-    dodge and burn type of the Fade Test and for one of them over water (the Liquid Test with `fade_screen` of
+    *Accept:* the part 1 gate (≥ 99.9 % within Δ 2, max Δ ≤ 4 against SW, `direct_check` with the curves; for dodge against
+    the clamped curve on its wrapped entries, above) for every negate, dodge and burn type of the Fade Test and for one of them over water (the Liquid Test with `fade_screen` of
     `_fade_negative` in place of the red flash on a second run).
   - **Part 3: static (randomize), GPU-styled.** *SW* (:592-630): each table entry gets a random offset in [0, mask], mask =
     all bits up to the top bit of the transparency, new random values every update, `uint16` wrap-around: a flickering
@@ -5408,4 +5415,7 @@ compiler bolt's screen static (`_fade_static`, only when the player is hit by a 
 on compiler sprites is M5's and already direct) the user decided **the GPU version may look different**: spatial static from
 M5's noise texture, strength from the curves. **Decision: fold all three parts into M6b** (revision 2) and prepare a fresh
 session (`KICKOFF_M6B.md`).
+Same day, after a replica check: SW's dodge wraps around in `uint16` (pixels brighter than `1 − t` come out bright); **user
+decision: the GPU clamps** (the OpenGL renderer does not wrap either); `direct_check` measures dodge against the clamped curve
+on the wrapped entries and counts them.
 
