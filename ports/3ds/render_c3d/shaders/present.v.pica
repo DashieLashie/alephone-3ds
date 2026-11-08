@@ -1,9 +1,12 @@
 ; Aleph One 3DS, citro3d back end (docs/3ds/CITRO3D_DESIGN.md, 5.1): the present quad.
 ; A position in screen pixels (x right, y down) and a texture coordinate, nothing else.
+; M6b: texcoord1 = (u, t1map.x + t1map.y * v), for the fade passes' overlay texture on unit 1 (design 7, M6b
+; "Two textures, two coordinate sets"): (1, -1) maps the view's flipped v to the overlay's y/256; never set = (u, 0).
 ; Assembled by picasso through ports/3ds/CMakeLists.txt (ctr_add_shader_library).
 
 ; Uniforms
 .fvec projection[4]
+.fvec t1map
 
 ; Constants
 .constf myconst(0.0, 1.0, -1.0, 0.0)
@@ -12,6 +15,7 @@
 ; Outputs
 .out outpos position
 .out outtc0 texcoord0
+.out outtc1 texcoord1
 
 ; Inputs
 .alias inpos v0
@@ -29,6 +33,12 @@
 	dp4 outpos.w, projection[3], r0
 
 	mov outtc0, intex
+
+	; texcoord1: u, then offset + scale * v
+	mov r1, intex
+	mul r2.x, t1map.y, intex.y
+	add r1.y, t1map.x, r2.x
+	mov outtc1, r1
 
 	end
 .end

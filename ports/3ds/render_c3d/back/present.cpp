@@ -35,7 +35,10 @@
 */
 #include "context.h"
 #include "overlay.h"
+#include "shade.h"
 #include "view_shared.h"
+
+#include "../core/noise.h"
 
 #include "../include/a1_c3d_port.h"
 #include "a1_3ds_platform.h"
@@ -114,11 +117,16 @@ DVLB_s* s_dvlb = nullptr;
 shaderProgram_s s_program;
 bool s_program_ready = false;
 int s_uloc_projection = -1;
+int s_uloc_t1map = -1;        // M6b: texcoord1's map (present.v.pica)
 C3D_Mtx s_projection;
 Vertex* s_vbo = nullptr;
 u32* s_staging = nullptr;
 // M6: the composite frame's quads (the view, then one per overlay band), rewritten each composite after its frame_begin.
-constexpr int kCompositeQuads = 1 + kMaxBands;
+// M6b: then the fade passes' row ranges (the bands and the gaps between them, view texcoords) and the static's noise quad.
+constexpr int kRangeQuad0 = 1 + kMaxBands;
+constexpr int kMaxRanges = 2 * kMaxBands + 1;
+constexpr int kNoiseQuad = kRangeQuad0 + kMaxRanges;
+constexpr int kCompositeQuads = kNoiseQuad + 1;
 Vertex* s_cvbo = nullptr;
 C3D_BufInfo s_cbuf, s_saved_cbuf;
 
@@ -129,8 +137,12 @@ struct CompositeCounters
 	unsigned checks = 0, check_bad = 0, check_big = 0, check_skipped = 0;
 	unsigned check_max[3] = {0, 0, 0};
 	double check_min_within = 100.0;
-	// M6b: fade quads drawn; direct_checks of fade frames, bad ones (within_2 < 99.9 % or max > 4), their worst figures
-	unsigned fade_quads = 0, fade_checks = 0, fade_bad = 0, fade_max = 0;
+	// M6b: part 1 quads, part 2 MIN/MAX passes, part 3 noise quads, the state restores after parts 2-3; direct_checks of
+	// fade frames, bad ones (within_2 < 99.9 % or max > 4), their worst figures, static frames not checked, and the
+	// checked pixels where SW's own curve differs from the reference (dodge's wrap, dodge/burn's int32 overflow)
+	unsigned fade_quads = 0, fade_passes = 0, fade_noise = 0, fade_restores = 0;
+	unsigned fade_checks = 0, fade_bad = 0, fade_max = 0, fade_unchecked = 0;
+	unsigned long long fade_quirk_px = 0;
 	double fade_min_within2 = 100.0;
 } s_cn;
 // M6b: this frame's fade (fade_frame_set), consumed by the composite.
@@ -492,6 +504,162 @@ bool fade_affine_is_identity(const FadeFit& fit)
 	return true;
 }
 
+// M6b part 2: a row range of the fade passes, inside an overlay band or not.
+struct FadeRange
+{
+	int y0, y1;
+	bool band;
+};
+
+// The screen's rows as the bands (normalised: sorted, disjoint) and the gaps between them.
+int fade_ranges(const Band* bands, int nb, FadeRange* out)
+{
+	int n = 0, y = 0;
+	for (int i = 0; i < nb; ++i)
+	{
+		if (bands[i].y0 > y)
+			out[n++] = FadeRange{y, bands[i].y0, false};
+		out[n++] = FadeRange{bands[i].y0, bands[i].y1, true};
+		y = bands[i].y1;
+	}
+	if (y < kScreenH)
+		out[n++] = FadeRange{y, kScreenH, false};
+	return n;
+}
+
+// Part 2's stage 0: the composited pixel rebuilt from the textures, as SW composites before apply_gamma. In a band
+// MULTIPLY_ADD(view, 1 - overlay alpha, overlay) (enums.h:373; the overlay is premultiplied, M6's CPU composite);
+// outside the bands the view alone, and no stage reads unit 1 (its texture holds stale rows there: round 3, minor 4).
+void set_fade_stage0(bool band)
+{
+	C3D_TexEnv* env = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(env);
+	if (band)
+	{
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE1, GPU_TEXTURE1);
+		C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_MULTIPLY_ADD);
+	}
+	else
+	{
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+	}
+	C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+	C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+}
+
+// One TEV stage i >= 1: RGB = func(sources), alpha passed on, constant `colour`.
+void set_fade_stage(int i, GPU_TEVSRC s0, GPU_TEVSRC s1, GPU_TEVOP_RGB o0, GPU_COMBINEFUNC func, u32 colour)
+{
+	C3D_TexEnv* env = C3D_GetTexEnv(i);
+	C3D_TexEnvInit(env);   // alpha: REPLACE of PREVIOUS
+	C3D_TexEnvSrc(env, C3D_RGB, s0, s1, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpRgb(env, o0, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+	C3D_TexEnvFunc(env, C3D_RGB, func);
+	C3D_TexEnvColor(env, colour);
+}
+
+// Part 2's stages 1-3 of the MIN (`min_pass`) or MAX pass: g = sigma * (A * C + B) in two stages (each stage has one
+// constant, texenv.h:85), then K - g as SUBTRACT(K, g), or as ADD(1 - g, K - 1) when a channel's K is above 1
+// (pass_ok made the form valid for all three; enums.h:365-374).
+void set_fade_terms(const FadeFit& fit, bool min_pass)
+{
+	unsigned sa[3], sb[3], k[3];
+	bool add = false;
+	for (int ch = 0; ch < 3; ++ch)
+	{
+		const FadeChannel& c = fit.ch[ch];
+		const bool s = min_pass ? c.s1 : c.s2;
+		sa[ch] = s ? c.a8 : 0;
+		sb[ch] = s ? c.b8 : 0;
+		k[ch] = min_pass ? c.k1 : c.k2;
+		add = add || k[ch] > 255;
+	}
+	set_fade_stage(1, GPU_PREVIOUS, GPU_CONSTANT, GPU_TEVOP_RGB_SRC_COLOR, GPU_MODULATE, abgr(sa[0], sa[1], sa[2]));
+	set_fade_stage(2, GPU_PREVIOUS, GPU_CONSTANT, GPU_TEVOP_RGB_SRC_COLOR, GPU_ADD, abgr(sb[0], sb[1], sb[2]));
+	if (add)
+		set_fade_stage(3, GPU_PREVIOUS, GPU_CONSTANT, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_ADD,
+		               abgr(k[0] - 255, k[1] - 255, k[2] - 255));
+	else
+		set_fade_stage(3, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEVOP_RGB_SRC_COLOR, GPU_SUBTRACT, abgr(k[0], k[1], k[2]));
+}
+
+// After the last fade pass (design 7, M6b "State after parts 2 and 3"): stages 1-3 back to the passthrough the present
+// and the world draws assume, unit 1 unbound as shade does it (or the LUT back, the M3 fallback), the alpha test off,
+// the plain blend, the blend colour 0, stage 0 the present's. The program and the flip uniform stay.
+void fade_restore(bool unit1)
+{
+	for (int i = 1; i <= 3; ++i)
+		C3D_TexEnvInit(C3D_GetTexEnv(i));   // C3D_GetTexEnv marks the stage dirty
+	if (unit1 && !shade_unbind_unit1())
+	{
+		if (void* lut = shade_lut_bound())
+			__real_C3D_TexBind(1, static_cast<C3D_Tex*>(lut));
+	}
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_BlendingColor(0);
+	set_present_draw(Swizzle::Plain);
+	++s_cn.fade_restores;
+}
+
+// M6b part 2 (design 7, M6b "The passes"): part 1's quad for g (when not the identity), then the MIN pass
+// (dst = min(dst, K1 - s1 g)) and the MAX pass (dst = max(dst, K2 - s2 g)) where a channel needs them, each over the
+// row ranges (quads kRangeQuad0..), blend MIN / MAX with factors ONE, ONE (whether PICA applies factors there cannot
+// matter), alpha kept (ZERO, ONE).
+void draw_fade_fold(const FadeFit& fit, C3D_Tex* vtex, C3D_Tex* otex, const FadeRange* ranges, int nr, int nb,
+                    bool flip)
+{
+	if (!fade_affine_is_identity(fit))
+		draw_fade_affine(fit);
+	bool need[2] = {false, false};
+	for (const FadeChannel& c : fit.ch)
+	{
+		need[0] = need[0] || c.s1 || c.k1 != 255;
+		need[1] = need[1] || c.s2 || c.k2 != 0;
+	}
+	__real_C3D_TexBind(0, vtex);
+	const bool unit1 = nb > 0;
+	if (unit1)
+	{
+		__real_C3D_TexBind(1, otex);
+		shade_check_bound(otex);   // the first bind of unit 1 of the run decides the context layout, as for the LUT
+	}
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_t1map, flip ? 1.0f : 0.0f, flip ? -1.0f : 1.0f, 0.0f, 0.0f);
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		if (!need[pass])
+			continue;
+		set_fade_terms(fit, pass == 0);
+		C3D_AlphaBlend(pass == 0 ? GPU_BLEND_MIN : GPU_BLEND_MAX, GPU_BLEND_ADD, GPU_ONE, GPU_ONE, GPU_ZERO, GPU_ONE);
+		for (int i = 0; i < nr; ++i)
+		{
+			set_fade_stage0(ranges[i].band);
+			C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * (kRangeQuad0 + i), 4);
+		}
+		++s_cn.fade_passes;
+	}
+	fade_restore(unit1);
+}
+
+// M6b part 3 (design 7, M6b "Part 3"): part 1's quad for the base line (when not the identity), then M5's noise
+// texture over the screen at a new offset each frame (quad kNoiseQuad, GPU_REPEAT), REPLACE of the texel, the alpha
+// test GEQUAL noise_ref(65535 - mask) (M5's density rule: about mask/65536 of the pixels), blend ONE, ZERO.
+void draw_fade_static(const FadeFit& fit, C3D_Tex* noise)
+{
+	if (!fade_affine_is_identity(fit))
+		draw_fade_affine(fit);
+	__real_C3D_TexBind(0, noise);
+	set_present_draw(Swizzle::Plain);   // REPLACE of texture 0, RGB and alpha
+	C3D_AlphaTest(true, GPU_GEQUAL, static_cast<int>(noise_ref(static_cast<uint16_t>(65535u - fit.mask))));
+	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * kNoiseQuad, 4);
+	++s_cn.fade_noise;
+	fade_restore(false);
+}
+
 // M6 direct_check: the composite's framebuffer against the read-back view with the overlay's bands composited on the CPU
 // (premultiplied over: c = ov + view * (255 - A) / 255, rounded to nearest), through the CPU present's own conversion
 // (present_reference). `fb` is the framebuffer the composite's transfer wrote (retired).
@@ -528,12 +696,21 @@ void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands
 				}
 				v = out;
 			}
+	unsigned quirk = 0;
 	if (fade)
 		for (size_t i = 0; i < kFbPixels; ++i)
 		{
 			const uint32_t v = s_check_ref[i];
-			s_check_ref[i] = 0xFF000000u | static_cast<uint32_t>(fade->ref[0][(v >> 16) & 0xFF]) << 16 |
-			                 static_cast<uint32_t>(fade->ref[1][(v >> 8) & 0xFF]) << 8 | fade->ref[2][v & 0xFF];
+			const unsigned c[3] = {(v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF};
+			bool q = false;
+			for (int ch = 0; ch < 3; ++ch)
+			{
+				const int d = static_cast<int>(fade->sw[ch][c[ch]]) - fade->ref[ch][c[ch]];
+				q = q || d > 2 || d < -2;
+			}
+			quirk += q;
+			s_check_ref[i] = 0xFF000000u | static_cast<uint32_t>(fade->ref[0][c[0]]) << 16 |
+			                 static_cast<uint32_t>(fade->ref[1][c[1]]) << 8 | fade->ref[2][c[2]];
 		}
 	if (!a1_3ds::present_reference(s_diff_ref, s_check_ref, kScreenW * 4, kScreenW, kScreenH, SDL_PIXELFORMAT_ARGB8888))
 	{
@@ -570,6 +747,7 @@ void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands
 	{
 		const bool bad = within2 < 99.9 || max_all > 4;
 		++s_cn.fade_checks;
+		s_cn.fade_quirk_px += quirk;
 		s_cn.fade_bad += bad;
 		s_cn.check_bad += bad;
 		if (max_all > s_cn.fade_max)
@@ -586,8 +764,9 @@ void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands
 	if (within < s_cn.check_min_within)
 		s_cn.check_min_within = within;
 	printf("[c3d] direct_check: present %u: within_1=%.3f%% within_2=%.3f%% over_1=%u over_32=%u max R %u G %u B %u "
-	       "max=%u bands=%d fade=%d\n",
-	       s_present, within, within2, over1, over32, mx[0], mx[1], mx[2], max_all, nb, fade ? 1 : 0);
+	       "max=%u bands=%d fade=%d%s%s quirk_px=%u\n",
+	       s_present, within, within2, over1, over32, mx[0], mx[1], mx[2], max_all, nb, fade ? 1 : 0,
+	       fade ? " " : "", fade ? fade_kind_name(fade->fit.kind) : "", quirk);
 }
 
 // M6 (design 7, M6 specification "The composite frame"): a direct frame's present. One C3D frame: the band uploads, the
@@ -616,7 +795,12 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		diff_compare();   // a check of the last non-direct present
 	if (cfg.present_diff && n % cfg.present_diff == 0)
 		++s_cn.not_checkable;
-	const bool check = cfg.direct_check && (s_cn.composites + 1) % cfg.direct_check == 0;
+	bool check = cfg.direct_check && (s_cn.composites + 1) % cfg.direct_check == 0;
+	if (check && fade && s_fade.fit.kind == FadeKind::Static)
+	{
+		check = false;   // the static is GPU-styled (user decision): no SW reference
+		++s_cn.fade_unchecked;
+	}
 	Band bands[kMaxBands];
 	int nb = 0;
 	{
@@ -651,7 +835,42 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 			b[2] = Vertex{static_cast<float>(kScreenW), y0, 0.5f, u1, y0 / kTexH};
 			b[3] = Vertex{static_cast<float>(kScreenW), y1, 0.5f, u1, y1 / kTexH};
 		}
-		GSPGPU_FlushDataCache(s_cvbo, static_cast<u32>((1 + nb) * 4 * sizeof(Vertex)));
+		// M6b: the fade passes' row ranges (view texcoords; texcoord1 from the t1map uniform) or the static's noise quad.
+		const FadeKind fkind = fade ? s_fade.fit.kind : FadeKind::None;
+		FadeRange ranges[kMaxRanges];
+		int nr = 0;
+		C3D_Tex* noise = nullptr;
+		int used_quads = 1 + nb;
+		if (fkind == FadeKind::Fold)
+		{
+			nr = fade_ranges(bands, nb, ranges);
+			for (int i = 0; i < nr; ++i)
+			{
+				const float y0 = static_cast<float>(ranges[i].y0), y1 = static_cast<float>(ranges[i].y1);
+				const float v0 = cfg.view_v_flip ? 1.0f - y0 / kTexH : y0 / kTexH;
+				const float v1 = cfg.view_v_flip ? 1.0f - y1 / kTexH : y1 / kTexH;
+				Vertex* r = s_cvbo + 4 * (kRangeQuad0 + i);
+				r[0] = Vertex{0.0f, y0, 0.5f, 0.0f, v0};
+				r[1] = Vertex{0.0f, y1, 0.5f, 0.0f, v1};
+				r[2] = Vertex{static_cast<float>(kScreenW), y0, 0.5f, u1, v0};
+				r[3] = Vertex{static_cast<float>(kScreenW), y1, 0.5f, u1, v1};
+			}
+			used_quads = kRangeQuad0 + nr;
+		}
+		else if (fkind == FadeKind::Static && (noise = static_cast<C3D_Tex*>(noise_get())) != nullptr)
+		{
+			// A new offset each frame (an LCG on the composite counter), the noise repeating (GPU_REPEAT).
+			const uint32_t h = (s_cn.composites + 1) * 2654435761u;
+			const float ox = static_cast<float>((h >> 8) & 0xFF) / kNoiseSide, oy = static_cast<float>((h >> 16) & 0xFF) / kNoiseSide;
+			const float nu = static_cast<float>(kScreenW) / kNoiseSide, nv = static_cast<float>(kScreenH) / kNoiseSide;
+			Vertex* r = s_cvbo + 4 * kNoiseQuad;
+			r[0] = Vertex{0.0f, 0.0f, 0.5f, ox, oy};
+			r[1] = Vertex{0.0f, static_cast<float>(kScreenH), 0.5f, ox, oy + nv};
+			r[2] = Vertex{static_cast<float>(kScreenW), 0.0f, 0.5f, ox + nu, oy};
+			r[3] = Vertex{static_cast<float>(kScreenW), static_cast<float>(kScreenH), 0.5f, ox + nu, oy + nv};
+			used_quads = kCompositeQuads;
+		}
+		GSPGPU_FlushDataCache(s_cvbo, static_cast<u32>(used_quads * 4 * sizeof(Vertex)));
 		s_saved_cbuf = *C3D_GetBufInfo();
 		BufInfo_Init(&s_cbuf);
 		BufInfo_Add(&s_cbuf, s_cvbo, sizeof(Vertex), 2, 0x10);
@@ -676,8 +895,12 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 			s_cn.band_quads += nb;
 		}
 		// M6b: the fade after the overlays (SW applies the curves to the crosshair and the text too).
-		if (fade && s_fade.fit.kind == FadeKind::Affine && !fade_affine_is_identity(s_fade.fit))
+		if (fkind == FadeKind::Affine && !fade_affine_is_identity(s_fade.fit))
 			draw_fade_affine(s_fade.fit);
+		else if (fkind == FadeKind::Fold)
+			draw_fade_fold(s_fade.fit, vtex, otex, ranges, nr, nb, cfg.view_v_flip);
+		else if (fkind == FadeKind::Static && noise)
+			draw_fade_static(s_fade.fit, noise);
 		// The restore: the present's texture (the record), its buffer info, the plain blend.
 		__real_C3D_TexBind(0, static_cast<C3D_Tex*>(tex_recorded()));
 		C3D_SetBufInfo(&s_saved_cbuf);
@@ -819,6 +1042,7 @@ bool present_init()
 	shaderProgramSetVsh(&s_program, &s_dvlb->DVLE[0]);
 	C3D_BindProgram(&s_program);
 	s_uloc_projection = shaderInstanceGetUniformLocation(s_program.vertexShader, "projection");
+	s_uloc_t1map = shaderInstanceGetUniformLocation(s_program.vertexShader, "t1map");
 
 	C3D_AttrInfo* attr = C3D_GetAttrInfo();
 	AttrInfo_Init(attr);
@@ -872,12 +1096,13 @@ void present_free()
 	if (s_cn.composites)
 		printf("[c3d] composite final: composites=%u band_quads=%u present_diff_not_checkable=%u audits=%u leaks=%u "
 		       "direct_checks=%u bad=%u big=%u skipped=%u min_within=%.3f%% max R %u G %u B %u bottom_pending=%u "
-		       "vram_free_kib=%lu fade_quads=%u fade_checks=%u fade_bad=%u fade_min_within_2=%.3f%% fade_max=%u "
-		       "(at exit, before the release)\n",
+		       "vram_free_kib=%lu fade_quads=%u fade_passes=%u fade_noise=%u fade_restores=%u fade_checks=%u fade_bad=%u "
+		       "fade_min_within_2=%.3f%% fade_max=%u fade_unchecked=%u fade_quirk_px=%llu (at exit, before the release)\n",
 		       s_cn.composites, s_cn.band_quads, s_cn.not_checkable, s_cn.audits, s_cn.leaks, s_cn.checks, s_cn.check_bad,
 		       s_cn.check_big, s_cn.check_skipped, s_cn.check_min_within, s_cn.check_max[0], s_cn.check_max[1],
 		       s_cn.check_max[2], overlay_bottom_pending(), static_cast<unsigned long>(s_vram_free_at_exit / 1024),
-		       s_cn.fade_quads, s_cn.fade_checks, s_cn.fade_bad, s_cn.fade_min_within2, s_cn.fade_max);
+		       s_cn.fade_quads, s_cn.fade_passes, s_cn.fade_noise, s_cn.fade_restores, s_cn.fade_checks, s_cn.fade_bad,
+		       s_cn.fade_min_within2, s_cn.fade_max, s_cn.fade_unchecked, s_cn.fade_quirk_px);
 	free(s_check_ref);
 	s_check_ref = nullptr;
 	if (s_staging)

@@ -38,6 +38,7 @@
 #include "../back/view.h"
 #include "../back/view_shared.h"
 #include "../back/overlay.h"
+#include "../back/shade.h"
 #include "../core/bmp.h"
 #include "../core/calibrate.h"
 #include "../core/classify.h"
@@ -572,7 +573,9 @@ struct DirectFront
 	// quad, frames whose curves did not fit (they stay blocked=gamma), the worst error among accepted fits, distinct
 	// curve sets fitted, "[c3d] fade:" lines printed and dropped (after 200), and whether a fade is showing.
 	FadeKind fade_this = FadeKind::None;
-	unsigned fade_affine = 0, fade_nofit = 0, fade_err = 0, fade_changes = 0, fade_lines = 0, fade_lines_dropped = 0;
+	unsigned fade_affine = 0, fade_fold = 0, fade_static = 0, fade_nofit = 0, fade_err = 0, fade_changes = 0;
+	unsigned fade_lines = 0, fade_lines_dropped = 0, fade_nonoise = 0;
+	uint64_t fade_fit_ticks = 0, fade_fit_max = 0;   // A1_PROFILE: the fits' time (svcGetSystemTick)
 	bool fade_seen = false;
 	FadeKind fade_last_kind = FadeKind::None;   // the kind of the last fit logged
 } s_d;
@@ -674,8 +677,13 @@ int direct_counts_text(char* buf, size_t size)
 	if (!any && n > 0 && n < static_cast<int>(size))
 		n += snprintf(buf + n, size - n, "-");
 	if (n > 0 && n < static_cast<int>(size))
-		n += snprintf(buf + n, size - n, " fade_affine=%u fade_nofit=%u fade_err=%u fade_changes=%u fade_lines_dropped=%u ",
-		              s_d.fade_affine, s_d.fade_nofit, s_d.fade_err, s_d.fade_changes, s_d.fade_lines_dropped);
+		n += snprintf(buf + n, size - n,
+		              " fade_affine=%u fade_fold=%u fade_static=%u fade_nofit=%u fade_nonoise=%u fade_err=%u fade_changes=%u "
+		              "fade_lines_dropped=%u fade_fit_ms=%.3f/%.3f ",
+		              s_d.fade_affine, s_d.fade_fold, s_d.fade_static, s_d.fade_nofit, s_d.fade_nonoise, s_d.fade_err,
+		              s_d.fade_changes, s_d.fade_lines_dropped,
+		              s_d.fade_changes ? s_d.fade_fit_ticks / 268111.856 / s_d.fade_changes : 0.0,
+		              s_d.fade_fit_max / 268111.856);
 	if (n > 0 && n < static_cast<int>(size))
 		n += back::overlay_stats_text(buf + n, static_cast<unsigned>(size - n));
 	return n;
@@ -692,7 +700,22 @@ void fade_log(const char* what, const FadeFit* fit, bool event)
 		return;
 	}
 	++s_d.fade_lines;
-	if (fit)
+	if (fit && fit->kind == FadeKind::Fold)
+		printf("[c3d] fade: curves changed, fit %s A=%u,%u,%u B=%u,%u,%u s1=%u%u%u K1=%u,%u,%u s2=%u%u%u K2=%u,%u,%u "
+		       "trust=%u,%u,%u wrap=%u,%u,%u err=%u frame=%u\n", what, fit->ch[0].a8, fit->ch[1].a8, fit->ch[2].a8,
+		       fit->ch[0].b8, fit->ch[1].b8, fit->ch[2].b8, fit->ch[0].s1, fit->ch[1].s1, fit->ch[2].s1, fit->ch[0].k1,
+		       fit->ch[1].k1, fit->ch[2].k1, fit->ch[0].s2, fit->ch[1].s2, fit->ch[2].s2, fit->ch[0].k2, fit->ch[1].k2,
+		       fit->ch[2].k2, fit->trust[0], fit->trust[1], fit->trust[2], fit->wrap_from[0], fit->wrap_from[1],
+		       fit->wrap_from[2], fit->err, s_frame);
+	else if (fit && fit->kind == FadeKind::Static)
+		printf("[c3d] fade: curves changed, fit %s mask=%u A=%u,%u,%u B=%u,%u,%u frame=%u\n", what, fit->mask,
+		       fit->ch[0].a8, fit->ch[1].a8, fit->ch[2].a8, fit->ch[0].b8, fit->ch[1].b8, fit->ch[2].b8, s_frame);
+	else if (fit && fit->kind == FadeKind::None)
+		printf("[c3d] fade: curves changed, fit %s err=%u first=%u,%u,%u/%u,%u,%u/%u,%u,%u frame=%u\n", what, fit->err,
+		       current_gamma_r[0] >> 8, current_gamma_r[128] >> 8, current_gamma_r[255] >> 8, current_gamma_g[0] >> 8,
+		       current_gamma_g[128] >> 8, current_gamma_g[255] >> 8, current_gamma_b[0] >> 8, current_gamma_b[128] >> 8,
+		       current_gamma_b[255] >> 8, s_frame);
+	else if (fit)
 		printf("[c3d] fade: curves changed, fit %s A=%u,%u,%u B=%u,%u,%u err=%u frame=%u\n", what, fit->ch[0].a8,
 		       fit->ch[1].a8, fit->ch[2].a8, fit->ch[0].b8, fit->ch[1].b8, fit->ch[2].b8, fit->err, s_frame);
 	else
@@ -722,12 +745,21 @@ unsigned fade_policy(const Config& cfg, unsigned blocks)
 	if (blocks != kDirectGamma)
 		return blocks;
 	bool changed = false;
+#ifdef A1_PROFILE
+	const uint64_t t0 = a1_3ds::prof::ticks();
+#endif
 	const FadeFit& fit = s_fade_cache.get(current_gamma_r, current_gamma_g, current_gamma_b, cfg.fade_tol,
 	                                      cfg.fade_parts, &changed);
 	if (changed)
 	{
+#ifdef A1_PROFILE
+		const uint64_t dt = a1_3ds::prof::ticks() - t0;
+		s_d.fade_fit_ticks += dt;
+		if (dt > s_d.fade_fit_max)
+			s_d.fade_fit_max = dt;
+#endif
 		++s_d.fade_changes;
-		fade_log(fit.kind == FadeKind::Affine ? "affine" : "no", &fit, !s_d.fade_seen || fit.kind != s_d.fade_last_kind);
+		fade_log(fade_kind_name(fit.kind), &fit, !s_d.fade_seen || fit.kind != s_d.fade_last_kind);
 		s_d.fade_last_kind = fit.kind;
 	}
 	s_d.fade_seen = true;
@@ -736,15 +768,23 @@ unsigned fade_policy(const Config& cfg, unsigned blocks)
 		++s_d.fade_nofit;
 		return blocks;
 	}
-	if (fit.err > s_d.fade_err)
+	// Part 3 needs the noise texture: fetched here, outside any frame (round 3, minor 7: resident_build is a CPU fill and
+	// a flush); without linear memory for it the frame falls back instead of going direct with no noise.
+	if (fit.kind == FadeKind::Static && !back::noise_get())
+	{
+		++s_d.fade_nonoise;
+		return blocks;
+	}
+	if (fit.kind != FadeKind::Static && fit.err > s_d.fade_err)
 		s_d.fade_err = fit.err;
 	FadeFrame frame;
 	frame.fit = fit;
-	for (int i = 0; i < kFadeEntries; ++i)
+	const uint16_t* curves[3] = {current_gamma_r, current_gamma_g, current_gamma_b};
+	for (int ch = 0; ch < 3; ++ch)
 	{
-		frame.ref[0][i] = static_cast<uint8_t>(current_gamma_r[i] >> 8);
-		frame.ref[1][i] = static_cast<uint8_t>(current_gamma_g[i] >> 8);
-		frame.ref[2][i] = static_cast<uint8_t>(current_gamma_b[i] >> 8);
+		fade_reference(curves[ch], fit, ch, frame.ref[ch]);
+		for (int i = 0; i < kFadeEntries; ++i)
+			frame.sw[ch][i] = static_cast<uint8_t>(curves[ch][i] >> 8);
 	}
 	back::fade_frame_set(&frame);
 	s_d.fade_this = fit.kind;
@@ -1058,6 +1098,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		{
 			++s_d.direct;
 			s_d.fade_affine += s_d.fade_this == FadeKind::Affine;
+			s_d.fade_fold += s_d.fade_this == FadeKind::Fold;
+			s_d.fade_static += s_d.fade_this == FadeKind::Static;
 			s_d.this_frame = true;
 			note_mode(-1);
 			if (cfg.calibrate)
@@ -1090,6 +1132,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				direct_after(s_d.st, ViewKind::Sw, false);
 				--s_d.direct;
 				s_d.fade_affine -= s_d.fade_this == FadeKind::Affine;
+				s_d.fade_fold -= s_d.fade_this == FadeKind::Fold;
+				s_d.fade_static -= s_d.fade_this == FadeKind::Static;
 				--P.c3d;
 				++s_d.sw;
 				++s_d.reason[kReasonPlay];

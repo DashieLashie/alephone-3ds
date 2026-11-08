@@ -215,6 +215,21 @@ void shade_check_bound(const void* lut)
 	       ok ? "unbound" : "left bound to the LUT");
 }
 
+void* shade_lut_bound()
+{
+	switch (s_lut.state)
+	{
+	case State::None:
+		return nullptr;
+	case State::Vram:
+		return &s_lut.vram;
+	case State::Linear:
+	case State::Copying:
+		break;
+	}
+	return &s_lut.lin;
+}
+
 bool shade_unbind_unit1()
 {
 	if (s_layout != Layout::Ok || !(*ctx_flags() & 1u))

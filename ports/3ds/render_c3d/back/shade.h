@@ -31,6 +31,9 @@ void* shade_frame_start();
 // Only after `shade_check_bound(lut)` has confirmed the context layout once (the slot holds what the real
 // C3D_TexBind stored); otherwise unit 1 keeps the LUT, as before (logged once). Returns true if it unbound.
 bool shade_unbind_unit1();
+// M6b: the texture lit view frames leave on unit 1 when shade_unbind_unit1 cannot unbind (the fallback): the LUT's
+// current copy, nullptr before it is built. The fade passes put it back after using unit 1.
+void* shade_lut_bound();
 // Right after __real_C3D_TexBind(1, lut): checks that citro3d 1.7.1's context holds `lut` where
 // shade_unbind_unit1 writes. The first call decides.
 void shade_check_bound(const void* lut);

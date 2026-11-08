@@ -4952,6 +4952,12 @@ bool is_identity(const Table& t)
 static void test_m6b_part1()
 {
 	using namespace m6b;
+	{
+		bool exact = true;
+		for (unsigned y = 0; y <= 65535; ++y)
+			exact = exact && fade_div255(y) == y / 255;
+		CHECK(exact);
+	}
 	CHECK(fade_affine_gpu(255, 255, 0) == 255 && fade_affine_gpu(0, 0, 7) == 7 && fade_affine_gpu(255, 255, 10) == 255);
 	CHECK(fade_affine_gpu(128, 64, 0) == 32 && fade_affine_gpu(255, 128, 0) == 128);
 	unsigned worst_single = 0, worst_comp = 0, fits = 0, nofit_tint = 0, wrong_fits = 0, near_identity_fits = 0;
@@ -5047,6 +5053,175 @@ static void test_m6b_part1()
 	}
 }
 
+// A fit's max |GPU model - reference| (the normalised curve: dodge's wrap clamped), recomputed here; part 2's model.
+static unsigned m6b_fold_error(const m6b::Table& t, const FadeFit& f)
+{
+	uint16_t c[3][256];
+	m6b::split(t, c[0], c[1], c[2]);
+	unsigned worst = 0;
+	for (int ch = 0; ch < 3; ++ch)
+	{
+		uint8_t ref[256];
+		fade_reference(c[ch], f, ch, ref);
+		for (int i = 0; i < 256; ++i)
+			worst = std::max(worst, static_cast<unsigned>(std::abs(
+				static_cast<int>(fade_fold_gpu(static_cast<unsigned>(i), f.ch[ch])) - ref[i])));
+	}
+	return worst;
+}
+
+// Part 2: negate, dodge and burn at t = 0 .. 1 (1/64 steps), alone and over each liquid: classified affine or fold
+// within tol (independently re-checked), never static; how many the search cannot find is recorded.
+static void test_m6b_part2()
+{
+	using namespace m6b;
+	unsigned total = 0, fold = 0, affine = 0, none = 0, bad = 0, wraps = 0, worst = 0, none_def[7] = {}, overflow = 0;
+	double ms = 0, ms_max = 0, ms_hint = 0;
+	unsigned hint_diff = 0, hint_more = 0;
+	for (int d = 21; d <= 27; ++d)
+		for (int l = -1; l < 5; ++l)
+		{
+			FadeFit prev;
+			for (int k = 0; k <= 64; ++k)
+			{
+				Table t;
+				ramp(t);
+				if (l >= 0)
+					apply(t, kDefs[kLiquids[l]], 3 * kOne / 4);
+				apply(t, kDefs[d], k * kOne / 64);
+				const auto t0 = std::chrono::steady_clock::now();
+				const FadeFit f = fit_of(t, 2);
+				const double dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+				ms += dt;
+				ms_max = std::max(ms_max, dt);
+				// The cache's path: the previous step's fit as the hint. Same kind, and within tol when found.
+				{
+					uint16_t cr[256], cg[256], cb[256];
+					split(t, cr, cg, cb);
+					const auto t1 = std::chrono::steady_clock::now();
+					const FadeFit h = fade_fit(cr, cg, cb, 2, kFadeAllParts, &prev);
+					ms_hint += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+					// a regression: found without the hint, not with it; or a hinted fold off by more than tol
+					hint_diff += (f.kind != FadeKind::None && h.kind == FadeKind::None) ||
+					             (h.kind == FadeKind::Fold && m6b_fold_error(t, h) > 2);
+					hint_more += f.kind == FadeKind::None && h.kind != FadeKind::None;
+					prev = h;
+				}
+				++total;
+				if (f.kind == FadeKind::Fold)
+				{
+					++fold;
+					const unsigned e = m6b_fold_error(t, f);
+					worst = std::max(worst, e);
+					bad += e > 2 || e != f.err;
+					for (unsigned w : f.wrap_from)
+						wraps += w != kFadeNoWrap;
+					for (unsigned tr : f.trust)
+					{
+						overflow += tr != 255;
+						bad += tr != 255 && d <= 23;   // negate has no int32 overflow: always SW's own curve
+					}
+				}
+				else if (f.kind == FadeKind::Affine)
+					++affine;
+				else if (f.kind == FadeKind::None)
+				{
+					++none;
+					++none_def[d - 21];
+					if (none <= 40)
+						std::printf("m6b part 2 not found: def %d liquid %d t %d/64 (err %u)\n", d, l, k, f.err);
+				}
+				else
+					++bad;   // static
+			}
+		}
+	std::printf("m6b part 2: %u curves: %u fold, %u affine, %u not found; worst error %u; %u wrapped channels, %u "
+	            "fitted on the overflow-free entries; %.3f ms per fit, worst %.3f, hinted %.3f (host); hinted: %u regressions, %u more found\n",
+	            total, fold, affine, none, worst, wraps, overflow, ms / total, ms_max, ms_hint / total, hint_diff, hint_more);
+	std::printf("m6b part 2 not found per type (of 390 each): negative %u, big negative %u, flicker negative %u, dodge "
+	            "purple %u, burn cyan %u, dodge yellow %u, burn green %u\n", none_def[0], none_def[1], none_def[2],
+	            none_def[3], none_def[4], none_def[5], none_def[6]);
+	CHECK(bad == 0 && worst <= 2 && hint_diff == 0);
+	CHECK(none * 100 <= total * 2);   // the search finds at least 98 %
+	CHECK(wraps > 0);                 // dodge's wrap is seen and normalised
+	// The pass rule: a channel with K > 1 and one with K < 1 in the same pass are rejected.
+	FadeChannel c[3];
+	c[0].k1 = 300;
+	c[1].k1 = 255;
+	c[2].k1 = 255;
+	FadeFit dummy;
+	(void)dummy;
+	CHECK(fade_term(100, 1, 300) == 200 && fade_term(100, 1, 80) == 0 && fade_term(100, 0, 80) == 80);
+	CHECK(fade_term(10, 1, 510) == 255 && fade_term(0, 0, 255) == 255);
+}
+
+// Part 3: randomize at every mask 2^k - 1 (k = 8..16), alone and over each liquid, classifies as static with that
+// mask; no tint / soft_tint / negate / dodge / burn replica, composed or not, ever does.
+static void test_m6b_part3()
+{
+	using namespace m6b;
+	unsigned found = 0, total = 0, mask_wrong = 0, missed_alone = 0, fold_static = 0, fold_small = 0;
+	for (int l = -1; l < 5; ++l)
+		for (int k = 8; k <= 16; ++k)
+			for (int rep = 0; rep < 4; ++rep)
+			{
+				Table t;
+				ramp(t);
+				if (l >= 0)
+					apply(t, kDefs[kLiquids[l]], 3 * kOne / 4);
+				const int32_t tr = k == 16 ? kOne : (1 << (k - 1)) + rep * 37;
+				apply(t, kDefs[20], tr);
+				const FadeFit f = fit_of(t, 2, kFadeStatic);
+				const FadeFit all = fit_of(t, 2);
+				// The fold search never takes SW's static once its offsets exceed the tolerance (k >= 11: up to 8 steps);
+				// below that (offsets of 0..3 steps) a fold within tol is as close to SW as anything.
+				if (all.kind == FadeKind::Fold)
+				{
+					fold_small += k < 11;
+					fold_static += k >= 11;
+				}
+				++total;
+				if (f.kind == FadeKind::Static)
+				{
+					++found;
+					// k, or k + 1 where a base's error moved a channel's mean a step (density within 2x)
+					mask_wrong += f.mask != ((1u << k) - 1) && (k == 16 || f.mask != ((2u << k) - 1));
+				}
+				else
+				{
+					missed_alone += l < 0;
+					if (total - found <= 6)
+						std::printf("m6b part 3 not static: liquid %d k %d rep %d\n", l, k, rep);
+				}
+			}
+	unsigned false_static = 0, checked = 0;
+	for (int d = 0; d < kDefCount; ++d)
+	{
+		if (kDefs[d].proc == Randomize)
+			continue;
+		for (int l = -1; l < 5; ++l)
+			for (int k = 0; k <= 64; ++k)
+			{
+				Table t;
+				ramp(t);
+				if (l >= 0)
+					apply(t, kDefs[kLiquids[l]], 3 * kOne / 4);
+				apply(t, kDefs[d], k * kOne / 64);
+				++checked;
+				if (fit_of(t, 2, kFadeStatic).kind == FadeKind::Static)
+				{
+					if (++false_static <= 6)
+						std::printf("m6b part 3 false static: def %d liquid %d t %d/64\n", d, l, k);
+				}
+			}
+	}
+	std::printf("m6b part 3: static %u of %u randomize curves (mask wrong %u); false static %u of %u others; with every "
+	            "part, %u small-mask curves (k < 11) fitted as fold within tol, %u larger\n", found, total, mask_wrong,
+	            false_static, checked, fold_small, fold_static);
+	// Every static without a liquid; over a liquid the misses (mid masks over lava, sewage, jjaro) fall back, non-direct.
+	CHECK(missed_alone == 0 && found * 10 >= total * 9 && mask_wrong == 0 && false_static == 0 && fold_static == 0);
+}
+
 static void test_config_m6b()
 {
 	Config c;
@@ -5062,6 +5237,8 @@ static void test_config_m6b()
 static void test_m6b_core()
 {
 	test_m6b_part1();
+	test_m6b_part2();
+	test_m6b_part3();
 	test_config_m6b();
 }
 
