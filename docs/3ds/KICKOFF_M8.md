@@ -53,6 +53,15 @@ cannot override).
    Software behaves exactly as before with it off (a short `perf-bench.sh` check that the numbers did not move, rule 1's
    "no regression"); the default `A1_RENDER_C3D=OFF` build and the host build unchanged.
 
+5. **The Brightness check (user decision 2026-11-08).** `screen.cpp`'s `using_default_gamma` is false on every fade and flash
+   and, per the `kDirectGamma` comment in `a1_c3d.h`, for "brightness" too; direct mode refuses such frames
+   (`blocked=gamma:N` in `[c3d] direct final`). Whether a **non-default Brightness preference** (`scmode_gamma`; default 2 =
+   `DEFAULT_GAMMA_LEVEL`, the user's own value) blocks **every** frame was not verified (`gamma_correct_color_table` was not
+   read). Test it in Azahar: with the GPU preference on, run a few seconds at each Brightness level the dialog offers and
+   report `direct=` against `frames=` and `blocked=gamma:` per level. If a non-default level blocks (nearly) all frames, **record
+   it and tell the user**: it is a finding for them to decide (fix inside M8, or in the fades piece, `CITRO3D_DESIGN.md`
+   "M6b"); do not ship the preference silently doing nothing for those players, and do not hide it in the report.
+
 ## Rules that bite here
 
 - Rule 2: every engine edit is fenced with `#ifdef A1_PLATFORM_3DS`, numbered (48), and passes `ppcheck.sh`.

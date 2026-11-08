@@ -3871,6 +3871,34 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   met; SW also 60.5 on the console)**, busy −0.66 / −0.37 / −0.80 ms against SW, readback 53.8-54.7 fps; `c3d_wait`
   0.70-0.78 ms; G3-b `gpu_ms view` 1.3-1.5 ms (recorded, not deciding).
 
+### M6b — fades, flashes and tints in direct mode (planned; user decision 2026-11-08; placement in the order not decided)
+Today a frame with any fade, flash, tint or non-default brightness is **not direct** (`kDirectGamma`, `kDirectDarken` in
+`a1_c3d.h`): the software path applies them with the CPU to the finished view (`apply_gamma` over `world_pixels`,
+`darken_world_window()`), and a direct view never exists in CPU memory. The user's aim: **make the common ones eligible at
+least (underwater tint above all, "would be annoying"); the rest are bonus if they can be adapted too.**
+- **Reference semantics:** the engine's own OpenGL faders (`RenderMain/OGL_Faders.cpp`, `fades.cpp`'s `CurrentOGLFader`),
+  which already express each effect as a full-screen blend: six kinds (`fades.h`: tint, randomize, negate, dodge, burn,
+  soft_tint). Tint is `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` (what M4's tinted constant-colour blend already is); negate, dodge,
+  burn and soft_tint use `DST_COLOR` / `ONE_MINUS_DST_COLOR` factors (whether PICA offers each factor and the TEV can
+  produce the needed colour: **UNVERIFIED**, read `gpu.h`/`citro3d.h` first, rule 7). The OpenGL path is itself an
+  approximation of the software table (soft_tint's SW formula uses `max(r,g,b)` of each pixel, the GL blend uses the
+  destination colour): **a tolerance for the gate is the user's decision**, as for M2-M5.
+- **Tier 1 (required):** *tint* (damage red `_fade_red`/`_fade_big_red`, pickups, teleport `_fade_bright`, explosions,
+  white/orange/green/cyan/purple flashes, and the cinematic fades in and out, including the level-start black) and
+  *soft_tint* (**underwater**, lava, goo, sewage, Jjaro: the liquids). **Tier 2 (bonus):** *negate* (fusion and hummer
+  projectiles), *dodge* and *burn* (alien weapon, armageddon beast), *randomize* (compiler static), pause darkening, a
+  non-default Brightness (an arbitrary per-channel curve, the hardest on PICA: probably a lookup).
+- **Likely engine edit:** the fade type, colour and transparency live in `fades.cpp` and only reach a renderer through the
+  OpenGL fader queue (not built on the 3DS: `HAVE_OPENGL` is undefined), so a small hook under `A1_PLATFORM_3DS` is expected
+  (`PATCHES.md` 56+, `ppcheck.sh`); to be confirmed in the spec.
+- **Why it matters beyond looks:** every non-direct frame is a readback frame (about 4 ms more busy than software) and, with
+  M9, a frame without depth that restarts the ramp-up (section 6). Fewer non-direct frames = fewer of both.
+- **Order:** not decided. Proposal (mine): after M8 and **before M9**, because it shrinks how often stereo drops out and it
+  needs no stereo; the user decides.
+- Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
+  through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
+  still readback.
+
 ### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
 - **Open for its spec (2026-11-08):** M9 will have shipped first, so M7 inherits M9's VRAM budget (section 6 needs a second
   linked screen target and a second view target) and must say whether SSAA is **off while 3D is on** (the 1024x512 view
@@ -5082,3 +5110,12 @@ The design had not said what the 3D screen shows then. **User decision: ease the
 Written into M9's spec now, not after, so the spec answers it first: one image to both eyes on non-stereo frames, the parallax
 ramps from 0 to the slider on the return, a host-testable state machine, `stereo_ramp N` tuned on the console. Not decided:
 the ramp length, and whether a ramp is wanted for a slider change (proposed: yes, same path).
+
+### M6b: fades, flashes and tints in direct mode (coordinator, 2026-11-08; user decision)
+
+Asked why fades, flashes, gamma and pause darkening are not direct-eligible: the software path applies them with the CPU to the
+finished view (`apply_gamma`, `darken_world_window()`), which direct mode never holds in CPU memory; it is a gap in M6, not a
+hardware limit. **User decision: aim to make the common effects eligible (underwater tint above all) and treat the others as
+bonus.** Recorded as the planned piece "M6b" (section 7), tiers and the OpenGL faders as the reference semantics; the
+placement in the order is open (proposal: after M8, before M9). Also decided: M8 tests whether a non-default Brightness
+blocks every direct frame (`KICKOFF_M8.md` item 5), because M8 exposes GPU mode to every player.
