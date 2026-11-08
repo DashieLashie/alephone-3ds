@@ -1215,9 +1215,12 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    47 (hooks 3a/3b/3c). `direct_check` exact on both backends, the frame-indexed test passes @30/@60, ineligible frames
    (map, terminal, darken, fades, Classic) readback, M1-M5 gates unchanged; captures pass a recorded exception (user
    decision: SDL's text blending rounds differently on a transparent surface). **First speedup:** @30 busy −6.0 / −4.2 /
-   −5.0 ms against SW, @60 59.7 fps on L0/L6/L20 (SW 54.4 on L0). G3-a holds. Console: "M6 console check, short version"
-   at the end of this file (not run). **Next (user decision 2026-11-07): the M6 console check first, medium variant**
-   (15 launches, ~40 min; fresh-session prompt `KICKOFF_CONSOLE_M6.md`), then M7 (2x2 supersampling).
+   −5.0 ms against SW, @60 59.7 fps on L0/L6/L20 (SW 54.4 on L0). G3-a holds. **M6 console check run 2026-11-07** (medium
+   variant, 15 launches; `PERF.md` "Stage 10 M6 — console, short check"): no hardware bug; orientations right, `direct_check`
+   Δ 0 and `seed_check` 0 on PICA, HOME/sleep/Close clean, **direct 60.5 fps @60 on L0/L6/L20 (goal ≥ 55 met)** and busy −0.7 /
+   −0.4 / −0.8 ms against SW (which also holds 60.5 on the console), `c3d_wait` 0.7-0.8 ms, G3-b `gpu_ms view` 1.3-1.5 ms; the
+   step 1 @30 run passed 17 of 24 (7 captures fell before the game or on a non-composite present: a harness window, not the
+   renderer). **Next (user decision 2026-11-07): M7** (2x2 supersampling, then M8, M9).
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1857,7 +1860,9 @@ log.
 
 ## M6 console check, short version (medium: 15 launches, ~40 min; when the user is at the console)
 
-**Not run yet.** Written 2026-11-07 for `port-stage10-M6`. **User decision (2026-11-07): run the medium variant** — steps 1-3
+**Run on the console 2026-11-07, medium variant, 15 launches: no hardware bug** (`PERF.md` "Stage 10 M6 — console, short
+check"; step 1 @30 17 of 24 captures ok, the 7 are menu or non-composite presents; steps 2 and 3 pass; step 4: direct 60.5 fps
+@60 on all three, goal met). Written 2026-11-07 for `port-stage10-M6`. **User decision (2026-11-07): run the medium variant** — steps 1-3
 as written and step 4 **at Framerate Target 60 only** (3 configs × 3 levels + the G3-b run = 10 launches): **15 launches
 in all, ~40 min** (each launch is two ftpd file swaps, a 3dslink send, a level load and a 20 s bench: ~2-3 min). The full
 version (step 4 also @30) is 24 launches, ~60-75 min; a minimal one (step 4 on L0 only) 8 launches, ~20-25 min. Fresh

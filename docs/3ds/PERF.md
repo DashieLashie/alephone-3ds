@@ -2025,3 +2025,96 @@ unknown. `bottom_pending` (direct frames whose bottom swap was still pending at 
 `c3d_overlay` 0.58 ms in the overlays-on runs (the dirty-tile clears: ~25 tiles a frame), 0 in the bench (no overlays).
 **The console decides** (`NEXT-SPRINT.md` "M6 console check, short version"; Azahar overstates `render` ~40 % and
 understates copies ~40 %, "How to read these numbers").
+
+## Stage 10 M6 — console, short check (New 3DS, 2026-11-07)
+
+The medium variant of `NEXT-SPRINT.md` "M6 console check, short version" (user decision: steps 1-3, step 4 at Framerate Target 60
+only; 15 launches), on the real New 3DS, `build-3ds-c3d-prof` at `port-stage10-M6` (code identical to the tag, 0 warnings, no
+renderer code written in the session). HUD + Map; Target 30 for steps 1 (first half), 2 and 3, Target 60 for the rest. Raw
+transcripts and captures: `build/hw/m1/m6c-*.txt`, `build/hw/m6c/` (`cal30/`, `cal60/`, `bench/`); never in git. Console
+results, authoritative; Azahar's references are in "Stage 10 M6" above.
+
+**Result: no hardware bug found. The direct path is pixel-exact on PICA, the orientations are right, HOME / sleep / Close
+with two frames in flight are clean, and direct holds 60.5 fps @60 on L0 / L6 / L20 (goal ≥ 55 met).** The software renderer
+also holds 60.5 fps @60 on the console on all three spots, so the goal does not discriminate between them; the gain of
+direct mode is in busy time (below). One caveat on step 1 (the 120-window).
+
+### Step 1: frame-indexed test and orientation (launches 1-2)
+
+| Run | `c3d-m6cal.py` | Azahar |
+| --- | --- | --- |
+| @30, L0 (`m6c-cal30`) | 17 ok, 7 failed of 24 | 12/12 |
+| @60, L0 (`m6c-cal60`) | **18 ok of 18** (frame N, band rows 0-40, corners, no magenta) | 18/18 |
+
+- Every capture that went through the direct composite (log line `…; composite`) is exact: colour of frame N, the white
+  band at row 8·(N mod 30), the four corner colours, no magenta. **`view_v_flip 1` and `band_from_end 1` are right on PICA.**
+- The 7 failures @30 are flat-colour captures, **not an orientation error**: presents 120-125 fall before the game starts
+  (the first `[c3d] frame stats` line is at present 223, so about 100 presents of menu and loading screens come first; the
+  console's level load is slower than Azahar's), and present 1803 is one non-composite present (most likely one of the 14
+  gamma-blocked readback frames, `why=gamma:14`; inferred from the counters, not proven). The runbook's strict rule "every
+  capture ok" is therefore **not met @30 (17 of 24)**; the harness's fixed capture window (120, 600, 1200, 1800) is what is
+  placed badly for the console. At @60 the user's A-press timing put present 120 inside the game and all 18 passed.
+  Not re-run (no code change was in scope).
+
+### Step 2: in-frame equivalence, seed and sync, @30 (launches 3-4)
+
+| Run | `direct_check` | `seed_check` | `composite final` | `direct final` |
+| --- | --- | --- | --- | --- |
+| L0, `m6-direct.cfg` | 27 lines, `within_1` 100.000 %, `over_32` 0, max Δ 0 | 0 of 96000 differ | `leaks=0 bad=0 big=0`, 27 audits | direct 834 of 835, readback 0, sw 1, `bottom_pending` 13 |
+| L6, `m6-sync.cfg` | 27 lines, 100.000 %, 0, Δ 0 | n/a | `leaks=0 bad=0`, 27 audits | direct 832 of 848, `syncs` 16, `sync_failed` 0, `forced_sw` 16, `bottom_pending` 20 |
+
+Exactly Azahar's figures: **PICA's blend rounding equals `direct_check`'s arithmetic (Δ 0, not the 1-2 the runbook allowed)**,
+the seed's linear-to-tiled transfer is exact, and the CPU-to-GPU re-sync after a forced software frame works (16 of 16).
+
+### Step 3: HOME, sleep, map, HOME > Close (launch 5, `m6-ineligible.cfg`, @30, played by the user)
+
+From the card's `log.txt` (the 3dslink mirror ended at the lid close, "Connection reset by peer"): HOME suspended +55.5 s,
+resumed after 4.2 s; HOME again +62.5 s, resumed after 4.0 s; `suspended (sleep)` +76.3 s, resumed after 1.0 s; HOME > Close
++108.4 s: `gate closed at present 2183 (gpu_right 0, should_close 1, suspended 1)`, `release #1 … gate closed`, queue retired after
+0 ms, `release done: C3D_Fini returned`, `real gfxExit returned`, no `release abandoned`. `direct final`: direct 1735 of 1799,
+readback 63 (`darken`), sw 1, `blocked=map:210,darken:63`, `leaks=0`, `frames_gate_closed=0`. The user saw the live view
+after every return, the map and the overlays, the launcher came back after Close, no Luma screen, nothing out of place.
+Reading note: the periodic `[c3d] stats` lines all print `gate_skipped=0` (the last was before the Close); `gate_skipped=1
+gate_episodes=1` is on the `[c3d] final:` line. Only the final Close closed the gate; the HOME menus and the lid suspended
+the game before a present could be skipped. `tex … alloc-fail 5`, `promo 102/0/5(land 1)`, `vram_free_kib=380` at exit in that
+run: recorded, not examined (see section 10 item 13 below).
+
+### Step 4: the @60 bench (launches 6-14; `quiet 1`; one run per cell)
+
+| @60 | level | fps | frame ms | busy ms | busy vs SW | render | `c3d_wait` | `c3d_composite` | `c3d_vblank` | bottom | idle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SW | 0 | 60.50 | 16.53 | 14.00 |  | 5.65 | 0.00 | 0.00 | 2.01 | 2.09 | 2.53 |
+| SW | 6 | 60.51 | 16.53 | 13.69 |  | 5.02 | 0.00 | 0.00 | 2.42 | 2.01 | 2.84 |
+| SW | 20 | 60.50 | 16.53 | 13.60 |  | 4.80 | 0.00 | 0.00 | 2.38 | 2.11 | 2.93 |
+| readback | 0 | 54.74 | 18.27 | 17.41 | +24.4 % | 0.55 | 2.16 | 0.00 | 0.09 | 2.21 | 0.86 |
+| readback | 6 | 53.80 | 18.59 | 17.74 | +29.6 % | 0.71 | 2.08 | 0.00 | 0.06 | 2.22 | 0.85 |
+| readback | 20 | 54.59 | 18.32 | 17.33 | +27.4 % | 0.78 | 2.45 | 0.00 | 0.08 | 2.29 | 0.99 |
+| **direct** | 0 | **60.54** | 16.52 | 13.34 | −4.7 % | 0.56 | 0.73 | 0.19 | 5.41 | 1.78 | 3.18 |
+| **direct** | 6 | **60.51** | 16.53 | 13.32 | −2.7 % | 0.69 | 0.70 | 0.11 | 5.27 | 1.72 | 3.21 |
+| **direct** | 20 | **60.56** | 16.51 | 12.80 | −5.9 % | 0.76 | 0.78 | 0.20 | 5.36 | 1.92 | 3.71 |
+
+Azahar @60 for comparison (fps): direct 59.66-59.71, SW 54.37 / 59.62 / 59.53, readback 50.26-52.07. The console is better than
+Azahar on all three (SW's L0 54.37 in Azahar was the overstated `render`, as `PERF.md` "How to read these numbers" says).
+
+- **Direct validity:** `direct final` direct = frames on all three (1670 / 1680 / 1705 of the same), readback 0, `leaks=0`,
+  release clean; `bottom_pending` 84 / 85 / 108 (5-6 % of frames: the bottom screen's VBlank wait landing before the composite
+  is exercised and shows no artefact).
+- **The goal (≥ 55 fps @60, L0/L6/L20): met, 60.5 on each.** Readback is under 55 on all three (53.8-54.7), the G2-a/G2-b
+  finding again (+4 ms busy over SW).
+- **Real `c3d_wait`: 0.70-0.78 ms per frame** (Azahar 0.01). The bottom screen's CPU work hides most of the view frame's GPU time.
+- **Direct versus SW on the console: busy −0.66 / −0.37 / −0.80 ms** (one run each, no spread known). That is smaller than
+  Azahar's @30 figure (−6.04 / −4.20 / −5.01 ms), but the console run was @60 and not like for like: @30 on the console was
+  not run (medium variant). The software renderer is not the bottleneck at @60 on the console.
+- **G3-b (L0 @60, direct, without `quiet 1`, launch 15):** `gpu_ms view` 1.29-1.49 ms in the steady state; 28 samples, mean
+  1.49, max 4.36 (one outlier, not examined). That run: fps 57.29, busy 14.31 ms (the stats printing, as in "Stutter follow-up").
+  Recorded; G3-b does not decide.
+- `c3d_vblank` direct 5.3-5.4 ms against SW 2.0-2.4 ms: the frame waits for VBlank with ~3.2-3.7 ms of idle left.
+
+### Design section 10 item 13, "M6:" questions
+
+Verified: the texture target's orientations (`view_v_flip 1`, `band_from_end 1`, the seed's `OUT_TILED(1)` with no flip);
+PICA's blend rounding against `direct_check` (Δ 0); two C3D frames in flight across HOME / sleep / Close; the bottom screen's
+VBlank wait before the composite (`bottom_pending` 5-6 % of frames, no artefact). Measured: `c3d_wait` 0.70-0.78 ms, the
+view's GPU time 1.3-1.5 ms. **Not reached:** whether VRAM contents survive HOME for `tex_view` (the picture was right after
+each return and the texture audit says `ok`, but no pixel check was made); contiguous 512 KiB / 2 MiB VRAM blocks after pool
+churn (step 3's `alloc-fail 5` is a lead, not examined).

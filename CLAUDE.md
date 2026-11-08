@@ -38,8 +38,11 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   parts), static, eviction hardening; every play frame is C3D; passes on both Azahar backends; **G2-a fails** as
   predicted, +2.0 / +4.9 / +3.5 ms busy on L0 / L6 / L20); **M6 done** (2026-11-07, tag `port-stage10-M6`, `PERF.md`
   "Stage 10 M6", Azahar only, `stage10-bb` merged first: direct mode, `PATCHES.md` 47; first speedup, @60 59.7 fps on
-  L0/L6/L20; captures pass a recorded exception, design Review log "M6 acceptance, capture gate"); **next (user decision
-  2026-11-07: M7 → M8 → M9, gates measured, not deciding): M7**, console check "M6 console check, short version" pending; **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  L0/L6/L20; captures pass a recorded exception, design Review log "M6 acceptance, capture gate"); **M6 console check run
+  2026-11-07** (`PERF.md` "Stage 10 M6 — console, short check", 15 launches: no hardware bug; orientations right, `direct_check`
+  Δ 0, HOME/sleep/Close clean, **direct 60.5 fps @60 on L0/L6/L20, goal met, but SW also holds 60.5 on the console**; busy
+  −0.4 to −0.8 ms vs SW; G3-b `gpu_ms view` 1.3-1.5 ms); **next (user decision 2026-11-07: M7 → M8 → M9, gates measured,
+  not deciding): M7**; **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.

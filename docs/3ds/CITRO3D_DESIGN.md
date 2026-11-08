@@ -3852,8 +3852,12 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   gate"); the M1-M5 gates unchanged; OFF builds identical, `ppcheck.sh` IDENTICAL. **G3-a holds** (VRAM free 329 KiB at
   M7's caps on L0; the 2 MiB landscape fills the 2 048 KiB pool: RGB8 for M7). **Bench:** @30 busy direct − SW −6.04 /
   −4.20 / −5.01 ms; @60 direct 59.66-59.71 fps on all three (SW 54.37 / 59.62 / 59.53, readback 50.26-52.07). The hash:
-  no change in Azahar, kept as a worst-case bound. Console: `NEXT-SPRINT.md` "M6 console check, short version" (the
-  orientations, `c3d_wait`, HOME/sleep/Close with two frames in flight, the @60 goal, G3-b).
+  no change in Azahar, kept as a worst-case bound. **Console check run 2026-11-07** (`PERF.md` "Stage 10 M6 — console, short
+  check", medium variant, 15 launches): no hardware bug. Orientations right (frame-indexed test 18/18 @60; @30 17 of 24, the 7
+  being menu or non-composite presents, a harness window); `direct_check` Δ 0 and `seed_check` 0 on PICA; the forced-SW sync
+  16 of 16; HOME x2, sleep and HOME > Close with two frames in flight clean; **@60 direct 60.5 fps on L0/L6/L20 (goal >= 55
+  met; SW also 60.5 on the console)**, busy −0.66 / −0.37 / −0.80 ms against SW, readback 53.8-54.7 fps; `c3d_wait`
+  0.70-0.78 ms; G3-b `gpu_ms view` 1.3-1.5 ms (recorded, not deciding).
 
 ### M7 — 2x2 supersampling (to be built, after M6; user 2026-11-07, G3 measured but not deciding)
 - View at 800x480 (texture 1024x512), halved by `GX_TRANSFER_SCALE_XY`
@@ -4087,6 +4091,13 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     `c3d_wait` (Azahar runs the GPU inside `C3D_FrameEnd`), the bottom screen's VBlank wait before the composite at @60
     (`bottom_pending` 105-203 of ~1 670 frames in Azahar), whether VRAM contents survive HOME for `tex_view`, contiguous
     512 KiB / 2 MiB VRAM blocks after pool churn: `NEXT-SPRINT.md` "M6 console check, short version".
+    **Console 2026-11-07 (`PERF.md` "Stage 10 M6 — console, short check"):** *verified* — the orientations (`view_v_flip 1`,
+    `band_from_end 1`, the seed's `OUT_TILED(1)`, no flip; `seed_check` 0 of 96000), PICA's blend rounding (`direct_check`
+    Δ 0 in 54 samples), two C3D frames in flight across HOME / sleep / Close, the bottom screen's VBlank wait before the
+    composite (`bottom_pending` 5-6 % of frames at @60, no artefact). *Measured* — `c3d_wait` 0.70-0.78 ms (Azahar 0.01),
+    the view frame's GPU time 1.3-1.5 ms. *Refuted* — none. *Not reached* — whether VRAM contents survive HOME for `tex_view`
+    (right picture after each return, no pixel check) and contiguous 512 KiB / 2 MiB VRAM blocks after pool churn (step 3's
+    `alloc-fail 5` is a lead, not examined).
 14. 5.6.1: d1 confirms the binary facts (main thread, rights 1 at ONSUSPEND and
     ONRESTORE, no hook after Close); the post-close frame never retires in 5 s
     (run 1); HOME > Close in a game ×3, HOME and back, sleep in a game with the gate,
@@ -5013,3 +5024,18 @@ record of live slots to keep in sync (a miss can only cause a duplicate conversi
 `next_promotion` still scans all 512 slots on every call (at least once per view frame, now the larger scan). **User
 decision: keep it** (no pixel can change; the gain cannot be negative). If the scans ever matter, `next_promotion` (a
 pending list) is the next target, measured with an A/B key.
+
+### M6 console check (coordinator, 2026-11-07; medium variant, no renderer code written)
+
+Run on the New 3DS at `port-stage10-M6` (code equal to the tag): 15 launches, `PERF.md` "Stage 10 M6 — console, short check".
+Findings: **no hardware bug.** (1) The frame-indexed test passes on every capture that went through the direct composite
+(18 of 18 @60; 17 of 17 @30). The runbook's strict rule "every capture ok" is not met @30 (17 of 24): presents 120-125 are menu
+and loading-screen presents (the first game frame stats print at present 223 on the console) and present 1803 is one
+non-composite present (probably a gamma readback frame, inferred from counters). The capture window (120, 600, 1200, 1800)
+is fixed in `present.cpp`; it is placed for Azahar's faster level load. Not changed (no code in scope); a later
+harness edit could start the window from the first game frame. (2) Steps 2 and 3 pass as in Azahar. (3) The bench: direct holds
+60.5 fps @60 on all three spots, the goal's >= 55 is met; **the software renderer also holds 60.5 on the console**, so the goal
+alone does not show direct mode's value: busy time does (−0.66 / −0.37 / −0.80 ms against SW, one run per cell; the console
+@30 comparison was not run). Readback stays under 55 (G2-a/G2-b again). (4) G3-b: the view's GPU time is 1.3-1.5 ms; whether
+that leaves room for M7's 4x fill is for the M7 plan (a linear 4x would be ~5-6 ms, an unverified extrapolation: fill is not
+the only cost). Open for M7: the two VRAM questions in section 10 item 13 were not reached.
