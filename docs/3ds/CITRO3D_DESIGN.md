@@ -3899,7 +3899,7 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
-- **M6b specification (revision 1 of 2026-11-08, before code; critic round 1 applied: Review log "M6b pre-implementation, round 1").** Where the lines above
+- **M6b specification (revision 1 of 2026-11-08, before code; critic round 1 applied, round 2 APPROVE with 3 minors folded: Review log "M6b pre-implementation").** Where the lines above
   and this block disagree, this block rules. Citations are the code at `c6dd77d30`. **No engine edit.** One session.
   - *What a fade is in a 32-bit build (checked).* `build_direct_color_table` (`screen.cpp`:2219-2232) makes the 256-entry
     colour table a **grey ramp**: entry *i* is `(i << 8, i << 8, i << 8)` (`default_gamma_*` = `i << 8`, :2205-2216; Brightness
@@ -3952,7 +3952,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     that PICA rounds a `CONSTANT_COLOR` factor the same way); the candidate with the smallest `max |g(i) − f(i)|` wins; a
     channel fits when that error ≤ `tol`. A negative slope or an A above 1 never fits (no blend form for them here); the input
     is the curves as stored (`uint16`, so randomize's wrap-around is just a curve that does not fit). The result keeps the
-    per-channel errors for the counters. Host-checked by the critic's replica: worst fit error 1 for every tint colour, every
+    per-channel errors for the counters. The cache (the last curves and their fit) **persists across frames**; only the
+    per-frame hand-off below is reset at each `direct_policy` (round 2, minor 3). Host-checked by the critic's replica: worst fit error 1 for every tint colour, every
     liquid soft_tint and liquid + flash, 2 for a soft_tint fade type over a liquid (the ±2 window suffices). The three curves are fitted only when they changed since the last call
     (a 1.5 KiB compare), so a 2 s fade costs one fit per fade step.
   - *Keys.* `fades 0|1` (default 1; 0 = M6's behaviour, every fade frame non-direct: the A/B switch); `fade_tol N` (0..32,
@@ -3962,7 +3963,9 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     not fit; they stay `blocked=gamma`), `fade_err=` (the worst error among **accepted** fits; the rejected ones are counted
     in `fade_nofit`), `fade_changes=` (distinct curve sets fitted); `[c3d] composite`: `fade_quads=`. A line
     `[c3d] fade: curves changed, fit ok|no A=r,g,b B=r,g,b err=e` on each change of the curves (at most 200 lines, then
-    counted), so a test log shows which fades actually ran (critic, major 2).
+    counted), so a test log shows which fades actually ran (critic, major 2); also when the curves return to the identity
+    (`fit identity`: no fit runs then, `kDirectGamma` is clear), so a fade that ends on the identity is visible too (round 2,
+    minor 1).
   - *Tests.* (1) Host: replicas of `tint`, `soft_tint` (and of negate, dodge, burn, randomize) applied to the grey ramp at
     *t* = 0 .. 1 in 1/64 steps, for every colour of `fade_definitions` (`fades.cpp`:162-198) and every liquid effect
     (:201-208) alone and composed with each tint flash: tint and soft_tint **fit within 1**, compositions within 2, the four
@@ -3971,7 +3974,9 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     (`lua_player.cpp`:1604-1613, :2117) for every fade type in order, one per 1.5 s, logged — except that a fade of higher
     priority still running drops a new one silently (`explicit_start_fade`, `fades.cpp`:372; `fade_screen` returns nothing):
     `_fade_long_bright` (priority 1, 4 s, :170) goes **last**, and every type waits until the previous one has ended
-    (critic, major 2). The acceptance requires one `[c3d] fade: curves changed` line with a fit result per type started.
+    (critic, major 2); `_end_cinematic_fade_out` (transparency 0, period 0, :166: the identity) runs straight after
+    `_cinematic_fade_out`, where it visibly restores the picture. The acceptance requires one `[c3d] fade: curves changed`
+    line per type started (a fit result, or `fit identity` for a type whose state is the identity).
     With `direct_check 5`, whose CPU reference gains the frame's curves (the read-back view and overlay composited as in
     M6, then `curve_c[x] >> 8` from the frame's copy, i.e. exactly SW's `apply_gamma`), so the check compares the GPU picture
     with **SW's**, not with the fit. **`direct_check` on a fade frame** (critic, major 1: today it counts only Δ > 1 and
@@ -4003,7 +4008,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     fast path (backlog). *For M9:* the fade quad is drawn once per eye with the same constants.
   - *Needs console verification:* PICA's rounding of a `CONSTANT_COLOR` factor (the fit's model), **including A = 255 as the
     exact identity** (water's blue channel has slope 1 − ¾ + ¾·1 = 1: if PICA computes `d·255 >> 8`, every underwater frame is
-    off by one in blue, inside the gate but systematic; under Azahar the Liquid Test's `direct_check` must show Δ 0 in blue)
+    off by one in blue, inside the gate but systematic; under Azahar the Liquid Test's blue max Δ is **recorded as a
+    diagnostic**, not a gate, since Azahar's rounding is as unverified as PICA's: round 2, minor 2)
     (critic, minor 6); the blend colour's byte order on hardware (Azahar settles it for Azahar); the fade quad's GPU time
     (`gpu_ms`).
   - *Housekeeping:* `a1_c3d.h`:47's comment on `kDirectGamma` ("brightness") is updated: since `PATCHES.md` 56 the bit means
@@ -5315,4 +5321,11 @@ sequential, and a per-change `[c3d] fade:` log line proves each type ran. Minors
 the fit's one-frame lifetime and the reference built from its copy of the curves; vertices and state of the fade quad;
 A = 255 as the identity on the console list; the Liquid Test's failure mode and fallback; the counters' wording and the
 `kDirectGamma` comment. Revision 1 goes to the critic for round 2.
+
+### M6b pre-implementation, round 2 (critic: APPROVE, 3 minor; folded)
+
+All eight round-1 fixes confirmed. Folded: a `fit identity` log line, so fades whose state is the identity
+(`_end_cinematic_fade_out`, a repeated fade-in to black) satisfy the one-line-per-type acceptance, and the end fade ordered
+right after `_cinematic_fade_out`; Azahar's blue Δ on water recorded as a diagnostic, not a gate; the fit cache persists, only
+the per-frame hand-off is reset. **The specification is approved; next is the build.**
 
