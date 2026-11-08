@@ -1220,7 +1220,7 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    Δ 0 and `seed_check` 0 on PICA, HOME/sleep/Close clean, **direct 60.5 fps @60 on L0/L6/L20 (goal ≥ 55 met)** and busy −0.7 /
    −0.4 / −0.8 ms against SW (which also holds 60.5 on the console), `c3d_wait` 0.7-0.8 ms, G3-b `gpu_ms view` 1.3-1.5 ms; the
    step 1 @30 run passed 17 of 24 (7 captures fell before the game or on a non-composite present: a harness window, not the
-   renderer). **Next (user decision 2026-11-07): M7** (2x2 supersampling, then M8, M9).
+   renderer). **Next (user decision 2026-11-08): M8 (the Renderer preference), then M9 (stereo), M7 (2x2 supersampling) last**; fresh-session prompt for M8: `KICKOFF_M8.md`.
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.

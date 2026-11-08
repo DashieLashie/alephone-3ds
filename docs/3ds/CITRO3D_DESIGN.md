@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M7, M8, M9 | Supersampling, preference, stereo — **all to be built** (user, 2026-11-07; optional before that) | — |
+| M8, M9, M7 | Preference, stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -128,7 +128,7 @@ Order: the fixes, then the zero-copy present, then M0-M6, M7, M9 (open questions
 
 **User decisions (2026-11-07, during M5, before G2-a is measured):** **continue until stereoscopic 3D (M9)**
 whatever G2-a's result: M5 → M6 (direct mode, which M9 needs: section 6) → M9. **Amended the same day: M7 and M8 are
-not optional either** ("I want to try all possibilities"): the order is section 7's, **M5 → M6 → M7 → M8 → M9**. Every gate
+not optional either** ("I want to try all possibilities"): the order is section 7's, **M5 → M6 → M7 → M8 → M9**. **Re-ordered 2026-11-08 (user): M7 goes last, M6 → M8 → M9 → M7** (Review log "M7 moved to the end"). Every gate
 (G2-a, G2-b, G3-a, G3-b) is still measured and recorded, but none decides whether the next milestone is built. Also: play checks leave SW's static coverage out (Review log "M5, play check and
 static, user decision").
 
@@ -3859,7 +3859,11 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   met; SW also 60.5 on the console)**, busy −0.66 / −0.37 / −0.80 ms against SW, readback 53.8-54.7 fps; `c3d_wait`
   0.70-0.78 ms; G3-b `gpu_ms view` 1.3-1.5 ms (recorded, not deciding).
 
-### M7 — 2x2 supersampling (to be built, after M6; user 2026-11-07, G3 measured but not deciding)
+### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
+- **Open for its spec (2026-11-08):** M9 will have shipped first, so M7 inherits M9's VRAM budget (section 6 needs a second
+  linked screen target and a second view target) and must say whether SSAA is **off while 3D is on** (the 1024x512 view
+  target is 2 048 KiB, two of them cannot fit). M9's console fill-rate figure (2 eyes = 2x fill) is the first real evidence
+  for M7's 4x.
 - View at 800x480 (texture 1024x512), halved by `GX_TRANSFER_SCALE_XY`
   (`gx.h`:33-38, readback) or bilinear composite (direct); cache cap lowered
   (9.1).
@@ -3871,7 +3875,10 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   default Software, `<graphics c3d_renderer="0|1">`), `PATCHES.md` 48.
 - Accept: switches at the next frame; persisted.
 
-### M9 — stereo 3D (to be built; open question 9 answered yes 2026-10-19, user 2026-11-07)
+### M9 — stereo 3D (to be built after M8, before M7; open question 9 answered yes 2026-10-19, user 2026-11-07)
+- **VRAM (checked 2026-11-08 against 9.1's direct column, 5 815 of 6 144 KiB):** a second linked screen target (375 KiB) and a
+  second view target (512 KiB) add 887 KiB against 329 free, so M9's spec must lower the texture cache cap (3 584 KiB) by
+  about 560 KiB or more. Assumes each eye has its own full view target, as section 6 says; the spec decides.
 - Accept: section 6 tests.
 
 ## 8. Verification without hardware
@@ -5039,3 +5046,13 @@ alone does not show direct mode's value: busy time does (−0.66 / −0.37 / −
 @30 comparison was not run). Readback stays under 55 (G2-a/G2-b again). (4) G3-b: the view's GPU time is 1.3-1.5 ms; whether
 that leaves room for M7's 4x fill is for the M7 plan (a linear 4x would be ~5-6 ms, an unverified extrapolation: fill is not
 the only cost). Open for M7: the two VRAM questions in section 10 item 13 were not reached.
+
+### M7 moved to the end (coordinator, 2026-11-08; user decision)
+
+After the M6 console check the user asked to do M8 and M9 first and **M7 last**: the order is now M6 → **M8 → M9 → M7**.
+Checked in the design before agreeing: neither M8 (a preference, `PATCHES.md` 48) nor M9 (needs direct mode, section 6) depends
+on M7; the two interact only through VRAM. 9.1's direct column is 5 815 of 6 144 KiB, M9 adds about 887 KiB (second screen
+target and second view target), so M9 shrinks the texture cache cap, and M7's 1024x512 view target (2 048 KiB, two eyes would
+not fit) means SSAA is probably off while 3D is on: a decision for M7's spec, noted in M7's and M9's headings. Side benefit: M9's
+2x fill gives the first console measurement of the GPU's fill headroom before M7's 4x (G3-b today: view 1.3-1.5 ms). M8's open
+question, which `debug-c3d` settings the shipping "GPU (experimental)" means, is for the user (`KICKOFF_M8.md`).
