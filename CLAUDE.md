@@ -102,7 +102,7 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
 2. **Every engine edit** (anything under `Source_Files/`) is fenced with `#ifdef A1_PLATFORM_3DS`, gets a numbered
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
-   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's, 47 M6's, 48 M8's (all used); 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07); take 56+ for anything else.
+   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's, 47 M6's, 48 M8's (all used); 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07), 56 is Brightness removed (`3ds-port`, carried here); take 57+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

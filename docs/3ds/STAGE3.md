@@ -100,6 +100,8 @@ Not introduced here, but in effect in this build (listed so nothing is
 silent):
 
 - `A1_NO_NETWORK` stubs and behaviour changes: `STAGE2.md`.
+- No Brightness setting (`PATCHES.md` 56, 2026-11-08): the Graphics dialog does not offer it and the level stays at the
+  default; the console's backlight replaces it.
 - `FILM_EXPORT` undefined: `Videos/Movie.cpp` compiles upstream's own no-op
   `Movie` methods, the same as any automake build without the film-export
   libraries.
