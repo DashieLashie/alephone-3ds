@@ -146,6 +146,13 @@
 	                    other keys at their defaults; it applies only when there is no debug-c3d file (the file decides
 	                    everything when present)
 
+	Keys of M6b (design 7, M6b specification; fades, flashes and tints in direct mode):
+	  fades 0|1         default 1: in mode direct a frame whose only block is a fade (kDirectGamma) stays direct when its
+	                    three colour curves fit a GPU form (core/fade_fit.h) and the composite applies them; 0 = M6's
+	                    behaviour (every fade frame is not direct). The Renderer preference's bundle keeps the default
+	  fade_tol N        0..32, default 2: the fit's tolerance in 8-bit steps
+	  fade_parts N      0..7, default 7; test only: the parts that may classify the curves (1 affine, 2 fold, 4 static)
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -225,6 +232,10 @@ struct Config
 	unsigned sw_every = 0;                  // test only
 	// M8
 	bool fallback_sw = false;               // an ineligible frame in mode direct: SW (true) or readback (false)
+	// M6b
+	bool fades = true;
+	unsigned fade_tol = 2;
+	unsigned fade_parts = 7;                // test only: FadePart bits (core/fade_fit.h)
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.

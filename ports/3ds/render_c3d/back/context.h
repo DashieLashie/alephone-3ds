@@ -12,6 +12,7 @@
 #define A1_C3D_BACK_CONTEXT_H
 
 #include "../core/config.h"
+#include "../core/fade_fit.h"
 #include "../core/gate.h"
 #include "../core/gx_queue.h"
 
@@ -167,6 +168,11 @@ bool present_init();       // after C3D_Init: target, texture, shader, buffers
 void present_detach();     // before C3D_Fini: unlink the screen target
 void present_free();       // after C3D_Fini: texture, shader, buffers
 uint32_t present_counter();
+
+// --- M6b (design 7, M6b specification "The mechanism", "Lifetime"); defined in present.cpp ---
+// This frame's fade, handed from hook 3a (front/frame.cpp) to the composite: copied; nullptr clears it. direct_policy
+// clears it first every frame; the next composite consumes it, so a frame the gate skipped hands nothing on.
+void fade_frame_set(const FadeFrame* frame);
 
 } // namespace back
 } // namespace a1_c3d

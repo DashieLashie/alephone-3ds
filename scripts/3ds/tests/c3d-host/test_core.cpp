@@ -30,6 +30,7 @@
 #include "tiling.h"
 #include "overlay_bands.h"
 #include "direct_state.h"
+#include "fade_fit.h"
 #include "a1_c3d.h"
 
 #include <algorithm>
@@ -4796,6 +4797,274 @@ static void test_m6_core()
 	test_m6_bands();
 }
 
+
+// --- M6b (design 7, M6b specification "Tests" (1)): replicas of fades.cpp's six faders over the grey ramp ---
+
+namespace m6b {
+
+struct Rgb { uint16_t r, g, b; };
+struct Table { Rgb c[256]; };
+enum Proc { Tint, Randomize, Negate, Dodge, Burn, SoftTint };
+struct Def { Proc proc; Rgb colour; };
+constexpr int32_t kOne = 65536;
+
+// fades.cpp:162-198, in order (the fade types of fades.h).
+const Def kDefs[] = {
+	{Tint, {0, 0, 0}}, {Tint, {0, 0, 0}}, {Tint, {0, 0, 0}}, {Tint, {0, 0, 0}}, {Tint, {0, 0, 0}},
+	{Tint, {65535, 0, 0}}, {Tint, {65535, 0, 0}}, {Tint, {0, 65535, 0}}, {Tint, {65535, 65535, 50000}},
+	{Tint, {65535, 65535, 50000}}, {Tint, {65535, 65535, 0}}, {Tint, {65535, 65535, 0}},
+	{Tint, {215 * 256, 107 * 256, 65535}}, {Tint, {169 * 256, 65535, 224 * 256}}, {Tint, {65535, 65535, 65535}},
+	{Tint, {65535, 65535, 65535}}, {Tint, {65535, 32768, 0}}, {Tint, {65535, 32768, 0}}, {Tint, {0, 65535, 0}},
+	{Tint, {65535, 0, 65535}},
+	{Randomize, {0, 0, 0}}, {Negate, {65535, 65535, 65535}}, {Negate, {65535, 65535, 65535}},
+	{Negate, {0, 65535, 0}}, {Dodge, {0, 65535, 0}}, {Burn, {0, 65535, 65535}}, {Dodge, {0, 0, 65535}},
+	{Burn, {0, 65535, 0}},
+	{SoftTint, {137 * 256, 0, 137 * 256}}, {SoftTint, {0, 0, 65535}}, {SoftTint, {65535, 16384, 0}},
+	{SoftTint, {32768, 65535, 0}}, {SoftTint, {32768, 65535, 0}},
+};
+constexpr int kDefCount = sizeof kDefs / sizeof kDefs[0];
+// fades.cpp:201-208: water, lava, sewage, jjaro, goo -> their soft_tint types, transparency 3/4.
+const int kLiquids[] = {29, 30, 31, 32, 28};
+
+uint16_t s_seed = 1;   // FADES_RANDOM's LFSR (fades.cpp:89)
+uint16_t fades_random()
+{
+	return (s_seed & 1) ? (s_seed = static_cast<uint16_t>((s_seed >> 1) ^ 0xb400)) : (s_seed >>= 1);
+}
+
+int32_t ceiling(int32_t n, int32_t c) { return n > c ? c : n; }
+int32_t floor_(int32_t n, int32_t f) { return n < f ? f : n; }
+
+void ramp(Table& t)
+{
+	for (int i = 0; i < 256; ++i)
+		t.c[i] = Rgb{static_cast<uint16_t>(i << 8), static_cast<uint16_t>(i << 8), static_cast<uint16_t>(i << 8)};
+}
+
+// One fader over `t` in place (as recalculate_and_display_color_table does after a fade effect).
+void apply(Table& t, const Def& d, int32_t transparency)
+{
+	const Rgb& k = d.colour;
+	for (int i = 0; i < 256; ++i)
+	{
+		Rgb& u = t.c[i];
+		uint16_t* ch[3] = {&u.r, &u.g, &u.b};
+		const uint16_t kc[3] = {k.r, k.g, k.b};
+		switch (d.proc)
+		{
+		case Tint:
+		{
+			const short adj = static_cast<short>(transparency >> 8);
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] + (((kc[c] - *ch[c]) * adj) >> 8));
+			break;
+		}
+		case Randomize:
+		{
+			uint16_t mask, adj = static_cast<uint16_t>(transparency < 0 ? 0 : transparency > 0xffff ? 0xffff : transparency);
+			for (mask = 0; ~mask & adj; mask = static_cast<uint16_t>((mask << 1) | 1))
+				;
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] + (fades_random() & mask));
+			break;
+		}
+		case Negate:
+		{
+			const int32_t tr = kOne - transparency;
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] > 0x8000 ? ceiling((*ch[c] ^ kc[c]) + tr, *ch[c])
+				                                                : floor_((*ch[c] ^ kc[c]) - tr, *ch[c]));
+			break;
+		}
+		case Dodge:
+			for (int c = 0; c < 3; ++c)
+			{
+				const int32_t comp =
+					0xffff - (static_cast<int32_t>(1LL * (kc[c] ^ 0xffff) * *ch[c]) >> 16) - transparency;
+				*ch[c] = static_cast<uint16_t>(ceiling(comp, *ch[c]));
+			}
+			break;
+		case Burn:
+		{
+			const int32_t tr = kOne - transparency;
+			for (int c = 0; c < 3; ++c)
+			{
+				const int32_t comp = (static_cast<int32_t>(1LL * kc[c] * *ch[c]) >> 16) + tr;
+				*ch[c] = static_cast<uint16_t>(ceiling(comp, *ch[c]));
+			}
+			break;
+		}
+		case SoftTint:
+		{
+			const uint16_t adj = static_cast<uint16_t>(transparency >> 8);
+			uint16_t intensity = std::max(u.r, u.g);
+			intensity = static_cast<uint16_t>(std::max(intensity, u.b) >> 8);
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] + (((((kc[c] * intensity) >> 8) - *ch[c]) * adj) >> 8));
+			break;
+		}
+		}
+	}
+}
+
+void split(const Table& t, uint16_t* r, uint16_t* g, uint16_t* b)
+{
+	for (int i = 0; i < 256; ++i)
+	{
+		r[i] = t.c[i].r;
+		g[i] = t.c[i].g;
+		b[i] = t.c[i].b;
+	}
+}
+
+FadeFit fit_of(const Table& t, unsigned tol, unsigned parts = kFadeAllParts)
+{
+	uint16_t r[256], g[256], b[256];
+	split(t, r, g, b);
+	return fade_fit(r, g, b, tol, parts);
+}
+
+// An affine fit's max |GPU model - SW curve| over the 256 entries, recomputed here.
+unsigned model_error(const Table& t, const FadeFit& f)
+{
+	unsigned worst = 0;
+	for (int i = 0; i < 256; ++i)
+	{
+		const uint16_t v[3] = {t.c[i].r, t.c[i].g, t.c[i].b};
+		for (int c = 0; c < 3; ++c)
+			worst = std::max(worst, static_cast<unsigned>(std::abs(
+				static_cast<int>(fade_affine_gpu(static_cast<unsigned>(i), f.ch[c].a8, f.ch[c].b8)) - (v[c] >> 8))));
+	}
+	return worst;
+}
+
+bool is_identity(const Table& t)
+{
+	for (int i = 0; i < 256; ++i)
+		if (t.c[i].r >> 8 != i || t.c[i].g >> 8 != i || t.c[i].b >> 8 != i)
+			return false;
+	return true;
+}
+
+} // namespace m6b
+
+// Part 1: tint and soft_tint fit within 1, compositions within 2, the four others never except where they degenerate.
+static void test_m6b_part1()
+{
+	using namespace m6b;
+	CHECK(fade_affine_gpu(255, 255, 0) == 255 && fade_affine_gpu(0, 0, 7) == 7 && fade_affine_gpu(255, 255, 10) == 255);
+	CHECK(fade_affine_gpu(128, 64, 0) == 32 && fade_affine_gpu(255, 128, 0) == 128);
+	unsigned worst_single = 0, worst_comp = 0, fits = 0, nofit_tint = 0, wrong_fits = 0, near_identity_fits = 0;
+	for (int d = 0; d < kDefCount; ++d)
+	{
+		const Proc p = kDefs[d].proc;
+		for (int k = 0; k <= 64; ++k)
+		{
+			const int32_t tr = k * kOne / 64;
+			Table t;
+			ramp(t);
+			apply(t, kDefs[d], tr);
+			const FadeFit f = fit_of(t, 2, kFadeAffine);
+			if (p == Tint || p == SoftTint)
+			{
+				nofit_tint += f.kind != FadeKind::Affine || f.err > 1 || model_error(t, f) != f.err;
+				if (f.err > worst_single)
+					worst_single = f.err;
+				++fits;
+			}
+			else if (k > 0 && k < 64 && f.kind == FadeKind::Affine)
+			{
+				// The interior of a negate / dodge / burn / randomize fade fits only where it is nearly affine (negate at
+				// t = 1/64: error 2), and the quad is then within tol of SW's curve (checked independently).
+				++near_identity_fits;
+				wrong_fits += model_error(t, f) > 2 || k > 1;
+			}
+			// Over each liquid (the fade effect first, fades.cpp:519-531).
+			for (int l : kLiquids)
+			{
+				Table u;
+				ramp(u);
+				apply(u, kDefs[l], 3 * kOne / 4);
+				if (d == 0 && k == 0)
+				{
+					const FadeFit lf = fit_of(u, 2, kFadeAffine);
+					CHECK(lf.kind == FadeKind::Affine && lf.err <= 1);
+					CHECK(lf.ch[0].b8 == 0 && lf.ch[1].b8 == 0 && lf.ch[2].b8 == 0);   // a soft_tint has B = 0
+				}
+				apply(u, kDefs[d], tr);
+				const FadeFit cf = fit_of(u, 2, kFadeAffine);
+				if (p == Tint || p == SoftTint)
+				{
+					nofit_tint += cf.kind != FadeKind::Affine;
+					if (cf.err > worst_comp)
+						worst_comp = cf.err;
+				}
+			}
+		}
+	}
+	std::printf("m6b part 1: %u tint/soft_tint curves, worst error %u alone, %u over a liquid; interior fits of the "
+	            "others: %u nearly affine (t = 1/64), %u not\n", fits, worst_single, worst_comp, near_identity_fits, wrong_fits);
+	CHECK(nofit_tint == 0 && worst_single <= 1 && worst_comp <= 2 && wrong_fits == 0);
+	// The level-start black (_start_cinematic_fade_in at transparency 1): A = B = 0.
+	{
+		Table t;
+		ramp(t);
+		apply(t, kDefs[0], kOne);
+		const FadeFit f = fit_of(t, 2);
+		CHECK(f.kind == FadeKind::Affine && f.ch[0].a8 == 0 && f.ch[0].b8 == 0 && f.ch[2].a8 == 0 && f.err == 0);
+	}
+	// The identity fits with A = 255, B = 0, error 0; a decreasing curve and randomize's never do.
+	{
+		Table t;
+		ramp(t);
+		CHECK(is_identity(t));
+		const FadeFit f = fit_of(t, 0);
+		CHECK(f.kind == FadeKind::Affine && f.ch[1].a8 == 255 && f.ch[1].b8 == 0 && f.err == 0);
+		uint16_t down[256];
+		for (int i = 0; i < 256; ++i)
+			down[i] = static_cast<uint16_t>((255 - i) << 8);
+		CHECK(fade_fit(down, down, down, 32, kFadeAffine).kind == FadeKind::None);
+		CHECK(fade_fit(down, down, down, 2, 0).kind == FadeKind::None);   // fade_parts 0: nothing classifies
+	}
+	// The cache: the same curves give the same fit with no refit; a change (or another tol) refits.
+	{
+		Table t;
+		ramp(t);
+		apply(t, kDefs[5], kOne / 2);
+		uint16_t r[256], g[256], b[256];
+		split(t, r, g, b);
+		FadeCache cache;
+		bool changed = false;
+		const FadeFit a = cache.get(r, g, b, 2, kFadeAllParts, &changed);
+		CHECK(changed && cache.fits() == 1 && a.kind == FadeKind::Affine);
+		const FadeFit a2 = cache.get(r, g, b, 2, kFadeAllParts, &changed);
+		CHECK(!changed && cache.fits() == 1 && a2.ch[0].a8 == a.ch[0].a8 && a2.ch[0].b8 == a.ch[0].b8);
+		cache.get(r, g, b, 3, kFadeAllParts, &changed);
+		CHECK(changed && cache.fits() == 2);
+		r[17] ^= 0x100;
+		cache.get(r, g, b, 3, kFadeAllParts, &changed);
+		CHECK(changed && cache.fits() == 3);
+	}
+}
+
+static void test_config_m6b()
+{
+	Config c;
+	CHECK(c.fades && c.fade_tol == 2 && c.fade_parts == kFadeAllParts);
+	std::vector<std::string> problems;
+	config_parse(c, "fades 0\nfade_tol 5\nfade_parts 1\nfade_tol 33\nfade_parts 8\nfades 2\n", problems);
+	CHECK(!c.fades && c.fade_tol == 5 && c.fade_parts == 1 && problems.size() == 3);
+	Config p;
+	config_apply_preference(p, true);
+	CHECK(p.fades && p.fade_tol == 2 && p.fade_parts == kFadeAllParts);   // the preference's bundle: fades 1
+}
+
+static void test_m6b_core()
+{
+	test_m6b_part1();
+	test_config_m6b();
+}
+
 int main()
 {
 	test_config();
@@ -4824,6 +5093,7 @@ int main()
 	test_m4_core();
 	test_m5_core();
 	test_m6_core();
+	test_m6b_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

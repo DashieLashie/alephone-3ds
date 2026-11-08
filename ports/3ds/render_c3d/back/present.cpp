@@ -129,7 +129,13 @@ struct CompositeCounters
 	unsigned checks = 0, check_bad = 0, check_big = 0, check_skipped = 0;
 	unsigned check_max[3] = {0, 0, 0};
 	double check_min_within = 100.0;
+	// M6b: fade quads drawn; direct_checks of fade frames, bad ones (within_2 < 99.9 % or max > 4), their worst figures
+	unsigned fade_quads = 0, fade_checks = 0, fade_bad = 0, fade_max = 0;
+	double fade_min_within2 = 100.0;
 } s_cn;
+// M6b: this frame's fade (fade_frame_set), consumed by the composite.
+FadeFrame s_fade;
+bool s_fade_set = false;
 uint32_t* s_check_ref = nullptr;
 u32 s_vram_free_at_exit = 0;           // vramSpaceFree() noted by present_detach (G3-a)   // malloc'd 400x240 XRGB: direct_check's reference before present_reference
 
@@ -447,10 +453,51 @@ Begin begin_present_frame(FrameZone zone)
 	return Begin::Ok;
 }
 
+// M6b: a colour for TEV stage 0's constant (texenv.h:85) and for C3D_BlendingColor (effect.h:8): 0xAABBGGRR, R in the
+// low byte, the order back/view.cpp's tev_constant settled for the TEV constant in M1. For the blend colour the same
+// order is UNVERIFIED (C3D_BlendingColor has no doc; M4 used greys only): the Fade Test's red flash settles it (a swap
+// shows blue and fails direct_check).
+inline u32 abgr(unsigned r, unsigned g, unsigned b)
+{
+	return 0xFF000000u | (b << 16) | (g << 8) | r;
+}
+
+// M6b part 1 (design 7, M6b "The mechanism"): after the overlay bands, one quad over the composited picture,
+// dst' = B + A * dst per channel: TEV stage 0 = REPLACE of the constant B, the blend ONE, CONSTANT_COLOR with A as the
+// blend colour (enums.h:237-261), dst alpha kept (ZERO, ONE). It redraws the view quad's vertices 0-3 (the texcoords
+// are not read). The restore: the blend colour to 0, stage 0 back to the present's (the caller restores the blend).
+void draw_fade_affine(const FadeFit& fit)
+{
+	C3D_TexEnv* env = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(env);
+	C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+	C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+	C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	C3D_TexEnvColor(env, abgr(fit.ch[0].b8, fit.ch[1].b8, fit.ch[2].b8));
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_CONSTANT_COLOR, GPU_ZERO, GPU_ONE);
+	C3D_BlendingColor(abgr(fit.ch[0].a8, fit.ch[1].a8, fit.ch[2].a8));
+	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+	C3D_BlendingColor(0);
+	set_present_draw(Swizzle::Plain);
+	++s_cn.fade_quads;
+}
+
+// Part 1's quad changes nothing for the identity (A = 255, B = 0 on every channel): not drawn.
+bool fade_affine_is_identity(const FadeFit& fit)
+{
+	for (const FadeChannel& c : fit.ch)
+		if (c.a8 != 255 || c.b8 != 0)
+			return false;
+	return true;
+}
+
 // M6 direct_check: the composite's framebuffer against the read-back view with the overlay's bands composited on the CPU
 // (premultiplied over: c = ov + view * (255 - A) / 255, rounded to nearest), through the CPU present's own conversion
 // (present_reference). `fb` is the framebuffer the composite's transfer wrote (retired).
-void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands, int nb)
+// M6b: on a fade frame (`fade`) the reference then goes through the frame's curves, ref[c][x] (= curve >> 8, exactly
+// SW's apply_gamma), and the frame is judged by the accepted gate: within_2 >= 99.9 % and max <= 4.
+void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands, int nb, const FadeFrame* fade)
 {
 	if (!s_check_ref)
 		s_check_ref = static_cast<uint32_t*>(malloc(kFbPixels * sizeof(uint32_t)));
@@ -481,13 +528,20 @@ void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands
 				}
 				v = out;
 			}
+	if (fade)
+		for (size_t i = 0; i < kFbPixels; ++i)
+		{
+			const uint32_t v = s_check_ref[i];
+			s_check_ref[i] = 0xFF000000u | static_cast<uint32_t>(fade->ref[0][(v >> 16) & 0xFF]) << 16 |
+			                 static_cast<uint32_t>(fade->ref[1][(v >> 8) & 0xFF]) << 8 | fade->ref[2][v & 0xFF];
+		}
 	if (!a1_3ds::present_reference(s_diff_ref, s_check_ref, kScreenW * 4, kScreenW, kScreenH, SDL_PIXELFORMAT_ARGB8888))
 	{
 		++s_cn.check_skipped;
 		return;
 	}
 	GSPGPU_InvalidateDataCache(fb, kFbPixels * sizeof(u32));
-	unsigned over1 = 0, over32 = 0, mx[3] = {0, 0, 0};
+	unsigned over1 = 0, over2 = 0, over32 = 0, mx[3] = {0, 0, 0};
 	for (size_t i = 0; i < kFbPixels; ++i)
 	{
 		const u32 g = fb[i], c = s_diff_ref[i];
@@ -505,19 +559,35 @@ void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands
 				m = d;
 		}
 		over1 += m > 1;
+		over2 += m > 2;
 		over32 += m > 32;
 	}
 	const double within = 100.0 * (kFbPixels - over1) / kFbPixels;
+	const double within2 = 100.0 * (kFbPixels - over2) / kFbPixels;
+	const unsigned max_all = mx[0] > mx[1] ? (mx[0] > mx[2] ? mx[0] : mx[2]) : (mx[1] > mx[2] ? mx[1] : mx[2]);
 	++s_cn.checks;
-	s_cn.check_bad += within < 99.9 || over32 > 0;
+	if (fade)
+	{
+		const bool bad = within2 < 99.9 || max_all > 4;
+		++s_cn.fade_checks;
+		s_cn.fade_bad += bad;
+		s_cn.check_bad += bad;
+		if (max_all > s_cn.fade_max)
+			s_cn.fade_max = max_all;
+		if (within2 < s_cn.fade_min_within2)
+			s_cn.fade_min_within2 = within2;
+	}
+	else
+		s_cn.check_bad += within < 99.9 || over32 > 0;
 	s_cn.check_big += over32;
 	for (int ch = 0; ch < 3; ++ch)
 		if (mx[ch] > s_cn.check_max[ch])
 			s_cn.check_max[ch] = mx[ch];
 	if (within < s_cn.check_min_within)
 		s_cn.check_min_within = within;
-	printf("[c3d] direct_check: present %u: within_1=%.3f%% over_1=%u over_32=%u max R %u G %u B %u bands=%d\n",
-	       s_present, within, over1, over32, mx[0], mx[1], mx[2], nb);
+	printf("[c3d] direct_check: present %u: within_1=%.3f%% within_2=%.3f%% over_1=%u over_32=%u max R %u G %u B %u "
+	       "max=%u bands=%d fade=%d\n",
+	       s_present, within, within2, over1, over32, mx[0], mx[1], mx[2], max_all, nb, fade ? 1 : 0);
 }
 
 // M6 (design 7, M6 specification "The composite frame"): a direct frame's present. One C3D frame: the band uploads, the
@@ -527,6 +597,9 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 {
 	C3D_Tex* const vtex = view_texture();
 	C3D_Tex* const otex = overlay_texture();
+	// M6b: this frame's fade, consumed whatever happens below.
+	const bool fade = s_fade_set;
+	s_fade_set = false;
 	switch (begin_present_frame(FrameZone::Wait))   // the view frame's GPU time not hidden by the CPU: c3d_wait
 	{
 	case Begin::Ok:
@@ -602,6 +675,9 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 				C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * (1 + i), 4);
 			s_cn.band_quads += nb;
 		}
+		// M6b: the fade after the overlays (SW applies the curves to the crosshair and the text too).
+		if (fade && s_fade.fit.kind == FadeKind::Affine && !fade_affine_is_identity(s_fade.fit))
+			draw_fade_affine(s_fade.fit);
 		// The restore: the present's texture (the record), its buffer info, the plain blend.
 		__real_C3D_TexBind(0, static_cast<C3D_Tex*>(tex_recorded()));
 		C3D_SetBufInfo(&s_saved_cbuf);
@@ -644,7 +720,7 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 				frame_end(0, false, FrameKind::View);
 				if (check_fb)
 				{
-					direct_check_compare(check_fb, view_convert_readback(), bands, nb);
+					direct_check_compare(check_fb, view_convert_readback(), bands, nb, fade ? &s_fade : nullptr);
 					done = true;
 				}
 			}
@@ -666,6 +742,13 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 }
 
 } // namespace
+
+void fade_frame_set(const FadeFrame* frame)
+{
+	s_fade_set = frame != nullptr;
+	if (frame)
+		s_fade = *frame;
+}
 
 bool present_close_frame()
 {
@@ -789,10 +872,12 @@ void present_free()
 	if (s_cn.composites)
 		printf("[c3d] composite final: composites=%u band_quads=%u present_diff_not_checkable=%u audits=%u leaks=%u "
 		       "direct_checks=%u bad=%u big=%u skipped=%u min_within=%.3f%% max R %u G %u B %u bottom_pending=%u "
-		       "vram_free_kib=%lu (at exit, before the release)\n",
+		       "vram_free_kib=%lu fade_quads=%u fade_checks=%u fade_bad=%u fade_min_within_2=%.3f%% fade_max=%u "
+		       "(at exit, before the release)\n",
 		       s_cn.composites, s_cn.band_quads, s_cn.not_checkable, s_cn.audits, s_cn.leaks, s_cn.checks, s_cn.check_bad,
 		       s_cn.check_big, s_cn.check_skipped, s_cn.check_min_within, s_cn.check_max[0], s_cn.check_max[1],
-		       s_cn.check_max[2], overlay_bottom_pending(), static_cast<unsigned long>(s_vram_free_at_exit / 1024));
+		       s_cn.check_max[2], overlay_bottom_pending(), static_cast<unsigned long>(s_vram_free_at_exit / 1024),
+		       s_cn.fade_quads, s_cn.fade_checks, s_cn.fade_bad, s_cn.fade_min_within2, s_cn.fade_max);
 	free(s_check_ref);
 	s_check_ref = nullptr;
 	if (s_staging)

@@ -203,6 +203,12 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.g3a);
 	if (key == "sw_every")
 		return parse_unsigned(value, 0, 100000, cfg.sw_every);
+	if (key == "fades")
+		return parse_flag(value, cfg.fades);
+	if (key == "fade_tol")
+		return parse_unsigned(value, 0, 32, cfg.fade_tol);
+	if (key == "fade_parts")
+		return parse_unsigned(value, 0, 7, cfg.fade_parts);
 	if (key == "fallback")
 	{
 		if (value != "readback" && value != "sw")

@@ -44,6 +44,7 @@
 #include "../core/config.h"
 #include "../core/diff.h"
 #include "../core/direct_state.h"
+#include "../core/fade_fit.h"
 #include "../core/overlay_bands.h"
 #include "../core/shade_lut.h"
 #include "../core/stats.h"
@@ -64,6 +65,10 @@
 // RenderOther/screen_shared.h (in screen.cpp's TU, not static): the overlays the M6 test key switches on.
 extern bool displaying_fps;
 extern bool ShowPosition;
+// RenderOther/screen.cpp: the colour curves of the current fade (M6b; read at hook 3a, never written).
+extern uint16 current_gamma_r[256];
+extern uint16 current_gamma_g[256];
+extern uint16 current_gamma_b[256];
 
 namespace a1_c3d {
 
@@ -563,7 +568,15 @@ struct DirectFront
 	unsigned mode_lines = 0, mode_changes = 0;
 	bool overlays_done = false;
 	uint64_t last_msg_ms = 0;
+	// M6b (design 7, M6b specification "Counters"): this frame's fit kind (None: no fade quad), direct frames with a fade
+	// quad, frames whose curves did not fit (they stay blocked=gamma), the worst error among accepted fits, distinct
+	// curve sets fitted, "[c3d] fade:" lines printed and dropped (after 200), and whether a fade is showing.
+	FadeKind fade_this = FadeKind::None;
+	unsigned fade_affine = 0, fade_nofit = 0, fade_err = 0, fade_changes = 0, fade_lines = 0, fade_lines_dropped = 0;
+	bool fade_seen = false;
+	FadeKind fade_last_kind = FadeKind::None;   // the kind of the last fit logged
 } s_d;
+FadeCache s_fade_cache;
 
 // The kind of frame play mode makes this frame, logged on a change (at most 20 lines, then counted).
 void note_mode(int mode)
@@ -661,10 +674,81 @@ int direct_counts_text(char* buf, size_t size)
 	if (!any && n > 0 && n < static_cast<int>(size))
 		n += snprintf(buf + n, size - n, "-");
 	if (n > 0 && n < static_cast<int>(size))
-		n += snprintf(buf + n, size - n, " ");
+		n += snprintf(buf + n, size - n, " fade_affine=%u fade_nofit=%u fade_err=%u fade_changes=%u fade_lines_dropped=%u ",
+		              s_d.fade_affine, s_d.fade_nofit, s_d.fade_err, s_d.fade_changes, s_d.fade_lines_dropped);
 	if (n > 0 && n < static_cast<int>(size))
 		n += back::overlay_stats_text(buf + n, static_cast<unsigned>(size - n));
 	return n;
+}
+
+// M6b: "[c3d] fade: curves changed, fit ...". The steps of a fade share 200 lines, then are counted; its first fit (after
+// the identity), a change of kind and the return to the identity (`event`) always print, up to 2000 lines, so a test
+// log shows every fade that ran.
+void fade_log(const char* what, const FadeFit* fit, bool event)
+{
+	if (s_d.fade_lines >= (event ? 2000u : 200u))
+	{
+		++s_d.fade_lines_dropped;
+		return;
+	}
+	++s_d.fade_lines;
+	if (fit)
+		printf("[c3d] fade: curves changed, fit %s A=%u,%u,%u B=%u,%u,%u err=%u frame=%u\n", what, fit->ch[0].a8,
+		       fit->ch[1].a8, fit->ch[2].a8, fit->ch[0].b8, fit->ch[1].b8, fit->ch[2].b8, fit->err, s_frame);
+	else
+		printf("[c3d] fade: curves changed, fit %s frame=%u\n", what, s_frame);
+}
+
+// M6b (design 7, M6b specification "The mechanism"), at hook 3a after the frame's fade state was reset: with fades 1,
+// renderer c3d, mode direct and kDirectGamma the only block, the engine's three curves are fitted (core/fade_fit.h,
+// cached); a fit clears the bit and hands the fit and its curves to this frame's composite. Returns the mask to store.
+unsigned fade_policy(const Config& cfg, unsigned blocks)
+{
+	if (!cfg.fades || !cfg.renderer_c3d || cfg.mode != Mode::Direct)
+		return blocks;
+	if (!(blocks & kDirectGamma))
+	{
+		if (s_d.fade_seen)
+		{
+			// The curves are back to the identity (using_default_gamma): visible in the log, and the next fade is
+			// logged even if its curves equal the last fitted ones.
+			s_d.fade_seen = false;
+			s_fade_cache.invalidate();
+			s_d.fade_last_kind = FadeKind::None;
+			fade_log("identity", nullptr, true);
+		}
+		return blocks;
+	}
+	if (blocks != kDirectGamma)
+		return blocks;
+	bool changed = false;
+	const FadeFit& fit = s_fade_cache.get(current_gamma_r, current_gamma_g, current_gamma_b, cfg.fade_tol,
+	                                      cfg.fade_parts, &changed);
+	if (changed)
+	{
+		++s_d.fade_changes;
+		fade_log(fit.kind == FadeKind::Affine ? "affine" : "no", &fit, !s_d.fade_seen || fit.kind != s_d.fade_last_kind);
+		s_d.fade_last_kind = fit.kind;
+	}
+	s_d.fade_seen = true;
+	if (fit.kind == FadeKind::None)
+	{
+		++s_d.fade_nofit;
+		return blocks;
+	}
+	if (fit.err > s_d.fade_err)
+		s_d.fade_err = fit.err;
+	FadeFrame frame;
+	frame.fit = fit;
+	for (int i = 0; i < kFadeEntries; ++i)
+	{
+		frame.ref[0][i] = static_cast<uint8_t>(current_gamma_r[i] >> 8);
+		frame.ref[1][i] = static_cast<uint8_t>(current_gamma_g[i] >> 8);
+		frame.ref[2][i] = static_cast<uint8_t>(current_gamma_b[i] >> 8);
+	}
+	back::fade_frame_set(&frame);
+	s_d.fade_this = fit.kind;
+	return 0;
 }
 
 // The overlays test key (M6 specification "Test-only keys"): the engine's own switches, once; a message every 2 s.
@@ -973,6 +1057,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		if (direct)
 		{
 			++s_d.direct;
+			s_d.fade_affine += s_d.fade_this == FadeKind::Affine;
 			s_d.this_frame = true;
 			note_mode(-1);
 			if (cfg.calibrate)
@@ -1004,6 +1089,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				sw_replay();
 				direct_after(s_d.st, ViewKind::Sw, false);
 				--s_d.direct;
+				s_d.fade_affine -= s_d.fade_this == FadeKind::Affine;
 				--P.c3d;
 				++s_d.sw;
 				++s_d.reason[kReasonPlay];
@@ -1104,13 +1190,13 @@ void stats_tick()
 	       s_diff_dropped, s_null_frames, s_cal_done, s_cal_skipped);
 	if (s_play.frames)
 	{
-		char buf[768];
+		char buf[1024];
 		play_counts_text(buf, sizeof buf);
 		printf("[c3d] play %s\n", buf);
 	}
 	if (s_d.frames || s_d.policy_calls)
 	{
-		char buf[768];
+		char buf[1024];
 		direct_counts_text(buf, sizeof buf);
 		printf("[c3d] direct %s\n", buf);
 	}
@@ -1193,7 +1279,7 @@ void frame_final_stats()
 	if (s_play.frames && !play_final)
 	{
 		play_final = true;
-		char buf[768];
+		char buf[1024];
 		play_counts_text(buf, sizeof buf);
 		printf("[c3d] play final %s rects=%u tinted_rects=%u rect_skipped=%u rect_unsupported=%u land_polys=%u "
 		       "land_spans=%u land_unsupported=%u static_polys=%u static_rects=%u static_unsupported=%u solid_skipped=%u\n",
@@ -1209,7 +1295,7 @@ void frame_final_stats()
 	if ((s_d.frames || s_d.policy_calls) && !direct_final)
 	{
 		direct_final = true;
-		char buf[768];
+		char buf[1024];
 		direct_counts_text(buf, sizeof buf);
 		printf("[c3d] direct final %s bottom_pending=%u\n", buf, overlay_bottom_pending());
 		fflush(stdout);
@@ -1222,6 +1308,12 @@ void frame_final_stats()
 
 void direct_policy(unsigned blocks)
 {
+	const Config& cfg = frame_config();
+	// M6b: the fade belongs to this frame only (reset first), then the fit may clear kDirectGamma: the cleared mask is
+	// what is stored, counted and used for overlay_ok (design 7, M6b "Order in direct_policy").
+	back::fade_frame_set(nullptr);
+	s_d.fade_this = FadeKind::None;
+	blocks = fade_policy(cfg, blocks);
 	s_d.policy = blocks;
 	s_d.policy_set = true;
 	++s_d.policy_calls;
@@ -1229,7 +1321,6 @@ void direct_policy(unsigned blocks)
 		++s_d.policy_blocked[direct_block_index(blocks)];
 	s_d.this_frame = false;
 	back::overlay_drop();   // a hand-out the last present did not consume (the gate skipped it)
-	const Config& cfg = frame_config();
 	// The overlay surface must exist before a frame is decided direct (critic, M6 round 1 minor 5).
 	s_d.overlay_ok = !blocks && cfg.renderer_c3d && cfg.mode == Mode::Direct && back::is_up() && back::overlay_ensure();
 }

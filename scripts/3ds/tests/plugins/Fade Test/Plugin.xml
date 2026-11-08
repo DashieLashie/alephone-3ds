@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M6b test (docs/3ds/CITRO3D_DESIGN.md, section 7, M6b specification "Tests" (2)): from 3 s in, every fade
+     type in order, each after the previous one has ended, _fade_long_bright (priority 1) last. Installed by
+     scripts/3ds/run-azahar.sh --fade-test. -->
+<plugin name="Fade Test" version="1.0" description="3DS test: every fade type in turn" solo_lua="fadetest.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

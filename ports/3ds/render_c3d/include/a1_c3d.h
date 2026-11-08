@@ -44,7 +44,8 @@ enum DirectBlock : unsigned
 	kDirectAccel = 1u << 2,       // not the software blit path
 	kDirectMap = 1u << 3,         // overhead map
 	kDirectTerminal = 1u << 4,
-	kDirectGamma = 1u << 5,       // !using_default_gamma: fades, flashes, tints, brightness
+	kDirectGamma = 1u << 5,       // !using_default_gamma: fades, flashes, tints (Brightness was removed, PATCHES.md 56);
+	                              // M6b: cleared by direct_policy when the curves fit a GPU form
 	kDirectDarken = 1u << 6,      // darken_world_window
 	kDirectNetwork = 1u << 7,
 	kDirectLuaHud = 1u << 8,

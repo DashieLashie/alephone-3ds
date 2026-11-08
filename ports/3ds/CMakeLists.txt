@@ -366,6 +366,7 @@ if(A1_RENDER_C3D)
     "${_a1_c3d_dir}/core/noise.cpp"
     "${_a1_c3d_dir}/core/overlay_bands.cpp"
     "${_a1_c3d_dir}/core/direct_state.cpp"
+    "${_a1_c3d_dir}/core/fade_fit.cpp"
     "${_a1_c3d_dir}/back/context.cpp"
     "${_a1_c3d_dir}/back/present.cpp"
     "${_a1_c3d_dir}/back/view.cpp"

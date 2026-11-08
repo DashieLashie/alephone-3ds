@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M6b test (docs/3ds/CITRO3D_DESIGN.md, section 7, M6b specification "Tests" (3)): 3 s in, the player under
+     water; a red flash every 2 s for 30 s, then a negative flash every 2 s (part 2 over a liquid). Installed by
+     scripts/3ds/run-azahar.sh --liquid-test. -->
+<plugin name="Liquid Test" version="1.0" description="3DS test: under water, flashes on top" solo_lua="liquidtest.lua">
+  <scenario name="Marathon 2"/>
+</plugin>
