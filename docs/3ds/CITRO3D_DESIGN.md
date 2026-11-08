@@ -5002,3 +5002,14 @@ arithmetic) is 100.000 %, Δ 0, on L0/L6/L20 and the L01 film on the host GPU (�
 checks in the films. **User decision (2026-11-07): a recorded exception** — captures that carry overlay text are gated at
 **≥ 99.5 % within Δ 1 and 0 pixels over Δ 32**; 8.3's 99.9 % stays for everything else, `direct_check` keeps 99.9 % (it
 measured 100 %). Under the exception the three captures pass.
+
+### M6, the texture-cache hash, user decision (2026-11-07; an exception to rule 1)
+
+The hash (M6 prerequisite) showed no change in Azahar's `c3d_draw`. The probe counters show the old scan examined ~780 /
+300 / 110 slots per frame on L0 / L6 / L20 (~830 in the L01 film) against ~1 per lookup now. Estimated console saving:
+0.03-0.15 ms per frame (the scan's ~25 KB per frame exceeds the 16 KB L1, a cost Azahar does not model), plus up to ~1 ms on
+level-start frames; not measurable at the console's ±0.05 ms. Against it: `CLAUDE.md` rule 1 (no measured gain), a second
+record of live slots to keep in sync (a miss can only cause a duplicate conversion, never a wrong texture), and
+`next_promotion` still scans all 512 slots on every call (at least once per view frame, now the larger scan). **User
+decision: keep it** (no pixel can change; the gain cannot be negative). If the scans ever matter, `next_promotion` (a
+pending list) is the next target, measured with an A/B key.
