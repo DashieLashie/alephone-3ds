@@ -5055,4 +5055,4 @@ on M7; the two interact only through VRAM. 9.1's direct column is 5 815 of 6 144
 target and second view target), so M9 shrinks the texture cache cap, and M7's 1024x512 view target (2 048 KiB, two eyes would
 not fit) means SSAA is probably off while 3D is on: a decision for M7's spec, noted in M7's and M9's headings. Side benefit: M9's
 2x fill gives the first console measurement of the GPU's fill headroom before M7's 4x (G3-b today: view 1.3-1.5 ms). M8's open
-question, which `debug-c3d` settings the shipping "GPU (experimental)" means, is for the user (`KICKOFF_M8.md`).
+question, which `debug-c3d` settings the shipping "GPU (experimental)" means, was answered the same day (user, option a): the whole bundle `renderer c3d`, `mode direct`, `play`, `textures`, `lit`, `overlays`; the `debug-c3d` file still overrides it (`KICKOFF_M8.md`).

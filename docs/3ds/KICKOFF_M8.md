@@ -25,15 +25,16 @@ and recorded, none decides. Be economical: the user is short on time and usage (
   the save attribute (`root.put_attr`, ~3775) and the read (`root.read_attr`, ~4821); `preferences.h` has the field
   (`graphics_preferences_data`, ~107). Re-find these by grep: the line numbers are from 2026-11-08.
 
-## The decision to ask the user first (it is theirs)
+## User decision (2026-11-08): the preference means the whole bundle — option (a)
 
-What does "GPU (experimental)" mean in shipping? Today's best configuration is `renderer c3d`, `mode direct`, `play 1`,
-`textures 1`, `lit 1`, `overlays 1`, with `zero_copy 1` and `present gpu` already the defaults. The options to put in front of
-them (recommend one, do not decide): **(a)** the preference turns on exactly that bundle and the `debug-c3d` file still
-overrides it for tests; **(b)** the preference only enables the renderer and the file keeps selecting the mode. Also ask what
-happens in Classic (`bottom_screen=2`, which is `not_native` and always readback) and on a fatal error / dialog (those paths
-already fall back; check, do not assume). **Check what the code does before asking** (`config.cpp`, where `debug-c3d` is
-parsed, and `context.cpp`) so the question is concrete.
+"GPU (experimental)" turns on exactly today's best configuration: `renderer c3d`, `mode direct`, `play 1`, `textures 1`,
+`lit 1`, `overlays 1` (with `zero_copy 1` and `present gpu`, already the defaults). The `debug-c3d` file still overrides
+it, so every test and runbook keeps working unchanged. **Do not ask the user this again.** Two small things stay for you to
+check in the code, not to ask: what the preference does in Classic (`bottom_screen=2`, `not_native`, always readback: it
+should simply fall back, as the direct policy already does) and on a fatal error or dialog (those paths already fall
+back); read `config.cpp` (where `debug-c3d` is parsed) and `context.cpp` first, and report what you found. Ask the user only
+if the code shows a real conflict (for example the file's absence being treated as "software" in a way the preference
+cannot override).
 
 ## What to build
 
