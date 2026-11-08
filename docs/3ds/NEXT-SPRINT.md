@@ -1927,7 +1927,7 @@ the cost of `fallback sw`'s one sync + one seed per fade, and the Software figur
    `[c3d] preference: Renderer GPU (renderer c3d, mode direct, fallback sw)`, the BENCH line ~60 fps, `direct final` with
    `direct=` ≥ 95 % of `frames=`; the picture looks like Software's. Fetch the `Marathon 2 Preferences` file: `c3d_renderer="1"`.
 2. **Persisted** (~3 min). Relaunch as is (no dialog). **Pass:** the preference line again and the same BENCH (it persisted).
-3. **Brightness** (~3 min). Graphics > Brightness = Normal (one step up), relaunch. **Record** BENCH `fps`, `blit` and
+3. **Brightness: obsolete** (the option was removed, `PATCHES.md` 56; skip it). Was: Graphics > Brightness = Normal (one step up), relaunch. **Record** BENCH `fps`, `blit` and
    `direct final`'s `blocked=gamma:` (Azahar: every frame blocked, 21.9 fps, `blit` 27.4 ms). Then Renderer = Software, same
    level, relaunch: the Software figure (expected equal). Put Brightness back to Dark.
 4. **Fades in play, `quiet 1` not needed** (~5 min). `debug-perf` removed; Renderer = GPU; play L0 for a minute, take

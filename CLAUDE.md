@@ -44,8 +44,9 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   −0.4 to −0.8 ms vs SW; G3-b `gpu_ms view` 1.3-1.5 ms); **order (user decision 2026-11-08): M8 → M6b (fades in direct mode) → M9 → M7, M7 goes last;
   gates measured, not deciding.** **M8 done** (2026-11-08, tag `port-stage10-M8`, `PERF.md` "Stage 10 M8", Azahar only,
   `PATCHES.md` 48: Graphics > Renderer "GPU (experimental)" = `renderer c3d`, `mode direct`, new key `fallback sw`, applied only
-  without a `debug-c3d` file; finding: any non-default Brightness blocks every direct frame **and** drops Software itself to
-  ~22 fps @60 in Azahar, the engine's `apply_gamma`, pending a user decision); **next: M6b**; **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  without a `debug-c3d` file; finding: any non-default Brightness blocked every direct frame **and** dropped Software itself to
+  ~22 fps @60 in Azahar (the engine's `apply_gamma`), so **Brightness was removed from the options**, `PATCHES.md` 56, on
+  `3ds-port` too, user 2026-11-08); **next: M6b** (fades and tints; Brightness is no longer part of it); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.

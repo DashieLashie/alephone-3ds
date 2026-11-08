@@ -2154,3 +2154,8 @@ the engine's `apply_gamma` (`screen.cpp`:2060), a generic per-pixel loop (two `s
 without the GPU renderer. Pre-existing, not caused by M8; Azahar overstates instruction cost (~40 % on `render`), the console's
 figure is unknown. Two ways out, for the user to decide: M6b tier 2 (Brightness as a GPU lookup) and a Software fast path for
 `apply_gamma` (32-bit, one format: a candidate under rule 1, worth measuring on its own since every fade pays it).
+
+**Resolved (user decision, 2026-11-08): Brightness was removed from the options** (`PATCHES.md` 56, on `3ds-port` and here): the
+level is always the default, so neither Software nor the GPU renderer pays for it. Script 27 rerun on the new dialog layout:
+921 of 921 frames direct after the flip.
+

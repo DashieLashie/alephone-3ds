@@ -27,12 +27,12 @@ tap DOWN
 wait 300
 tap A                  # GRAPHICS
 wait 2000
-touch 175 131          # the Renderer value
+touch 175 127          # the Renderer value (no Brightness row since PATCHES.md 56)
 wait 150
 untouch
 wait 800
 screens rp-graphics-flipped
-touch 136 200          # ACCEPT
+touch 136 195          # ACCEPT
 wait 150
 untouch
 wait 2000
