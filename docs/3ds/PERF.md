@@ -2118,3 +2118,39 @@ VBlank wait before the composite (`bottom_pending` 5-6 % of frames, no artefact)
 view's GPU time 1.3-1.5 ms. **Not reached:** whether VRAM contents survive HOME for `tex_view` (the picture was right after
 each return and the texture audit says `ok`, but no pixel check was made); contiguous 512 KiB / 2 MiB VRAM blocks after pool
 churn (step 3's `alloc-fail 5` is a lead, not examined).
+
+## Stage 10 M8: the Renderer preference (Azahar — non-authoritative)
+
+Recorded 2026-11-08 on `stage10-c3d`, tag `port-stage10-M8` (`CITRO3D_DESIGN.md` section 7, "M8"; `PATCHES.md` 48). Binaries:
+`build-3ds-c3d` (the dialog script) and `build-3ds-c3d-prof` (the benches), **no `debug-c3d` file** in any run: the preference
+alone selects the renderer. Logs `build/perf/m8-*` (not in git). What "GPU (experimental)" means (user decisions 2026-11-08):
+`renderer c3d`, `mode direct` and the new key **`fallback sw`**: a frame that may not be direct is drawn by SW, not read back
+(readback costs +6.2 / +7.8 / +7.3 ms busy against SW on the console, G2-b). `overlays` is left out (a test key). With a
+`debug-c3d` file the file decides everything.
+
+| Item | Result |
+| --- | --- |
+| switches at the next frame | script 27: game 1 Software (no `[c3d] play`/`direct` lines), Preferences > Graphics > Renderer flipped, game 2: `[c3d] preference: Renderer GPU (renderer c3d, mode direct, fallback sw)` and **922 of 922 frames direct** from frame 1 |
+| persisted | the file then holds `c3d_renderer="1"`; the next launch is GPU from its first frame (807 of 807 direct); flipped back: `c3d_renderer="0"`, `switch_off=1 syncs=1`, no direct frame after |
+| Software unchanged (@30, preference off) | busy 16.50 / 14.23 / 14.38 ms on L0 / L6 / L20 against M6's SW row 16.52 / 14.75 / 14.39; `render` 11.20 / 8.98 / 8.63, `blit` 1.20, `present` 0.48: identical; L6's 0.5 ms is all `bottom` (2.93 → 2.42, the map: random start) |
+| Classic @60 L20 | Software **52.90** fps, GPU preference **52.89** (1 496 of 1 496 frames `not_native` → `fallback_sw`): no readback penalty |
+| OFF builds, host build | `PATCHES.md` 48: only `__LINE__` words move, `nm` 0, `ppcheck` DIFFER 0 normalised; 4 builds 0 warnings; host tests 2 654 843 checks, 0 failures |
+
+**The Brightness check** (kickoff item 5; GPU preference, HUD + Map @60, L0, one run per level; the dialog's 8 levels, 2 =
+"Dark" = `DEFAULT_GAMMA_LEVEL`):
+
+| Brightness | 0 | 1 | **2** | 3 | 4 | 5 | 6 | 7 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frames / direct | 627 / 0 | 624 / 0 | **1 668 / 1 668** | 624 / 0 | 626 / 0 | 625 / 0 | 627 / 0 | 626 / 0 |
+| `blocked=gamma:` | 627 | 624 | **0** | 624 | 626 | 625 | 627 | 626 |
+| fps | 21.94 | 21.95 | **59.61** | 21.95 | 21.94 | 21.93 | 21.97 | 21.95 |
+
+**Every non-default level blocks every frame**, as the code predicts: `gamma_correct_color_table` (`fades.cpp`:451) makes
+`world_color_table` differ from the uncorrected table at any gamma other than 1.0, so `using_default_gamma` is false on every
+frame (`screen.cpp`:2262). Under `fallback sw` those frames are plain Software. **And Software itself is slow there:** Software
+at Brightness 0 (preference off) runs **21.96 fps, `blit` 27.44 ms** against 1.20, the same as the GPU preference. The cost is
+the engine's `apply_gamma` (`screen.cpp`:2060), a generic per-pixel loop (two `switch`es and six mask-shift pairs a pixel over
+96 000 pixels) run in `update_screen` on every frame with a non-default Brightness **and on every fade or flash frame**, with or
+without the GPU renderer. Pre-existing, not caused by M8; Azahar overstates instruction cost (~40 % on `render`), the console's
+figure is unknown. Two ways out, for the user to decide: M6b tier 2 (Brightness as a GPU lookup) and a Software fast path for
+`apply_gamma` (32-bit, one format: a candidate under rule 1, worth measuring on its own since every fade pays it).

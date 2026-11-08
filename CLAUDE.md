@@ -41,8 +41,11 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   L0/L6/L20; captures pass a recorded exception, design Review log "M6 acceptance, capture gate"); **M6 console check run
   2026-11-07** (`PERF.md` "Stage 10 M6 — console, short check", 15 launches: no hardware bug; orientations right, `direct_check`
   Δ 0, HOME/sleep/Close clean, **direct 60.5 fps @60 on L0/L6/L20, goal met, but SW also holds 60.5 on the console**; busy
-  −0.4 to −0.8 ms vs SW; G3-b `gpu_ms view` 1.3-1.5 ms); **next (user decision 2026-11-08: M8 → M6b (fades in direct mode) → M9 → M7, M7 goes last;
-  gates measured, not deciding): M8** (`docs/3ds/KICKOFF_M8.md`); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  −0.4 to −0.8 ms vs SW; G3-b `gpu_ms view` 1.3-1.5 ms); **order (user decision 2026-11-08): M8 → M6b (fades in direct mode) → M9 → M7, M7 goes last;
+  gates measured, not deciding.** **M8 done** (2026-11-08, tag `port-stage10-M8`, `PERF.md` "Stage 10 M8", Azahar only,
+  `PATCHES.md` 48: Graphics > Renderer "GPU (experimental)" = `renderer c3d`, `mode direct`, new key `fallback sw`, applied only
+  without a `debug-c3d` file; finding: any non-default Brightness blocks every direct frame **and** drops Software itself to
+  ~22 fps @60 in Azahar, the engine's `apply_gamma`, pending a user decision); **next: M6b**; **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
@@ -99,8 +102,7 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
 2. **Every engine edit** (anything under `Source_Files/`) is fenced with `#ifdef A1_PLATFORM_3DS`, gets a numbered
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
-   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's, 47 M6's (all used), 48 is reserved by
-   stage 10 for M8; 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07); take 56+ for anything else.
+   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's, 47 M6's, 48 M8's (all used); 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07); take 56+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".

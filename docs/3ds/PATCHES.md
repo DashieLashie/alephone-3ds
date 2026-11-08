@@ -18,8 +18,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
 36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 and an update to 19
-in the sprint after it (`NEXT-SPRINT.md`), 49, 45 and 46 in stage 10 (`CITRO3D_DESIGN.md`; 47-48 are
-reserved there for the engine hooks of M6 and M8).
+in the sprint after it (`NEXT-SPRINT.md`), 49, 45 and 46 in stage 10 (`CITRO3D_DESIGN.md`; 47-48 were
+reserved there for the engine hooks of M6 and M8, and are now used).
 
 ## Summary
 
@@ -71,6 +71,8 @@ reserved there for the engine hooks of M6 and M8).
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
 | 45 | `Source_Files/RenderMain/render.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M0: hook 1, the world view goes through `a1_c3d::render_frame()` | none |
 | 46 | `Source_Files/RenderMain/shapes.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M2: hooks 2a/2b, `a1_c3d::collections_changed()` at the end of `load_collections()` and `unload_all_collections()` | none |
+| 47 | `Source_Files/RenderOther/screen.cpp`, `screen_shared.h` (`A1_RENDER_C3D=ON` builds only) | stage 10 M6: hook 3, a direct frame's overlays go to the back end's overlay surface | none |
+| 48 | `Source_Files/Misc/preferences.cpp`, `preferences.h` (`A1_RENDER_C3D=ON` builds only) | stage 10 M8: the Renderer preference (Software / GPU (experimental)) | none |
 | 49 | `ports/3ds/source/video_3ds.cpp`, `a1_3ds_platform.cpp`, `profile_3ds.cpp`, `include/a1_3ds_profile.h`, `CMakeLists.txt`, `render_c3d/` (new port files, no upstream edit; `A1_RENDER_C3D=ON` builds only) | stage 10 P1: citro3d owns the top screen, GPU present | none (the CPU present stays as `debug-c3d` `present cpu` and in the default build) |
 
 The complete list of stubs and lost functionality, including items not tied
@@ -1094,6 +1096,36 @@ fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)` (one inner `#ifd
 copies saved at the start of M6 (`build/m6/start/`, after the `stage10-bb` merge); a first placement of the helpers before
 `change_screen_mode` moved 7 `logWarning` line constants (and one literal-pool word), hence the placement above;
 `nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds.
+
+## Stage 10 M8: the Renderer preference (48)
+
+Added 2026-11-08 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M8"). Every edit is an inner
+`#ifdef A1_RENDER_C3D` inside an existing `#ifdef A1_PLATFORM_3DS` block of patch 40 (the Bottom Screen preference), so the
+preference exists only in builds that have the renderer.
+
+48. **`Misc/preferences.h` and `Misc/preferences.cpp`: Graphics > Heads-Up Display > Renderer, "Software" (0, the default) or
+    "GPU (experimental)" (1), saved as `<graphics c3d_renderer="0|1">`.**
+    - `preferences.h`:108-112: the field `int16 c3d_renderer` in `graphics_preferences_data`.
+    - `preferences.cpp`:1043-1047 the labels; :1405-1410 the `w_select` under Bottom Screen; :1559-1566 the dialog's apply
+      (`changed = true` on a change, so the file is written); :3795-3797 `root.put_attr`; :4314-4316 the default 0;
+      :4550-4553 the validate step (anything but 0 or 1 becomes 0); :4851-4853 `root.read_attr`.
+    Port side (no engine edit): `render_c3d/front/frame.cpp` reads `graphics_preferences->c3d_renderer` before each frame's
+    first decision (hook 3a, then `render_frame`) and passes it to `back::config_preference()`, which applies the bundle
+    (`core/config.cpp` `config_apply_preference`: `renderer c3d`, `mode direct`, `fallback sw`) **only when there is no
+    `debug-c3d` file** (the file decides everything when present, so tests and runbooks are unchanged). The switch takes
+    effect at the next frame. An OFF build that rewrites the preferences file drops the attribute (its writer does not know
+    the field), so the setting falls back to Software there and the next ON build reads the default.
+
+**Non-3DS check** (2026-11-08, `ppcheck.sh "Source_Files/Misc/preferences.cpp Source_Files/Misc/preferences.h"
+"Source_Files/Misc/preferences.cpp Source_Files/RenderOther/screen.cpp"`, both volumes): `preferences.cpp` **DIFFER: 20 lines,
+0 with numbers normalised** (only `__LINE__` shifts; 235 000 and 164 364 preprocessed lines, stderr 0); `screen.cpp`
+(includes `preferences.h`) **IDENTICAL**; `-fsyntax-only` exit 0, 0 diagnostics.
+
+**3DS builds** (2026-11-08): the OFF builds (`build-3ds`, `build-3ds-prof`) compared with HEAD's `preferences.*` built in the
+same trees: `objdump -d alephone.elf` differs in **10 data words** each, all `__LINE__` constants of `logWarning` / `logError`
+in the preferences reader and writer (3 667-3 698 move by 19, 4 244-4 246 by 22: the fenced lines above them); no instruction
+changed. The dialog and save sites sit above those calls, so this cannot be placed like 47. `nm | grep -ciE
+'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds.
 
 ## Stage 10 B: the zero-copy present (55)
 

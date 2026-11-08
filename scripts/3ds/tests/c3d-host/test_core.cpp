@@ -4646,6 +4646,28 @@ static void test_config_m6()
 }
 
 
+// M8: the fallback key and the Renderer preference's bundle.
+static void test_config_m8()
+{
+	Config c;
+	CHECK(!c.fallback_sw && !c.renderer_c3d && c.mode == Mode::Readback);
+	std::vector<std::string> problems;
+	config_parse(c, "fallback sw\nfallback gpu\nfallback\n", problems);
+	CHECK(c.fallback_sw && problems.size() == 2);
+	config_parse(c, "fallback readback\n", problems);
+	CHECK(!c.fallback_sw && problems.size() == 2);
+
+	Config p;
+	CHECK(!config_apply_preference(p, false) && !p.renderer_c3d && p.mode == Mode::Readback && !p.fallback_sw);
+	CHECK(config_apply_preference(p, true));
+	CHECK(p.renderer_c3d && p.mode == Mode::Direct && p.fallback_sw);
+	CHECK(p.play && p.textures && p.lit && p.zero_copy && p.present_gpu && p.overlays == 0);   // the defaults
+	CHECK(!config_apply_preference(p, true));
+	CHECK(config_apply_preference(p, false));
+	CHECK(!p.renderer_c3d && p.mode == Mode::Direct && p.fallback_sw);   // the view target's kind is kept
+}
+
+
 // M6 "No clear in direct mode": the tex_view / dest_view transitions, the sync guard, the reason table.
 static void test_m6_direct_state()
 {
@@ -4769,6 +4791,7 @@ static void test_m6_core()
 {
 	test_m6_direct_state();
 	test_config_m6();
+	test_config_m8();
 	test_m6_hash();
 	test_m6_bands();
 }

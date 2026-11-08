@@ -203,6 +203,13 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.g3a);
 	if (key == "sw_every")
 		return parse_unsigned(value, 0, 100000, cfg.sw_every);
+	if (key == "fallback")
+	{
+		if (value != "readback" && value != "sw")
+			return false;
+		cfg.fallback_sw = value == "sw";
+		return true;
+	}
 	if (key == "film")
 	{
 		if (value.empty())
@@ -236,6 +243,18 @@ void config_parse(Config& cfg, const std::string& text, std::vector<std::string>
 		if (!config_apply(cfg, key, value))
 			problems.push_back("ignored \"" + key + " " + value + "\"");
 	}
+}
+
+bool config_apply_preference(Config& cfg, bool gpu)
+{
+	const bool changed = cfg.renderer_c3d != gpu;
+	cfg.renderer_c3d = gpu;
+	if (gpu)
+	{
+		cfg.mode = Mode::Direct;
+		cfg.fallback_sw = true;
+	}
+	return changed;
 }
 
 } // namespace a1_c3d

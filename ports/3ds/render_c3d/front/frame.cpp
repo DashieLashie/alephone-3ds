@@ -74,7 +74,6 @@ constexpr unsigned kMaxDumpFiles = 32;
 
 // --- state (main thread only) ---
 
-int s_active = -1;                  // -1 = not decided; 0/1 = whether debug-c3d asks for anything
 unsigned s_frame = 0;               // world frames render_frame saw (after the fast path and the depth test)
 uint64_t s_stats_ms = 0;
 
@@ -555,6 +554,9 @@ struct DirectFront
 	unsigned policy_calls = 0, policy_blocked[kDirectBlockCount] = {};   // every frame hook 3a saw (map and terminal
 	                                                                      // frames never reach render_frame)
 	unsigned seeds = 0, syncs = 0, sync_failed = 0, discard_stale = 0, forced_sw = 0, new_dest = 0;
+	unsigned fallback_sw = 0;         // M8: ineligible frames drawn by SW (fallback sw), not read back
+	unsigned switch_off = 0;          // M8: the renderer was switched off after frames of mode direct
+	bool in_mode = false;             // the last play frame was one of mode direct (direct_leave)
 	unsigned sync_skipped[static_cast<int>(SyncSkip::kCount)] = {};
 	bool seed_checked = false;
 	int last_mode = -2;               // -1 direct, else a reason; for the mode-change lines
@@ -603,14 +605,41 @@ void direct_sw_frame(bitmap_definition* dest, ViewKind kind = ViewKind::Sw)
 	direct_after(s_d.st, kind, false);
 }
 
+// M8: the renderer was switched off (the Renderer preference) after frames of mode direct. SW draws the next frame into
+// dest, which is stale where the last frame was direct: the sync first, as before any SW frame of mode direct. Only a world
+// frame calls this: off and on again with no world frame between leaves in_mode set and counts no switch_off, which is
+// still right (the texture does hold the newest view). The view texture and the overlay surface stay allocated.
+void direct_leave(bitmap_definition* dest)
+{
+	if (!s_d.in_mode)
+		return;
+	s_d.in_mode = false;
+	++s_d.switch_off;
+	if (dest->row_addresses[0] != s_d.dest0 || dest->width != s_d.dw || dest->height != s_d.dh)
+	{
+		direct_forget_texture(s_d.st);   // a new dest: the texture's view is not its picture, and the sizes may differ
+		s_d.st.dest_view = true;
+		return;
+	}
+	direct_sw_frame(dest);
+}
+
+// M8: the Renderer preference, applied before each frame's first decision (hook 3a, then render_frame).
+const Config& frame_config()
+{
+	back::config_preference(graphics_preferences->c3d_renderer != 0);
+	return back::config();
+}
+
 int direct_counts_text(char* buf, size_t size)
 {
 	int n = snprintf(buf, size,
 	                 "frames=%u direct=%u readback=%u sw=%u cal=%u seeds=%u syncs=%u sync_failed=%u "
-	                 "sync_skipped=%u/%u/%u(gate/off/discard) discard_stale=%u forced_sw=%u new_dest=%u mode_changes=%u why=",
+	                 "sync_skipped=%u/%u/%u(gate/off/discard) discard_stale=%u forced_sw=%u fallback_sw=%u switch_off=%u "
+	                 "new_dest=%u mode_changes=%u why=",
 	                 s_d.frames, s_d.direct, s_d.readback, s_d.sw, s_d.cal, s_d.seeds, s_d.syncs, s_d.sync_failed,
 	                 s_d.sync_skipped[1], s_d.sync_skipped[2], s_d.sync_skipped[3], s_d.discard_stale, s_d.forced_sw,
-	                 s_d.new_dest, s_d.mode_changes);
+	                 s_d.fallback_sw, s_d.switch_off, s_d.new_dest, s_d.mode_changes);
 	bool any = false;
 	for (int r = 0; r < kReasonCount && n > 0 && n < static_cast<int>(size); ++r)
 		if (s_d.reason[r])
@@ -718,6 +747,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	if (dmode)
 	{
 		++s_d.frames;
+		s_d.in_mode = true;
 		if (dest->row_addresses[0] != s_d.dest0 || w != s_d.dw || h != s_d.dh)
 		{
 			s_d.dest0 = dest->row_addresses[0];
@@ -761,6 +791,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		skip = kSkipConfig;
 	else if (graphics_preferences->software_alpha_blending != _sw_alpha_off)
 		skip = static_cast<int>(back::SkipReason::Pref);
+	else if (cfg.fallback_sw && cfg.mode == Mode::Direct && !back::view_direct_ok())
+		skip = kSkipConfig;   // M8: no texture target, so no direct frame: SW rather than readback
 	else if (!back::view_play_ready(w, h, &why))
 		skip = static_cast<int>(why);
 	const bool forced_sw = dmode && cfg.sw_every && P.frames % cfg.sw_every == 0;
@@ -785,6 +817,15 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			not_direct = direct_block_index(s_d.policy);
 		else if (!s_d.overlay_ok)
 			not_direct = kReasonOverlay;
+	}
+	// M8: fallback sw, the Renderer preference's choice. A frame that may not be direct (Classic's not_native, a fade, a
+	// non-default Brightness...) costs more read back than drawn by SW (G2-b), so SW draws it.
+	if (dmode && not_direct >= 0 && cfg.fallback_sw)
+	{
+		++s_d.fallback_sw;
+		++P.sw;
+		sw_frame(not_direct);
+		return false;
 	}
 	const bool direct = dmode && not_direct < 0;
 	const ViewKind kind = direct ? ViewKind::Direct : ViewKind::Readback;
@@ -1081,14 +1122,12 @@ void stats_tick()
 bool render_frame(view_data& view, bitmap_definition* dest, RasterizerClass* sw, DrawFn draw, void* ctx)
 {
 	(void)view;
-	if (s_active < 0)
+	const Config& cfg = frame_config();
+	if (!cfg.diff && !cfg.readback_cal && !cfg.renderer_c3d)
 	{
-		const Config& c = back::config();
-		s_active = (c.diff || c.readback_cal || c.renderer_c3d) ? 1 : 0;
-	}
-	if (!s_active)
+		direct_leave(dest);
 		return false;
-	const Config& cfg = back::config();
+	}
 
 	// Design 1.5: bit_depth, view side. Logged once per change.
 	if (bit_depth != 32 || dest->bit_depth != 32 || dest->width > 1024 || dest->height > 1024)
@@ -1190,7 +1229,7 @@ void direct_policy(unsigned blocks)
 		++s_d.policy_blocked[direct_block_index(blocks)];
 	s_d.this_frame = false;
 	back::overlay_drop();   // a hand-out the last present did not consume (the gate skipped it)
-	const Config& cfg = back::config();
+	const Config& cfg = frame_config();
 	// The overlay surface must exist before a frame is decided direct (critic, M6 round 1 minor 5).
 	s_d.overlay_ok = !blocks && cfg.renderer_c3d && cfg.mode == Mode::Direct && back::is_up() && back::overlay_ensure();
 }

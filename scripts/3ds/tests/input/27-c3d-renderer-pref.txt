@@ -1,0 +1,54 @@
+# Stage 10 M8 (docs/3ds/CITRO3D_DESIGN.md, M8): the Renderer preference, a -DA1_RENDER_C3D=ON build without a debug-c3d
+# file. A game, then Preferences > Graphics > Renderer flipped (a tap on its value), ACCEPT, a second game. Run it twice:
+# from Software the second game is GPU and the preferences file says c3d_renderer="1"; the next run starts GPU (it
+# persisted) and the second game is Software again. Taps: bottom-screen coordinates = top-screen ones minus 40 in x.
+wait 1000
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+log --- game 1: walk 3 s ---
+circle 0 150
+wait 3000
+circle 0 0
+wait 500
+screens rp-game1
+log --- START (quit dialog), A (quit to the main menu) ---
+tap START
+wait 1000
+tap A
+wait 4000
+log --- Preferences > Graphics > Renderer (flip) > ACCEPT ---
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+tap DOWN
+wait 300
+tap A                  # GRAPHICS
+wait 2000
+touch 175 131          # the Renderer value
+wait 150
+untouch
+wait 800
+screens rp-graphics-flipped
+touch 136 200          # ACCEPT
+wait 150
+untouch
+wait 2000
+tap B                  # out of Preferences
+wait 2000
+screens rp-menu2
+log --- game 2: walk 5 s ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 5000
+circle 0 0
+wait 500
+screens rp-game2
+log --- HOME > Close ---
+quit
+wait 5000

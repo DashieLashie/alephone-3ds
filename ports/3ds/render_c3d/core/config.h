@@ -137,6 +137,15 @@
 	  sw_every N        0..100000, default 0 = off; test only: every N-th play frame is drawn by SW (counted forced_sw),
 	                    so the sync and the seed after it run
 
+	Key of M8 (design 7, M8; the Renderer preference):
+	  fallback readback|sw
+	                    default readback: in mode direct a frame that may not be direct (any eligibility block: Classic's
+	                    not_native, a fade, a non-default Brightness, the map...) is drawn by citro3d and read back. sw: it
+	                    is drawn by SW instead (one sync when direct frames stop, one seed when they resume). The
+	                    Renderer preference's "GPU (experimental)" means renderer c3d, mode direct, fallback sw, the
+	                    other keys at their defaults; it applies only when there is no debug-c3d file (the file decides
+	                    everything when present)
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -214,6 +223,8 @@ struct Config
 	bool view_v_flip = true;
 	bool g3a = false;                       // test only
 	unsigned sw_every = 0;                  // test only
+	// M8
+	bool fallback_sw = false;               // an ineligible frame in mode direct: SW (true) or readback (false)
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
@@ -221,6 +232,11 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 
 // Applies every line of `text`; one message per rejected line is appended to `problems`.
 void config_parse(Config& cfg, const std::string& text, std::vector<std::string>& problems);
+
+// M8: the Renderer preference over a configuration without a debug-c3d file. gpu: renderer c3d, mode direct, fallback
+// sw (every other key keeps its default). !gpu: renderer sw; mode and fallback stay, so a view target of mode direct is
+// not re-created by a later switch back. Returns whether renderer_c3d changed.
+bool config_apply_preference(Config& cfg, bool gpu);
 
 } // namespace a1_c3d
 

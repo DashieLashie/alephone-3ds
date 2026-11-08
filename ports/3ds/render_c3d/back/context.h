@@ -28,6 +28,10 @@ bool is_up();
 // then draws nothing, CPU or GPU, for the rest of the run.
 bool top_surrendered();
 const Config& config();
+// M8: the Renderer preference (graphics_preferences->c3d_renderer), called by the front end before each frame's first
+// decision. Without a debug-c3d file it switches the configuration (config_apply_preference) and logs the change;
+// with the file it is ignored (logged once): the file decides, so every test and runbook keeps working.
+void config_preference(bool gpu);
 
 // --- the frame, and the GX queue budget (design 2.4) ---
 

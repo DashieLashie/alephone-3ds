@@ -56,6 +56,8 @@ constexpr int kHandoffWaitMs = 2000;
 
 Config s_cfg;
 bool s_cfg_loaded = false;
+bool s_cfg_file = false;    // the debug-c3d file exists: the Renderer preference is ignored (M8)
+bool s_pref_logged = false; // the "ignored" line was printed
 // citro3d and its GX queue are used only by the main thread (citro3d is not thread-safe).
 // s_up and s_release_requested are also read or set from other threads (the hand-off
 // below); everything else here is main-thread state.
@@ -102,6 +104,16 @@ uint64_t s_stats_tick = 0;
 
 constexpr uint64_t kTicksPerSecond = SYSCLOCK_ARM11;
 
+// The null-mode, diff, play and direct summaries on the normal exit path too; idempotent with release_and_fini()'s call.
+void register_final_stats()
+{
+	static bool registered = false;
+	if (registered)
+		return;
+	registered = true;
+	atexit([] { frame_final_stats(); });
+}
+
 void load_config()
 {
 	if (s_cfg_loaded)
@@ -110,6 +122,7 @@ void load_config()
 	std::ifstream in(a1_3ds::user_dir() + "/debug-c3d");
 	if (!in)
 		return;
+	s_cfg_file = true;
 	std::stringstream text;
 	text << in.rdbuf();
 	std::vector<std::string> problems;
@@ -120,7 +133,7 @@ void load_config()
 	       "two_frame %d, zero_copy %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
 	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
 	       "ring_indices %u, reserve_extra %u, textures %d, uv_half %d, diff_tol %u, vram_cap %u, "
-	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, overlays %u, direct_check %u, overlay_audit %u, seed_check %d, band_from_end %d, view_v_flip %d, g3a %d, sw_every %u, film \"%s\"\n",
+	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, overlays %u, direct_check %u, overlay_audit %u, seed_check %d, band_from_end %d, view_v_flip %d, g3a %d, sw_every %u, fallback %s, film \"%s\"\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
 	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.zero_copy, s_cfg.renderer_c3d ? "c3d" : "sw",
@@ -129,11 +142,11 @@ void load_config()
 	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
 	       s_cfg.ring_vertices, s_cfg.ring_indices, s_cfg.reserve_extra, s_cfg.textures, s_cfg.uv_half,
 	       s_cfg.diff_tol, s_cfg.vram_cap, s_cfg.linear_cap, s_cfg.promote_max, s_cfg.lit, s_cfg.alpha_x2, s_cfg.play,
-	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.overlays, s_cfg.direct_check, s_cfg.overlay_audit, s_cfg.seed_check, s_cfg.band_from_end, s_cfg.view_v_flip, s_cfg.g3a, s_cfg.sw_every, s_cfg.film.c_str());
+	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.overlays, s_cfg.direct_check, s_cfg.overlay_audit, s_cfg.seed_check, s_cfg.band_from_end, s_cfg.view_v_flip, s_cfg.g3a, s_cfg.sw_every, s_cfg.fallback_sw ? "sw" : "readback", s_cfg.film.c_str());
 	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
 	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
 	// own atexit handlers, so it runs before close_outputs flushes the log.
-	atexit([] { frame_final_stats(); });
+	register_final_stats();
 	if (s_cfg.present_diff && s_cfg.calibrate)
 		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
 	for (const std::string& p : problems)
@@ -361,6 +374,29 @@ const Config& config()
 {
 	load_config();
 	return s_cfg;
+}
+
+// Main thread only (hook 3a, render_frame). s_cfg changes at run time only here, and only without a debug-c3d file, so the
+// test keys read from other threads (test_vhalt, the error-screen hand-off) never see a change.
+void config_preference(bool gpu)
+{
+	load_config();
+	if (s_cfg_file)
+	{
+		if (gpu && !s_pref_logged)
+		{
+			s_pref_logged = true;
+			printf("[c3d] preference: Renderer GPU ignored (debug-c3d decides)\n");
+		}
+		return;
+	}
+	if (config_apply_preference(s_cfg, gpu))
+	{
+		if (gpu)
+			register_final_stats();
+		printf("[c3d] preference: Renderer %s\n", gpu ? "GPU (renderer c3d, mode direct, fallback sw)" : "Software");
+		fflush(stdout);
+	}
 }
 
 bool ensure_up()

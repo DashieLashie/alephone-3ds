@@ -1912,3 +1912,28 @@ leave room for M7's 4× fill — record it, it does not decide.
 **End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d`, the `screen-c3d-cal-*.bmp`. **Record** in
 `PERF.md` ("Stage 10 M6 — console, short check") the step results and BENCH tables; then the design's M6 status, section 10
 (new item: M6's orientations and `c3d_wait`) and the Review log.
+
+## M8 console check (the Renderer preference; ~15 min, 4 launches; when the user is at the console)
+
+**Not run yet.** Written 2026-11-08 for `port-stage10-M8` (`PERF.md` "Stage 10 M8", design section 7 "M8"). Azahar passed
+everything; the console answers what it cannot: a first switch-on **without any `debug-c3d` file** (the path players take),
+the cost of `fallback sw`'s one sync + one seed per fade, and the Software figure at a non-default Brightness (Azahar: 21.9 fps
+@60, `blit` 27.4 ms). Setup, driving and the `$H/m1/run.sh` helper as in "M1 console check, short version", with
+`cmake --build build-3ds-c3d-prof` at `port-stage10-M8`. **ftpd first: make sure `/3ds/alephone/debug-c3d` is absent**
+(else the file decides and the preference is ignored: `[c3d] preference: Renderer GPU ignored`). Framerate Target 60.
+
+1. **Switch on in the dialog** (~4 min). `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf`; launch, and **before**
+   BEGIN NEW GAME: Preferences > Graphics > Renderer = GPU (experimental), ACCEPT, back, then A. **Pass:** the log has
+   `[c3d] preference: Renderer GPU (renderer c3d, mode direct, fallback sw)`, the BENCH line ~60 fps, `direct final` with
+   `direct=` ≥ 95 % of `frames=`; the picture looks like Software's. Fetch the `Marathon 2 Preferences` file: `c3d_renderer="1"`.
+2. **Persisted** (~3 min). Relaunch as is (no dialog). **Pass:** the preference line again and the same BENCH (it persisted).
+3. **Brightness** (~3 min). Graphics > Brightness = Normal (one step up), relaunch. **Record** BENCH `fps`, `blit` and
+   `direct final`'s `blocked=gamma:` (Azahar: every frame blocked, 21.9 fps, `blit` 27.4 ms). Then Renderer = Software, same
+   level, relaunch: the Software figure (expected equal). Put Brightness back to Dark.
+4. **Fades in play, `quiet 1` not needed** (~5 min). `debug-perf` removed; Renderer = GPU; play L0 for a minute, take
+   damage and pick up items (flashes), open the map, HOME and back, then HOME > Close. **Pass:** no stale or frozen picture
+   after a flash or the map, the launcher comes back. **Record** `direct final`'s `fallback_sw=`, `syncs=`, `seeds=` (one sync
+   and one seed per flash or map visit).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`; leave the preference as the user wants it. **Record** in `PERF.md` ("Stage 10
+M8 — console") and the design's M8 status and Review log.

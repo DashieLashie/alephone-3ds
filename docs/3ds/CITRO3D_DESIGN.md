@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M8, M6b, M9, M7 | Preference, fades in direct mode, stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
+| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode, stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -3911,12 +3911,21 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept: output vs CPU 2x2 box of the same 800x480 render read back
   ≤ 1/channel.
 
-### M8 — Renderer preference (to be built; user 2026-11-07)
+### M8 — Renderer preference (done 2026-11-08, tag `port-stage10-M8`, Azahar only; `PERF.md` "Stage 10 M8")
 - Touch `preferences.cpp/.h` ("Renderer: Software / GPU (experimental)",
   default Software, `<graphics c3d_renderer="0|1">`), `PATCHES.md` 48.
 - Accept: switches at the next frame; persisted.
+- **As built:** Graphics > Heads-Up Display > Renderer, under Bottom Screen. "GPU (experimental)" = `renderer c3d`, `mode
+  direct`, **`fallback sw`** (new key: an ineligible frame is drawn by SW, not read back), the other keys at their defaults;
+  `overlays` is not in it (user decisions 2026-11-08, Review log "M8: the bundle"). Applied only without a `debug-c3d` file
+  (`back::config_preference`, `core/config.cpp` `config_apply_preference`, host-tested); read before each frame's first decision
+  (hook 3a, `render_frame`); a switch off after direct frames syncs dest from the texture once (`direct_leave`, `switch_off=`).
+  Classic and a non-default Brightness are then plain Software (every frame `fallback_sw`). Passed in Azahar; the console
+  check is `NEXT-SPRINT.md` "M8 console check".
 
 ### M9 — stereo 3D (to be built after M8, before M7; open question 9 answered yes 2026-10-19, user 2026-11-07)
+- **VRAM after M8:** a player who turns the preference off mid-run keeps the 512 KiB view texture and the overlay surface
+  allocated (M8 frees nothing on the switch; critic, M8 code review minor 2). The budget below assumes them allocated anyway.
 - **VRAM (checked 2026-11-08 against 9.1's direct column, 5 815 of 6 144 KiB):** a second linked screen target (375 KiB) and a
   second view target (512 KiB) add 887 KiB against 329 free, so M9's spec must lower the texture cache cap (3 584 KiB) by
   about 560 KiB or more. Assumes each eye has its own full view target, as section 6 says; the spec decides.
@@ -5127,3 +5136,32 @@ The user accepted the proposed placement: **M6 → M8 → M6b → M9 → M7.** T
 decided later (with M6b's spec), and, as for every stage 10 milestone, M6b is **built whatever the gate shows, within
 reason** (measured and reported, not deciding; "within reason" = not at any cost: a milestone that proves impossible on the
 hardware or breaks an earlier gate is reported to the user, who decides).
+
+### M8: the bundle (coordinator, 2026-11-08; user decisions)
+
+Reading `frame.cpp` before building showed two conflicts with the bundle as written in `KICKOFF_M8.md`, both put to the user:
+(1) in mode direct a frame that may not be direct (Classic's `not_native` on every frame, a fade, a non-default Brightness) is
+**read back**, which costs more than Software (+6.2 / +7.8 / +7.3 ms busy on the console, G2-b): Classic with "GPU" would be slower
+than with "Software". **User decision: Software for those frames** (new key `fallback readback|sw`, default `readback` so every
+`debug-c3d` config is unchanged; the preference sets `sw`). (2) `overlays 1` is a test key that forces the FPS counter,
+position, crosshair and a message every 2 s on the player; direct mode's overlay surface does not need it. **User decision: left
+out.** The earlier entry "M7 moved to the end" lists `overlays` in the bundle: superseded by this one.
+
+### M8 code review (critic: REVISE on evidence only, 0 code defects, 4 minor; folded)
+
+The major was that the Software no-regression bench and the Brightness check were not yet in the summary given to the critic
+(they were running): both done (`PERF.md` "Stage 10 M8"). Minors folded: comments for the off-on-off-without-a-world-frame case
+(`direct_leave`) and for `s_cfg` changing on the main thread only (`config_preference`); `PATCHES.md` 48 notes that an OFF build
+rewriting the preferences drops `c3d_renderer`; M9's VRAM note that the view texture and overlay surface stay allocated after a
+switch off. For the console: the cost of one sync plus one seed per fade under `fallback sw`, and a first switch-on there.
+
+### M8 acceptance and the Brightness finding (coordinator, 2026-11-08)
+
+Passed in Azahar: switches at the next frame (922 of 922 direct), persists (`c3d_renderer` in the file, GPU from frame 1 on the
+next launch), Software unchanged (`render` / `blit` / `present` identical to M6's SW row), Classic @60 GPU 52.89 = SW 52.90 fps.
+**Brightness (kickoff item 5): every non-default level blocks every frame** (`blocked=gamma:` = frames, `direct=0`, levels 0, 1,
+3-7), so for those players "GPU" is Software. **Found with it: Software itself drops to 21.9 fps @60 on L0 at any non-default
+Brightness** (`blit` 27.4 ms: the engine's per-pixel `apply_gamma`, also run on every fade or flash frame), against 59.6 at the
+default. Pre-existing and independent of the renderer; told to the user as a decision: M6b tier 2 (Brightness on the GPU) and/or
+a Software fast path for `apply_gamma` (rule 1: measure).
+
