@@ -1332,8 +1332,11 @@ static void graphics_dialog(void *arg)
 	w_select_popup *gamma_w = new w_select_popup();
 	gamma_w->set_labels(build_stringvector_from_cstring_array(gamma_labels));
 	gamma_w->set_selection(graphics_preferences->screen_mode.gamma_level);
+#ifndef A1_PLATFORM_3DS
+	// 3DS: no Brightness; the console's backlight does that (validate_graphics_preferences)
 	table->dual_add(gamma_w->label("Brightness"), d);
 	table->dual_add(gamma_w, d);
+#endif
 
 	w_select *fps_target_w = new w_select(0, fps_target_labels);
 	for (auto i = 0; fps_target_labels[i] != NULL; ++i)
@@ -4517,6 +4520,9 @@ static bool validate_graphics_preferences(graphics_preferences_data *preferences
 	clamp(preferences->screen_mode.high_dpi, false);
 	clamp(preferences->screen_mode.acceleration, static_cast<short>(_no_acceleration));
 	clamp(preferences->software_sdl_driver, static_cast<int16>(_sw_driver_none));
+	// No Brightness either (the dialog hides it): any other level runs a per-pixel gamma pass over
+	// the view every frame (docs/3ds/PATCHES.md 56); the console's backlight replaces it.
+	clamp(preferences->screen_mode.gamma_level, static_cast<short>(DEFAULT_GAMMA_LEVEL));
 	if (preferences->screen_mode.bit_depth != 8 && preferences->screen_mode.bit_depth != 16)
 		clamp(preferences->screen_mode.bit_depth, static_cast<short>(32));
 	// 0 HUD + Map, 2 Classic; 1 was a Map-only mode (stage 7's first version).

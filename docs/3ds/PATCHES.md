@@ -68,6 +68,7 @@ in the sprint after it (`NEXT-SPRINT.md`).
 | 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
 | 43 | `Source_Files/Sound/SoundFile.cpp` | a sound header, and a sound's samples, read with one read each and parsed from memory | none |
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
+| 56 | `Source_Files/Misc/preferences.cpp` | Brightness removed: no dialog entry, the level pinned to the default | **Brightness** (the console's backlight replaces it) |
 
 The complete list of stubs and lost functionality, including items not tied
 to a source patch (libsndfile codecs, Lua/newlib behaviour), is the table in
@@ -954,3 +955,28 @@ item 14 in `NEXT-SPRINT.md`).
 "Source_Files/CSeries/csalerts_sdl.cpp"`, both volumes): DIFFER (2 lines), **0 lines with
 numbers normalised** (only `__LINE__` moved); `-fsyntax-only` exit 0, 0 diagnostics
 (167 934 and 89 269 preprocessed lines).
+
+## Brightness removed (56)
+
+Added 2026-11-08 on branch `3ds-port` (user decision, after stage 10 M8's Brightness check on `stage10-c3d`) and carried to
+`stage10-c3d`. 3DS games have no in-game brightness: the console's backlight does it.
+
+56. **`Misc/preferences.cpp`: the Graphics dialog has no Brightness, and `screen_mode.gamma_level` is always
+    `DEFAULT_GAMMA_LEVEL` (2, "Dark", the neutral 1.0 curve).** The `dual_add` of the Brightness `w_select_popup` is fenced
+    `#ifndef A1_PLATFORM_3DS` like Screen Size (the widget is still built, so the dialog's apply reads back the pinned value);
+    `validate_graphics_preferences`' 3DS block clamps `gamma_level` to the default, so a saved other level is reset at the
+    next launch and the file rewritten. **Why:** at any other level `gamma_correct_color_table` makes `world_color_table`
+    differ from the uncorrected table, `using_default_gamma` is false on every frame, and `update_screen` runs `apply_gamma`
+    (`RenderOther/screen.cpp`), a generic per-pixel loop over the whole view: in Azahar 27.4 ms a frame, **21.9 fps @60
+    against 59.6** on L0 in HUD + Map (Software; with stage 10's GPU renderer every such frame is also barred from direct
+    mode). Fades and flashes still use `apply_gamma` while they last. Upstream's F11/F12 gamma keys (`shell.cpp`) stay as
+    they are: no 3DS input produces a keyboard event.
+
+**Non-3DS check** (2026-11-08, `ppcheck.sh "Source_Files/Misc/preferences.cpp" "Source_Files/Misc/preferences.cpp"`, both
+volumes): **DIFFER: 20 lines, 0 with numbers normalised** (only `__LINE__` shifts; 235 000 and 164 364 preprocessed lines,
+stderr 0); `-fsyntax-only` exit 0, 0 diagnostics.
+
+**Azahar — non-authoritative** (2026-11-08, `build-3ds`, 0 warnings in `build-3ds` and `build-3ds-prof`): with
+`scmode_gamma="0"` on the card the game boots, the file reads `scmode_gamma="2"` afterwards, and the Graphics dialog opens
+on Framerate Target with no Brightness row.
+
