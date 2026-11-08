@@ -3899,7 +3899,7 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
-- **M6b specification (DRAFT, revision 0 of 2026-11-08, before code; not yet reviewed by the critic).** Where the lines above
+- **M6b specification (revision 1 of 2026-11-08, before code; critic round 1 applied: Review log "M6b pre-implementation, round 1").** Where the lines above
   and this block disagree, this block rules. Citations are the code at `c6dd77d30`. **No engine edit.** One session.
   - *What a fade is in a 32-bit build (checked).* `build_direct_color_table` (`screen.cpp`:2219-2232) makes the 256-entry
     colour table a **grey ramp**: entry *i* is `(i << 8, i << 8, i << 8)` (`default_gamma_*` = `i << 8`, :2205-2216; Brightness
@@ -3923,13 +3923,25 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     `kDirectGamma`, the front end reads the three global curves (`extern uint16 current_gamma_r[256]` etc., like the M6
     `displaying_fps` externs; no engine edit) and fits each channel to `out = B + A·in` (core function below). If all
     three fit within `fade_tol` and the mask has no other bit, the bit is cleared, the frame stays direct and the fit is
-    handed to the composite. Otherwise nothing changes (readback, or SW under `fallback sw`, as today). The composite
+    handed to the composite. Otherwise nothing changes (readback, or SW under `fallback sw`, as today). **Order in
+    `direct_policy`** (critic round 1, minor 3): the frame's fade state is reset first (no fit, no curves); then, only with
+    `fades 1`, renderer c3d, `Mode::Direct` and `kDirectGamma` the **only** bit, the fit runs; on success the cleared mask is
+    what is stored in `s_d.policy`, counted in `policy_blocked` and used for `overlay_ok` (`frame.cpp`:1221-1236; :816 reads
+    `s_d.policy`), so a fitted frame is neither counted `blocked=gamma` nor refused the overlay surface. **Lifetime**
+    (minor 4): the fit and a copy of the three curves it came from belong to this frame only: reset at every `direct_policy`,
+    consumed by this frame's composite, so a frame the gate skipped (`overlay_drop`) cannot hand stale constants to a later
+    one; `direct_check` builds its reference from that copy, not from the live globals. The composite
     (`present_composite`, `back/present.cpp`:526-602) draws, **after the overlay bands**, one 400x240 quad with TEV stage 0
     = REPLACE of `GPU_CONSTANT` (`C3D_TexEnvColor`, the `tev_constant` byte order settled in M1, `view.cpp`:116-125) holding
     **B**, and the blend `C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_CONSTANT_COLOR, GPU_ZERO, GPU_ONE)` with
     `C3D_BlendingColor` holding **A** per channel (`effect.h`:8, :12; `enums.h`:237-261: `GPU_CONSTANT_COLOR` = 10):
-    `dst' = B + A·dst`, dst alpha kept. Then the restore the composite already does (blend ONE/ZERO; the blend colour back to
-    0 as `draw.cpp`:447). **Why after the overlays:** in SW the crosshair and the text are drawn into `world_pixels` before
+    `dst' = B + A·dst`, dst alpha kept. **Vertices and state** (minor 5): the fade quad redraws vertices 0-3 of `s_cvbo` (the
+    view quad: the texcoords are ignored by a REPLACE of the constant), so nothing new is allocated (`kCompositeQuads`,
+    `present.cpp`:121, :701); TEV stage 0 is built in full from `C3D_TexEnvInit` as `set_present_draw` does (:357), stages
+    1-5 stay the passthrough it already assumes; one more draw is within the composite's reserves (to be shown by the
+    `cmdbuf` line). Then the restore the composite already does (blend ONE/ZERO), the blend colour back to 0, and stage 0
+    rebuilt by the next `set_present_draw`; the world draws' cached blend (`s_f.blend`, `draw.cpp`:445-448) is not touched
+    by the composite and stays valid. **Why after the overlays:** in SW the crosshair and the text are drawn into `world_pixels` before
     `update_screen` applies the curves (`screen.cpp`:1827-1915), so a flash tints them too; the composite's target holds the
     composited view and overlay as plain RGB (`Swizzle::Plain`, `present.cpp`:360-367), which the blend reads. A soft_tint
     has B = 0; the level-start black has A = B = 0.
@@ -3938,25 +3950,41 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     the end-point estimate (`B ≈ f(0)`, `A ≈ (f(255) − f(0)) / 255`, ±2 each); the GPU model `g(i) = min(255, B8 +
     (i·A8 + 127) / 255)` (round to nearest: the model `direct_check` matched with Δ 0 for the overlay blend, M6; **UNVERIFIED**
     that PICA rounds a `CONSTANT_COLOR` factor the same way); the candidate with the smallest `max |g(i) − f(i)|` wins; a
-    channel fits when that error ≤ `tol`. A negative slope or an A above 1 never fits (no blend form for them here). The result
-    keeps the per-channel errors for the counters. The three curves are fitted only when they changed since the last call
+    channel fits when that error ≤ `tol`. A negative slope or an A above 1 never fits (no blend form for them here); the input
+    is the curves as stored (`uint16`, so randomize's wrap-around is just a curve that does not fit). The result keeps the
+    per-channel errors for the counters. Host-checked by the critic's replica: worst fit error 1 for every tint colour, every
+    liquid soft_tint and liquid + flash, 2 for a soft_tint fade type over a liquid (the ±2 window suffices). The three curves are fitted only when they changed since the last call
     (a 1.5 KiB compare), so a 2 s fade costs one fit per fade step.
   - *Keys.* `fades 0|1` (default 1; 0 = M6's behaviour, every fade frame non-direct: the A/B switch); `fade_tol N` (0..32,
     default 2: the fit's tolerance in 8-bit steps). **Both stay as `debug-c3d` keys; the Renderer preference's bundle gets
     `fades 1` by default** (no change to `config_apply_preference`).
   - *Counters* (`[c3d] direct` lines): `fade_direct=` (direct frames with a fade quad), `fade_nofit=` (frames whose curves did
-    not fit; they stay `blocked=gamma`), `fade_err=` (the worst fitted error seen); `[c3d] composite`: `fade_quads=`.
+    not fit; they stay `blocked=gamma`), `fade_err=` (the worst error among **accepted** fits; the rejected ones are counted
+    in `fade_nofit`), `fade_changes=` (distinct curve sets fitted); `[c3d] composite`: `fade_quads=`. A line
+    `[c3d] fade: curves changed, fit ok|no A=r,g,b B=r,g,b err=e` on each change of the curves (at most 200 lines, then
+    counted), so a test log shows which fades actually ran (critic, major 2).
   - *Tests.* (1) Host: replicas of `tint`, `soft_tint` (and of negate, dodge, burn, randomize) applied to the grey ramp at
     *t* = 0 .. 1 in 1/64 steps, for every colour of `fade_definitions` (`fades.cpp`:162-198) and every liquid effect
     (:201-208) alone and composed with each tint flash: tint and soft_tint **fit within 1**, compositions within 2, the four
     others **do not fit** except at the identity ends; the GPU model clamps; the cache returns the same fit. (2) Azahar, plugin
     **"Fade Test"** (solo Lua, new, `scripts/3ds/tests/plugins/`): from 3 s in, `Players[0]:fade_screen(type)`
-    (`lua_player.cpp`:1610, :2117) for every fade type in order, one per 1.5 s, logged; with `direct_check 5`, whose CPU
-    reference gains the frame's curves (the read-back view and overlay composited as in M6, then `current_gamma_c[x] >> 8`,
-    i.e. exactly SW's `apply_gamma`), so the check compares the GPU picture with **SW's**, not with the fit. (3) Plugin
+    (`lua_player.cpp`:1604-1613, :2117) for every fade type in order, one per 1.5 s, logged — except that a fade of higher
+    priority still running drops a new one silently (`explicit_start_fade`, `fades.cpp`:372; `fade_screen` returns nothing):
+    `_fade_long_bright` (priority 1, 4 s, :170) goes **last**, and every type waits until the previous one has ended
+    (critic, major 2). The acceptance requires one `[c3d] fade: curves changed` line with a fit result per type started.
+    With `direct_check 5`, whose CPU reference gains the frame's curves (the read-back view and overlay composited as in
+    M6, then `curve_c[x] >> 8` from the frame's copy, i.e. exactly SW's `apply_gamma`), so the check compares the GPU picture
+    with **SW's**, not with the fit. **`direct_check` on a fade frame** (critic, major 1: today it counts only Δ > 1 and
+    Δ > 32, `present.cpp`:507-512, and `check_bad` is `within_1 < 99.9 || over_32 > 0`): the line gains `within_2=`, the
+    frame's max Δ and `fade=1`; on a fade frame `check_bad` is **`within_2 < 99.9 || max > 4`** (the accepted gate); frames
+    without a fade keep M6's criterion unchanged. (3) Plugin
     **"Liquid Test"** (solo Lua, new): 3 s in, the player is moved under the surface of the first polygon with water media
-    (`Polygons()`, `.media`, `Players[0]:position`), then 10 s later into lava if the level has any; a damage flash
-    (`fade_screen("red")`) every 2 s on top. Run on L0 (Waterloo Waterpark has water). (4) The red flash settles the
+    (`Polygons()`, `.media`, `Players[0]:position`); a damage flash (`fade_screen("red")`) every 2 s on top. The plugin logs
+    the polygon index and media type it found and **fails loudly** (a `[lua]` error line, the run counted failed) if there is
+    none; fallback that needs no particular level: give the player's own polygon a water media and raise its height
+    (`Polygons[i].media`, `media.height`, `lua_map.cpp`:1778, :3072). Lava, sewage, goo and Jjaro are covered by the Fade
+    Test's `_fade_tint_*` types (the same soft_tint curves at every transparency); the liquid *effect* is tested with water
+    only (critic, minor 7). (4) The red flash settles the
     **blend colour's byte order** (**UNVERIFIED**: `C3D_BlendingColor` has no doc and M4 only used greys, `draw.cpp`:284-286):
     a swap shows as a blue flash and fails `direct_check` at once. (5) Regression: M6's `direct_check` runs on L0/L6/L20 (no
     fades: identical), `fades 0` reproduces M6's `blocked=gamma` counts on the L01 film.
@@ -3973,8 +4001,13 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     **randomize**: random per intensity level, not expressible without a dependent lookup (PICA has none): **not direct.**
   - *Not in M6b:* readback mode (it keeps SW's `apply_gamma` on the CPU, exact); Classic (never direct); the SW `apply_gamma`
     fast path (backlog). *For M9:* the fade quad is drawn once per eye with the same constants.
-  - *Needs console verification:* PICA's rounding of a `CONSTANT_COLOR` factor (the fit's model); the blend colour's byte
-    order on hardware (Azahar settles it for Azahar); the fade quad's GPU time (`gpu_ms`).
+  - *Needs console verification:* PICA's rounding of a `CONSTANT_COLOR` factor (the fit's model), **including A = 255 as the
+    exact identity** (water's blue channel has slope 1 − ¾ + ¾·1 = 1: if PICA computes `d·255 >> 8`, every underwater frame is
+    off by one in blue, inside the gate but systematic; under Azahar the Liquid Test's `direct_check` must show Δ 0 in blue)
+    (critic, minor 6); the blend colour's byte order on hardware (Azahar settles it for Azahar); the fade quad's GPU time
+    (`gpu_ms`).
+  - *Housekeeping:* `a1_c3d.h`:47's comment on `kDirectGamma` ("brightness") is updated: since `PATCHES.md` 56 the bit means
+    fades, flashes and tints only (critic, minor 8).
 
 ### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
 - **Open for its spec (2026-11-08):** M9 will have shipped first, so M7 inherits M9's VRAM budget (section 6 needs a second
@@ -5270,4 +5303,16 @@ in. Next: the critic's pre-implementation review, then the build.
 
 The proposed gate is accepted (≥ 99.9 % of pixels within Δ 2 per channel against SW, max Δ ≤ 4); pause darkening is out of
 M6b; the critic reviews the specification before any code (effort medium).
+
+### M6b pre-implementation, round 1 (critic: REVISE, 2 major, 6 minor; applied)
+
+The critic confirmed the core (`apply_gamma` is per channel at `screen.cpp`:2096-2098; fades advance only in `update_world`,
+never between hook 3a and the present; no other consumer of `using_default_gamma` on a direct frame; fallback frames
+unchanged; a host replica of `fades.cpp` fits within 1, 2 for a soft_tint fade over a liquid). Majors: (1) `direct_check`
+could not evaluate the accepted gate (it counts Δ > 1 and Δ > 32 only): it gains `within_2`, a max Δ and the fade-frame
+criterion; (2) the Fade Test would silently skip fades dropped by a higher-priority one (`_fade_long_bright`): ordered last,
+sequential, and a per-change `[c3d] fade:` log line proves each type ran. Minors applied: the order inside `direct_policy`;
+the fit's one-frame lifetime and the reference built from its copy of the curves; vertices and state of the fade quad;
+A = 255 as the identity on the console list; the Liquid Test's failure mode and fallback; the counters' wording and the
+`kDirectGamma` comment. Revision 1 goes to the critic for round 2.
 
