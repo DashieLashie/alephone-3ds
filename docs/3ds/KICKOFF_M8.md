@@ -73,5 +73,5 @@ cannot override).
   status line and a Review log entry, `CLAUDE.md` one sentence. Refresh the backup bundle (recipe `STAGE5-PREREQS.md` section 8;
   `git fetch --depth 1` needs the **full** `fc4c274359088614b58c91af5daa541504cb50cf` hash) and update the project memory's
   stage 10 entry. **Do not push.**
-- Then stop and report. Next is **M9** (stereo): its spec must redo the VRAM budget first (design section 6 and Review log
+- Then stop and report. Next is **M6b** (fades, flashes and tints in direct mode; design section 7), then **M9** (stereo): its spec must redo the VRAM budget first (design section 6 and Review log
   "M7 moved to the end": a second screen target and view target add about 887 KiB against 329 KiB free).

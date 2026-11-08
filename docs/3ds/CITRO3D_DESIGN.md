@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M8, M9, M7 | Preference, stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
+| M8, M6b, M9, M7 | Preference, fades in direct mode, stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -128,7 +128,7 @@ Order: the fixes, then the zero-copy present, then M0-M6, M7, M9 (open questions
 
 **User decisions (2026-11-07, during M5, before G2-a is measured):** **continue until stereoscopic 3D (M9)**
 whatever G2-a's result: M5 → M6 (direct mode, which M9 needs: section 6) → M9. **Amended the same day: M7 and M8 are
-not optional either** ("I want to try all possibilities"): the order is section 7's, **M5 → M6 → M7 → M8 → M9**. **Re-ordered 2026-11-08 (user): M7 goes last, M6 → M8 → M9 → M7** (Review log "M7 moved to the end"). Every gate
+not optional either** ("I want to try all possibilities"): the order is section 7's, **M5 → M6 → M7 → M8 → M9**. **Re-ordered 2026-11-08 (user): M7 goes last, and M6b (fades in direct mode) goes between M8 and M9: M6 → M8 → M6b → M9 → M7** (Review log "M7 moved to the end", "M6b: order decided"). Every gate
 (G2-a, G2-b, G3-a, G3-b) is still measured and recorded, but none decides whether the next milestone is built. Also: play checks leave SW's static coverage out (Review log "M5, play check and
 static, user decision").
 
@@ -3871,7 +3871,7 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   met; SW also 60.5 on the console)**, busy −0.66 / −0.37 / −0.80 ms against SW, readback 53.8-54.7 fps; `c3d_wait`
   0.70-0.78 ms; G3-b `gpu_ms view` 1.3-1.5 ms (recorded, not deciding).
 
-### M6b — fades, flashes and tints in direct mode (planned; user decision 2026-11-08; placement in the order not decided)
+### M6b — fades, flashes and tints in direct mode (planned; user decision 2026-11-08; order: after M8, before M9; built whatever the gate shows, within reason)
 Today a frame with any fade, flash, tint or non-default brightness is **not direct** (`kDirectGamma`, `kDirectDarken` in
 `a1_c3d.h`): the software path applies them with the CPU to the finished view (`apply_gamma` over `world_pixels`,
 `darken_world_window()`), and a direct view never exists in CPU memory. The user's aim: **make the common ones eligible at
@@ -3893,8 +3893,9 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   (`PATCHES.md` 56+, `ppcheck.sh`); to be confirmed in the spec.
 - **Why it matters beyond looks:** every non-direct frame is a readback frame (about 4 ms more busy than software) and, with
   M9, a frame without depth that restarts the ramp-up (section 6). Fewer non-direct frames = fewer of both.
-- **Order:** not decided. Proposal (mine): after M8 and **before M9**, because it shrinks how often stereo drops out and it
-  needs no stereo; the user decides.
+- **Order (user, 2026-11-08, accepting the proposal): after M8 and before M9**, because it shrinks how often stereo drops out and
+  it needs no stereo. **Built whatever the gate shows, "within reason"** (the user's standing rule for stage 10); the gate's
+  tolerance vs SW is decided later, when the spec is written.
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
@@ -5119,3 +5120,10 @@ hardware limit. **User decision: aim to make the common effects eligible (underw
 bonus.** Recorded as the planned piece "M6b" (section 7), tiers and the OpenGL faders as the reference semantics; the
 placement in the order is open (proposal: after M8, before M9). Also decided: M8 tests whether a non-default Brightness
 blocks every direct frame (`KICKOFF_M8.md` item 5), because M8 exposes GPU mode to every player.
+
+### M6b: order decided (coordinator, 2026-11-08; user decision)
+
+The user accepted the proposed placement: **M6 → M8 → M6b → M9 → M7.** The gate's tolerance against the software table is
+decided later (with M6b's spec), and, as for every stage 10 milestone, M6b is **built whatever the gate shows, within
+reason** (measured and reported, not deciding; "within reason" = not at any cost: a milestone that proves impossible on the
+hardware or breaks an earlier gate is reported to the user, who decides).
