@@ -1783,9 +1783,21 @@ visibility); each eye redraws the same ring with `stereo` shifting
 `clip.x += k·(w − w0)`; landscapes at max shift; overlays at zero parallax.
 Right-eye framebuffers already exist (0.2). GX budget: +1 linked target.
 
-**Risk:** side-eye gaps at portal edges (**approximated**); 2x GPU fill.
+**Non-stereo frames and the ramp-up (user decision 2026-11-08; M9's spec details it).** Only direct frames (5.4) have two
+eye views. Every other frame (map, terminal, pause darkening, fades, gamma and damage/underwater flashes, a software
+frame, Classic) writes **one image to both eyes, parallax 0**, so the right-eye buffer is never stale. The depth effect
+**eases back in with a ramp** when direct frames resume: the parallax scale goes from 0 to the slider's value over a few
+frames instead of jumping, so a hit flash, the map or a pause does not make the depth pop. Going flat has no ramp (a
+fallback frame has no second view to ramp with: my reasoning, to be confirmed in the spec); only the return is eased. The ramp
+length is a console tuning value (spec: a config key, `stereo_ramp N` frames, default to be set from the console, a first
+guess of a quarter to half a second); it restarts from 0 whenever a non-stereo frame intervenes, and a slider change while
+direct frames run is applied through the same ramp.
+
+**Risk:** side-eye gaps at portal edges (**approximated**); 2x GPU fill; depth popping on non-stereo frames (the ramp).
 **How we test without hardware:** Azahar 3D render mode (`render_3d`,
-`qt-config.ini`:290); slider 0 ⇒ eyes pixel-identical.
+`qt-config.ini`:290); slider 0 ⇒ eyes pixel-identical; non-stereo frames ⇒ eyes pixel-identical; after a non-stereo frame the
+parallax scale rises monotonically to the slider's value in exactly `stereo_ramp` frames (a logged per-frame scale, host-testable
+in `core/`: the ramp is pure state). Comfort and ghosting stay a console item (section 10 item 13).
 
 ## 7. Milestones
 
@@ -3879,6 +3891,10 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
 - **VRAM (checked 2026-11-08 against 9.1's direct column, 5 815 of 6 144 KiB):** a second linked screen target (375 KiB) and a
   second view target (512 KiB) add 887 KiB against 329 free, so M9's spec must lower the texture cache cap (3 584 KiB) by
   about 560 KiB or more. Assumes each eye has its own full view target, as section 6 says; the spec decides.
+- **Non-stereo frames and the ramp-up (user decision 2026-11-08):** one image to both eyes on every non-direct frame; the
+  parallax eases from 0 to the slider's value over `stereo_ramp` frames when direct frames resume (section 6). The spec
+  defines the state machine in `core/` (host-tested), the config key and its default, the slider-change rule and the
+  tests above; the length is tuned on the console.
 - Accept: section 6 tests.
 
 ## 8. Verification without hardware
@@ -5056,3 +5072,13 @@ target and second view target), so M9 shrinks the texture cache cap, and M7's 10
 not fit) means SSAA is probably off while 3D is on: a decision for M7's spec, noted in M7's and M9's headings. Side benefit: M9's
 2x fill gives the first console measurement of the GPU's fill headroom before M7's 4x (G3-b today: view 1.3-1.5 ms). M8's open
 question, which `debug-c3d` settings the shipping "GPU (experimental)" means, was answered the same day (user, option a): the whole bundle `renderer c3d`, `mode direct`, `play`, `textures`, `lit`, `overlays`; the `debug-c3d` file still overrides it (`KICKOFF_M8.md`).
+
+### M9: non-stereo frames and the ramp-up (coordinator, 2026-11-08; user decision)
+
+Asked whether the frames that fall back from direct mode (readback, software) would disable 3D. Answer recorded: only for that
+frame. In the console runs 100 % of bench frames were direct; in a hand-played session 63 of 1 799 frames were pause-darken
+readback and 210 more were map frames that never reach `render_frame`; damage and underwater flashes are readback too (5.4).
+The design had not said what the 3D screen shows then. **User decision: ease the 3D back in with a ramp** (section 6, M9 block).
+Written into M9's spec now, not after, so the spec answers it first: one image to both eyes on non-stereo frames, the parallax
+ramps from 0 to the slider on the return, a host-testable state machine, `stereo_ramp N` tuned on the console. Not decided:
+the ramp length, and whether a ramp is wanted for a slider change (proposed: yes, same path).
