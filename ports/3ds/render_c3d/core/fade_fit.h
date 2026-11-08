@@ -36,6 +36,10 @@ constexpr unsigned kFadeOverflowTrust = 126;
 
 // fade_parts bits (debug-c3d, test only): which parts may classify a frame's curves.
 enum FadePart : unsigned { kFadeAffine = 1, kFadeFold = 2, kFadeStatic = 4, kFadeAllParts = 7 };
+// Internal (FadeCache): part 2 runs only its quick phase (no slope search). Set after a fit that found nothing, until
+// the curves return to the identity: a run of unclassifiable curves costs no full search per frame (critic, M6b code
+// review minor 3: up to ~51 ms each in Azahar).
+constexpr unsigned kFadeQuickOnly = 8;
 
 // Part 1's GPU model: the blend ONE, CONSTANT_COLOR with B as the source colour and A as the blend colour,
 // dst' = B + A * dst / 255, rounded to nearest and clamped (the overlay blend's model, M6; UNVERIFIED for PICA's

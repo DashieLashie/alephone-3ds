@@ -649,6 +649,8 @@ FadeFit fade_fit(const uint16_t* r, const uint16_t* g, const uint16_t* b, unsign
 		{
 			const int round = step / 2;
 			const bool quick = step % 2 == 0;
+			if (!quick && (parts & kFadeQuickOnly))
+				continue;
 			// The unconstrained fit of each channel, reused by a later form pair it already suits.
 			FadeChannel any_fit[3];
 			uint16_t any_trust[3] = {0, 0, 0};
@@ -720,14 +722,16 @@ const FadeFit& FadeCache::get(const uint16_t* r, const uint16_t* g, const uint16
 		*changed = !same;
 	if (same)
 		return m_fit;
+	// The hints: the last fold fit, and the last affine one (a liquid's g, the base of a fold over it). After a fit that
+	// found nothing, the quick phase only (invalidate(), at the identity, lifts it).
+	const bool quick_only = m_valid && m_fit.kind == FadeKind::None;
 	memcpy(m_c[0], r, n);
 	memcpy(m_c[1], g, n);
 	memcpy(m_c[2], b, n);
 	m_tol = tol;
 	m_parts = parts;
 	m_valid = true;
-	// The hints: the last fold fit, and the last affine one (a liquid's g, the base of a fold over it).
-	m_fit = fade_fit(r, g, b, tol, parts, &m_last_fold, &m_last_affine);
+	m_fit = fade_fit(r, g, b, tol, parts | (quick_only ? kFadeQuickOnly : 0u), &m_last_fold, &m_last_affine);
 	if (m_fit.kind == FadeKind::Fold)
 		m_last_fold = m_fit;
 	else if (m_fit.kind == FadeKind::Affine)

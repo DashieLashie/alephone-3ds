@@ -1937,3 +1937,28 @@ the cost of `fallback sw`'s one sync + one seed per fade, and the Software figur
 
 **End:** ftpd: delete `/3ds/alephone/debug-perf`; leave the preference as the user wants it. **Record** in `PERF.md` ("Stage 10
 M8 — console") and the design's M8 status and Review log.
+
+## M6b console check (fades in direct mode; ~25 min, 4 launches; when the user is at the console)
+
+**Not run yet; console work deferred by the user (2026-11-08).** Written 2026-11-08 for `port-stage10-M6b` (`PERF.md` "Stage 10
+M6b", design section 7 "M6b" and its Review log "M6b implementation notes"). Azahar passed every gate on both backends; the
+console answers what it cannot (the M6b block's "Needs console verification"): PICA's rounding of the `CONSTANT_COLOR` blend and
+of the TEV stages (the fit's model), the blend colour's byte order, `GPU_BLEND_MIN`/`MAX`, the fit's CPU cost on the ARM11, the
+passes' GPU time, and the static's look. Setup, driving and `$H/m1/run.sh` as in "M1 console check, short version", with
+`cmake --build build-3ds-c3d-prof` at `port-stage10-M6b`; Framerate Target 60, HUD + Map.
+
+1. **Fade Test** (~6 min). `scripts/3ds/tests/plugins/Fade Test` into the card's `Marathon2/Plugins/`;
+   `scripts/3ds/tests/c3d/m6b-fade.cfg` as `/3ds/alephone/debug-c3d`; `debug-perf` for level 0 with measure 70 s
+   (`$H/sprint8/debug-perf-L0` edited). **Pass:** one `[c3d] fade: curves changed` line per `[lua] fade` line; `composite
+   final` `fade_bad=0` (every fade `direct_check` within_2 >= 99.9 %, max <= 4); `direct final` `blocked=` gamma only for the
+   `fit no` frames; a red flash looks red, not blue (byte order). **Record** `fade_fit_ms`, `fade_max`, `fade_min_within_2`,
+   the static frames' look (`fade_static=`), `gpu_ms`.
+2. **Liquid Test** (~5 min). The Liquid Test plugin instead (remove the Fade Test), same config, measure 55 s. **Pass:**
+   `blocked=-`, `fade_bad=0`, `quirk_px=0`. **Record** the blue channel's max Δ on the underwater frames (a diagnostic: water's
+   blue slope is 253/255, so a PICA that computes `d * 255 >> 8` shows a systematic 1).
+3. **Cost** (~6 min). Remove the plugin; `quiet 1` in a `debug-c3d` with `renderer c3d`, `mode direct`; play L0 for a minute
+   taking damage and picking things up. **Record** busy/fps from the BENCH line and `fade_fit_ms` against M6's console row.
+4. **`fades 0`** (~4 min). Same with `fades 0` added. **Record** `blocked=gamma:` (every flash frame readback) for the A/B.
+
+**End:** ftpd: delete `/3ds/alephone/debug-c3d`, `debug-perf` and the plugin. **Record** in `PERF.md` ("Stage 10 M6b —
+console") and the design's M6b status and Review log.

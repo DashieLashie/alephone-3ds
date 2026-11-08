@@ -46,8 +46,10 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   `PATCHES.md` 48: Graphics > Renderer "GPU (experimental)" = `renderer c3d`, `mode direct`, new key `fallback sw`, applied only
   without a `debug-c3d` file; finding: any non-default Brightness blocked every direct frame **and** dropped Software itself to
   ~22 fps @60 in Azahar (the engine's `apply_gamma`), so **Brightness was removed from the options**, `PATCHES.md` 56, on
-  `3ds-port` too, user 2026-11-08); **next: M6b**, spec approved 2026-11-08 (revision 3, critic rounds 1-4: every fade on the GPU in three parts, no
-  engine edit; start a fresh session with `docs/3ds/KICKOFF_M6B.md`); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  `3ds-port` too, user 2026-11-08); **M6b done** (2026-11-08, tag `port-stage10-M6b`, `PERF.md` "Stage 10 M6b", Azahar only, no engine edit: every fade,
+  flash and tint direct via curve classification (affine quad, MIN/MAX fold passes, GPU noise static); dodge/burn drawn in the
+  intended form because `fades.cpp`'s int32 overflow distorts SW's, user decision; Fade Test @60 59.7 fps vs 39.7 with
+  `fades 0`); **next: M9** (stereo; its spec must redo the VRAM budget first); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.

@@ -5050,6 +5050,16 @@ static void test_m6b_part1()
 		r[17] ^= 0x100;
 		cache.get(r, g, b, 3, kFadeAllParts, &changed);
 		CHECK(changed && cache.fits() == 3);
+		// After a fit that found nothing the next one is quick only; the identity (invalidate) lifts that.
+		uint16_t down[256];
+		for (int i = 0; i < 256; ++i)
+			down[i] = static_cast<uint16_t>((255 - i) << 8);
+		down[100] = 0;
+		CHECK(cache.get(down, down, down, 2, kFadeAllParts).kind == FadeKind::None);
+		down[101] = 0;
+		CHECK(cache.get(down, down, down, 2, kFadeAllParts).kind == FadeKind::None);
+		cache.invalidate();
+		CHECK(cache.get(r, g, b, 3, kFadeAllParts).kind == FadeKind::Affine);
 	}
 }
 

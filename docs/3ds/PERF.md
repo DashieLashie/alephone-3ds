@@ -2159,3 +2159,50 @@ figure is unknown. Two ways out, for the user to decide: M6b tier 2 (Brightness 
 level is always the default, so neither Software nor the GPU renderer pays for it. Script 27 rerun on the new dialog layout:
 921 of 921 frames direct after the flip.
 
+
+## Stage 10 M6b: fades, flashes and tints in direct mode (Azahar — non-authoritative)
+
+Recorded 2026-11-08 on `stage10-c3d`: commits `9d2b445cd` (part 1), `886906177` (parts 2-3), the review follow-ups and docs,
+tag `port-stage10-M6b` (`CITRO3D_DESIGN.md` section 7, "M6b specification" revision 3, and the Review log "M6b: SW's dodge
+and burn overflow", "M6b implementation notes", "M6b code review"). No engine edit. Binary `build-3ds-c3d-prof`; logs
+`build/m6b/` (not in git). "hw" = host GPU, "sw" = Azahar's software backend (`gxq_budget 3`).
+
+**Host tests** (`c3d-host/build.sh`, 2 654 878 checks, 0 failures; replicas of `fades.cpp`'s six faders with its own integer
+types, t = 0..1 in 1/64 steps, alone and over each of the 5 liquids):
+
+| Part | Result |
+| --- | --- |
+| 1 affine | 1 625 tint / soft_tint curves: worst error **1** alone, **2** over a liquid; the level-start black A = B = 0 |
+| 2 fold | 2 730 negate / dodge / burn curves: 2 599 fold + 118 affine, 13 not found without a hint (dodge over a liquid at t ≥ 60/64), **0** with the cache's hint; every accepted fit re-checked within 2 of its reference; negate always on SW's own curve; 1 061 dodge/burn channels on the overflow-free entries (user decision) |
+| 3 static | randomize at masks 2^k - 1, k = 8..16: every one without a liquid, 202 of 216 over one (misses fall back); **0** false statics among 12 480 other curves |
+
+**Acceptance** (Fade Test: every fade type, `direct_check 5`; Liquid Test: under water, red flashes then negative flashes):
+
+| Run | Frames direct | Fade `direct_check`s | Notes |
+| --- | --- | --- | --- |
+| Fade Test hw | 2 939 of 2 940 (`blocked=gamma:1`) | 305, **fade_bad 0**, min within_2 100.000 %, max Δ 2 | 1 204 affine, 300 fold, 19 static frames (4 unchecked by design); the one readback: the flicker negative's first frame (`fit no`) |
+| Fade Test sw | 2 992 of 2 993 | 321, **fade_bad 0**, min within_2 99.944 %, max Δ 3 | same classification |
+| Liquid Test hw | 2 178 of 2 178 (`blocked=-`) | 412, fade_bad 0, max Δ 2 | red over water: A = 21,21,89 … (liquid + flash affine); negative over water: fold, `trust` 255 everywhere, `quirk_px` 0; underwater blue max Δ 1 (the diagnostic) |
+| Liquid Test sw | 2 357 of 2 357 | 448, fade_bad 0, max Δ 2 | |
+| L01 film hw, fades on | 19 980 of 19 997 | 80 (71 affine, 9 fold), all 100.000 % within 2, max Δ 1 | the 17 readback frames are `fit no` (flicker negative); 586 checks without a fade 100.000 % within 1 |
+| L01 film hw, `fades 0` | 17 750 of 18 521, `gamma:771` | — | reproduces M6 (776 of 19 058; the replay's frame count varies) |
+| M6 `direct_check`, L0 / L6 / L20 hw | all | 41 / 41 / 44 without fades: **100.000 %, max Δ 0** | identical to M6 |
+
+Restores: `tex1_restore_mismatch` 0, `tev1_not_init` 0, `unit1_left_bound` 0 through every run. The red flash is red (the
+blend colour's byte order holds in Azahar). **`fade_quirk_px`** (checked pixels where SW's own curve differs from the
+reference by more than 2): dodge purple 66 905 in 6 checks, dodge yellow 201 107 in 12, burn cyan 28 653 in 13, burn green
+60 535 in 20: the int32 overflow and dodge's wrap, drawn in the intended form by the user's decision, so `fade_bad 0` there is
+against that form, not SW's picture. Also 1 746 in 2 flicker-negative checks (its random transparency goes beyond the range
+the host test covers); every other type 0.
+
+**Cost** (Fade Test @60, `quiet 1`, no checks):
+
+| | fps | `blit` | `c3d_composite` | frames readback |
+| --- | ---: | ---: | ---: | ---: |
+| `fades 0` (M6/M8 behaviour) | 39.65 | 8.54 | 0.07 | 867 |
+| **fades on** | **59.68** | 0.01 | 0.10 | 1 |
+
+The passes add ~0.03 ms of CPU to the composite on average (about half the frames carry a fade); the fit (`fade_fit_ms`) is
+0.5 ms on average per change of the curves, ≤ 2.2 ms for a fade's steps, 51 ms once for a curve no part classifies (since the
+review, only the quick phase runs after such a miss, until the identity). Azahar overstates CPU cost; `gpu_ms` is not
+measurable here. **The console decides** (`NEXT-SPRINT.md` "M6b console check").

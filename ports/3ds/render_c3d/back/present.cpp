@@ -654,6 +654,8 @@ void draw_fade_static(const FadeFit& fit, C3D_Tex* noise)
 		draw_fade_affine(fit);
 	__real_C3D_TexBind(0, noise);
 	set_present_draw(Swizzle::Plain);   // REPLACE of texture 0, RGB and alpha
+	// ONE, ZERO set here: the blend before is part 1's or the bands' (critic, M6b code review minor 1).
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ZERO, GPU_ONE);
 	C3D_AlphaTest(true, GPU_GEQUAL, static_cast<int>(noise_ref(static_cast<uint16_t>(65535u - fit.mask))));
 	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * kNoiseQuad, 4);
 	++s_cn.fade_noise;

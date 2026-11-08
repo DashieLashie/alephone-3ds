@@ -727,7 +727,8 @@ void fade_log(const char* what, const FadeFit* fit, bool event)
 // cached); a fit clears the bit and hands the fit and its curves to this frame's composite. Returns the mask to store.
 unsigned fade_policy(const Config& cfg, unsigned blocks)
 {
-	if (!cfg.fades || !cfg.renderer_c3d || cfg.mode != Mode::Direct)
+	// Citro3d must be up (critic, M6b code review minor 2): after a release noise_get would build a texture nobody frees.
+	if (!cfg.fades || !cfg.renderer_c3d || cfg.mode != Mode::Direct || !back::is_up())
 		return blocks;
 	if (!(blocks & kDirectGamma))
 	{

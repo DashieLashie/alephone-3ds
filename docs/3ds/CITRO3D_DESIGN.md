@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode, stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
+| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -3871,7 +3871,7 @@ their own name), and (B-a) `c3d_fill`, `c3d_vblank`.
   met; SW also 60.5 on the console)**, busy −0.66 / −0.37 / −0.80 ms against SW, readback 53.8-54.7 fps; `c3d_wait`
   0.70-0.78 ms; G3-b `gpu_ms view` 1.3-1.5 ms (recorded, not deciding).
 
-### M6b — fades, flashes and tints in direct mode (planned; user decision 2026-11-08; order: after M8, before M9; built whatever the gate shows, within reason)
+### M6b — fades, flashes and tints in direct mode (done 2026-11-08, tag `port-stage10-M6b`, Azahar only; `PERF.md` "Stage 10 M6b"; Review log "M6b: SW's dodge and burn overflow", "M6b implementation notes", "M6b code review")
 Today a frame with any fade, flash, tint or non-default brightness is **not direct** (`kDirectGamma`, `kDirectDarken` in
 `a1_c3d.h`): the software path applies them with the CPU to the finished view (`apply_gamma` over `world_pixels`,
 `darken_world_window()`), and a direct view never exists in CPU memory. The user's aim: **make the common ones eligible at
@@ -5474,3 +5474,61 @@ wrote it: the line is lowered by the most negative residual (`min r = 0`), part 
 a liquid g must be the identity; the host test covers masks k = 8..16. The critic stated no fifth round is needed when applied
 as written. **The specification is approved; `KICKOFF_M6B.md` starts the build in a fresh session.**
 
+
+### M6b: SW's dodge and burn overflow (coordinator, 2026-11-08; user decision: the intended form)
+
+Building part 2, the host replicas (transliterations of `fades.cpp` with its own integer types) showed that SW's dodge and
+burn curves are **not** the forms of the specification on the upper half of the input: both compute
+`int32(1LL * k * c) >> 16` (`dodge_color_table`, `burn_color_table`), which wraps negative for k = 65535 and c > 0x8000 (GCC
+converts modulo 2^32, on the console as on the host). So SW's dodge (k = 0 channels) folds a second time on bright pixels and
+SW's burn (k = 1 channels) darkens them by t and then wraps to bright: up to 255 steps off the intended curve on every
+dodge/burn frame. The specification's forms (and the "sawtooth" it attributed to dodge's uint16 wrap alone) assumed the
+product does not overflow. Negate has no such product and matches the family exactly. Asked, **the user chose the intended form** (as the engine's OpenGL faders draw it,
+consistent with the dodge-clamp decision): a channel SW's curve does not fit is fitted on the entries whose fader input is at
+most 126 (`kFadeOverflowTrust`: below half brightness, where the product cannot overflow), the model stands for the rest, and
+`direct_check`'s reference uses the model there; the pixels where SW's own curve differs by more than 2 are counted
+(`fade_quirk_px`, which also covers dodge's uint16 wrap; it replaces the planned `fade_wrap_px`). Exact fits win: every pass
+form is tried on SW's curve before the trusted pass is allowed (host-asserted: negate never uses it).
+
+### M6b implementation notes (coordinator, 2026-11-08)
+
+Where the build departs from revision 3, and why:
+- *texcoord1:* `(u, t1map.x + t1map.y * v)` with the uniform `(1, -1)` for `view_v_flip 1`, `(0, 1)` otherwise; the
+  specification's `flip - v` gives `-v` for `view_v_flip 0`.
+- *Part 2's TEV:* four stages, not five: sigma is folded into stages 1-2's constants (`sigma * A`, `sigma * B`; sigma = 0 gives
+  0, so stage 3's `K - 0 = K`), which is the same arithmetic as a separate MODULATE by sigma.
+- *Part 2's search* (`core/fade_fit.cpp`): per channel, part 1 first; then candidates g = (A, B) verified with K and sigma
+  estimated from the regions below and above g (medians, +-1). The candidates come in two phases: a quick one (the identity,
+  the last fold fit's g and the last affine fit's g, which is the liquid's under water) and a thorough one (a slope score:
+  entries on lines of slope +A and -A, flat runs a slope could not make excluded; the 5 slopes around its peak verified).
+  Verification stops at the first entry off by more than `fade_tol`. A channel set whose pass forms clash (one wants a cap,
+  another K > 1) is refitted under each form pair; a fit reused when it already suits. A curve with more than 16 jumps of over
+  4 steps is not searched (SW's static). Cost in Azahar: 0.5-0.8 ms per fit on a fade step; a fade's first fit up to ~2 ms,
+  a curve that fits nothing up to ~51 ms once (the flicker negative's first frame).
+- *Part 3's detection:* per channel three bases (the identity, the supporting line with and without the window unwrap: SW's
+  wrap is ambiguous for masks of half the range), the one with the smallest residuals among those whose residuals look like
+  SW's offsets; a channel's mask is read from its mean residual (about mask/2), far steadier than the maximum; the channels'
+  masks must agree within a factor of 2 and the static takes the largest; residuals must also be rough (mean step >= mask/8),
+  which no piecewise-linear curve is. Host: every randomize mask k = 8..16 without a liquid, 202 of 216 with one (the misses
+  are mid masks over lava, sewage and jjaro: they fall back), 0 false statics among 12 480 other curves. So a static hit
+  over a liquid can alternate between GPU snow and fallback frames (SW's colour scramble, or readback) for a few frames of
+  its decay (critic, code review minor 4).
+- *The `[c3d] fade:` lines:* a fade's first fit, a change of kind and the return to the identity always print (up to 2 000);
+  the steps between share the 200-line cap.
+- *Commits:* parts 2 and 3 share the classification and the restore, so they were built and gated together: two commits
+  (part 1; parts 2 and 3), not three; `fade_parts` still switches each part off.
+- *Console list additions:* the TEV's rounding in part 2 (Azahar: `within_1` as low as 32 % on fold frames, always within 2);
+  the fit's cost on the ARM11 (Azahar's figures above); `GPU_BLEND_MIN`/`MAX`; the noise's look.
+
+### M6b code review (critic: APPROVE, 0 blocker, 0 major, 6 minor; folded)
+
+The critic recompiled the changed files (0 warnings), confirmed the TEV sources, operands and combiners against `texenv.h` and
+`enums.h`, the restore against `draw.cpp`'s checks, the hand-off's lifetime, and with its own replica that negate never uses
+the trusted pass and tint/soft_tint never classify as anything but affine. Minors, all folded: (1) the static pass inherited
+the bands' blend (ONE, ONE_MINUS_SRC_ALPHA) when an overlay was on screen, adding the snow instead of replacing: it now sets
+ONE, ZERO itself; (2) `fade_policy` lacked `back::is_up()` (after a release `noise_get` would have built a texture nobody
+frees): guarded; (3) the fit's cost had no bound for a run of unclassifiable curves (~51 ms each in Azahar): after a miss the
+cache runs only the quick phase until the identity (host-tested); (4) static over a liquid can alternate with fallback frames:
+recorded in the implementation notes; (5) `fade_bad 0` on dodge/burn is against the intended form: `fade_quirk_px` per type in
+`PERF.md`; (6) the record and the remaining gates (films, regression, bench, software backend): done before the tag. The
+Fade Test was rerun on both backends on the fixed binary (`fade_bad 0`).
