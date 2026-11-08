@@ -3960,15 +3960,14 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     **blend colour's byte order** (**UNVERIFIED**: `C3D_BlendingColor` has no doc and M4 only used greys, `draw.cpp`:284-286):
     a swap shows as a blue flash and fails `direct_check` at once. (5) Regression: M6's `direct_check` runs on L0/L6/L20 (no
     fades: identical), `fades 0` reproduces M6's `blocked=gamma` counts on the L01 film.
-  - *Accept (proposal; **the tolerance is the user's decision**, as for M2-M5).* Per tint and soft_tint fade type, the liquid
+  - *Accept (tolerance **accepted by the user 2026-11-08**).* Per tint and soft_tint fade type, the liquid
     effect and a liquid + flash composition: every `direct_check` ≥ **99.9 % of pixels within Δ 2** per channel against SW,
     **max Δ ≤ 4**; on the L01 film `blocked=gamma` falls to the non-affine fades only (static, negate, dodge, burn), recorded
     per type; the fade quad's cost in the bench (`c3d_composite`) recorded. Every gate on both Azahar backends where M6 ran
     both.
-  - *Tier 2, in this milestone only if it comes cheap:* **pause darkening** (`kDirectDarken`): SW draws black on every other
-    pixel of the view (`darken_world_window`, `draw_pattern_rect` over `main_surface`, `screen.cpp`:2392-2450), which the
-    composite can reproduce exactly with a quad textured by a 2x2 A8 checker (wrap repeat) and an alpha test; frames are rare
-    and static (63 of 1 799 in the user's session, Review log "M9: non-stereo frames"). **negate, dodge, burn**: `GPU_BLEND_MIN`
+  - *Tier 2:* **pause darkening** (`kDirectDarken`) is **out of M6b (user, 2026-11-08)**: SW draws black on every other pixel
+    of the view (`darken_world_window`, `draw_pattern_rect` over `main_surface`, `screen.cpp`:2392-2450); a 2x2 checker quad
+    could reproduce it, but the frames are rare and static (63 of 1 799 in the user's session). It stays non-direct. **negate, dodge, burn**: `GPU_BLEND_MIN`
     / `MAX` exist (`enums.h`:240-241) but each curve needs `min(f(d), d)` with *f* of the destination, which one blended quad
     cannot form (the source cannot read the destination); a second target and a copy would. **Recorded as not direct.**
     **randomize**: random per intensity level, not expressible without a dependent lookup (PICA has none): **not direct.**
@@ -5266,4 +5265,9 @@ flash) stays affine; PICA's `GPU_CONSTANT_COLOR` blend factor gives `B + A·dst`
 (`current_gamma_*`), so **no engine edit** and no fade-type knowledge in the port (MML-redefined fades fit or fall back on
 their own). Open for the user: the gate's tolerance (proposed ≥ 99.9 % within Δ 2, max Δ ≤ 4) and whether pause darkening is
 in. Next: the critic's pre-implementation review, then the build.
+
+### M6b specification: user decisions (coordinator, 2026-11-08)
+
+The proposed gate is accepted (≥ 99.9 % of pixels within Δ 2 per channel against SW, max Δ ≤ 4); pause darkening is out of
+M6b; the critic reviews the specification before any code (effort medium).
 
