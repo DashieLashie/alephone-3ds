@@ -1216,8 +1216,8 @@ C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD
    (map, terminal, darken, fades, Classic) readback, M1-M5 gates unchanged; captures pass a recorded exception (user
    decision: SDL's text blending rounds differently on a transparent surface). **First speedup:** @30 busy −6.0 / −4.2 /
    −5.0 ms against SW, @60 59.7 fps on L0/L6/L20 (SW 54.4 on L0). G3-a holds. Console: "M6 console check, short version"
-   at the end of this file (not run). **Next (user decision 2026-11-07): M7** (2x2 supersampling), unless the user wants
-   the M6 console check first.
+   at the end of this file (not run). **Next (user decision 2026-11-07): the M6 console check first, medium variant**
+   (15 launches, ~40 min; fresh-session prompt `KICKOFF_CONSOLE_M6.md`), then M7 (2x2 supersampling).
    *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
    console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
    console runbook carries the M0 steps.
@@ -1855,9 +1855,13 @@ final` and `tex:` lines and the BENCH lines; then the design's M5 status, sectio
 log.
 
 
-## M6 console check, short version (30-40 min; when the user is at the console)
+## M6 console check, short version (medium: 15 launches, ~40 min; when the user is at the console)
 
-**Not run yet.** Written 2026-11-07 for `port-stage10-M6`. Azahar cannot answer M6's hardware questions (design section 7,
+**Not run yet.** Written 2026-11-07 for `port-stage10-M6`. **User decision (2026-11-07): run the medium variant** — steps 1-3
+as written and step 4 **at Framerate Target 60 only** (3 configs × 3 levels + the G3-b run = 10 launches): **15 launches
+in all, ~40 min** (each launch is two ftpd file swaps, a 3dslink send, a level load and a 20 s bench: ~2-3 min). The full
+version (step 4 also @30) is 24 launches, ~60-75 min; a minimal one (step 4 on L0 only) 8 launches, ~20-25 min. Fresh
+session prompt: `KICKOFF_CONSOLE_M6.md`. Azahar cannot answer M6's hardware questions (design section 7,
 M6 specification, and the code review's "Needs console verification"): the **texture target's orientations** on PICA
 (`view_v_flip 1`, `band_from_end 1`, the seed's linear→tiled flags: all right in Azahar), PICA's blend rounding against
 `direct_check`'s arithmetic, **the real `c3d_wait`** (Azahar runs the GPU inside `C3D_FrameEnd`: its `c3d_wait` is 0.01 ms),
@@ -1889,10 +1893,10 @@ picture = orientation (step 1).
 overlays show, the launcher comes back after Close, no Luma screen; the card's `log.txt` ends with `release done` and
 `direct final … policy=… blocked=map:N` (N > 0), `gate_skipped` > 0 in `[c3d] stats`, no `release abandoned`.
 
-**4. The bench: direct vs SW vs readback, @30 and @60** (~15 min; the first real speed test). For each level N in 0, 6, 20
-and each of `m5-bench-sw.cfg`, `m5-bench-c3d.cfg`, `m6-bench-direct.cfg` **with a line `quiet 1` appended** (the 1 Hz stats
+**4. The bench: direct vs SW vs readback, @60** (~25 min, 10 launches; the first real speed test; the full version also runs
+@30). Framerate Target 60. For each level N in 0, 6, 20 and each of `m5-bench-sw.cfg`, `m5-bench-c3d.cfg`, `m6-bench-direct.cfg` **with a line `quiet 1` appended** (the 1 Hz stats
 printing costs ~2 ms on the console: `PERF.md` "Stutter follow-up"): `debug-perf-L<N>` as `debug-perf`, the cfg as
-`debug-c3d`, `$H/m1/run.sh build-3ds-c3d-prof m6c-<sw|rb|dir>-<30|60>-L<N>`. Then one more `m6-bench-direct.cfg` run on L0
+`debug-c3d`, `$H/m1/run.sh build-3ds-c3d-prof m6c-<sw|rb|dir>-60-L<N>`. Then one more `m6-bench-direct.cfg` run on L0
 @60 **without** `quiet 1` for G3-b's `gpu_ms … view=` (the view frame's GPU time, `C3D_GetDrawingTime`). **Record** the
 BENCH lines (`fps`, `busy`, `render`, `c3d_draw`, `present`, `c3d_wait`, `c3d_composite`, `c3d_vblank`, `bottom`) and the
 `direct final` line (`direct=` must be ≥ 95 % of the frames, `bottom_pending`). **The goal** (design 0.5): HUD + Map @60 ≥
