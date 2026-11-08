@@ -3899,8 +3899,9 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
 - Accept (to be fixed in the spec): the gate vs SW per tier-1 effect in Azahar (`direct_check`-style, with the effect running
   through the same frame), `blocked=gamma:` falls to 0 on those frames, the tier-2 effects each recorded as eligible or
   still readback.
-- **M6b specification (revision 3 of 2026-11-08, before code; revision 1 = part 1, critic rounds 1-2; revision 2 adds parts 2
-  and 3 at the end of this block, user decision: Review log "M6b: every fade on the GPU"; revision 3 = critic round 3 applied).** Where the lines above
+- **M6b specification (revision 3 of 2026-11-08, before code, APPROVED; revision 1 = part 1, critic rounds 1-2; revision 2 adds
+  parts 2 and 3 at the end of this block, user decision: Review log "M6b: every fade on the GPU"; revision 3 = critic rounds 3-4
+  applied).** Where the lines above
   and this block disagree, this block rules. Citations are the code at `c6dd77d30`. **No engine edit.** One session.
   - *What a fade is in a 32-bit build (checked).* `build_direct_color_table` (`screen.cpp`:2219-2232) makes the 256-entry
     colour table a **grey ramp**: entry *i* is `(i << 8, i << 8, i << 8)` (`default_gamma_*` = `i << 8`, :2205-2216; Brightness
@@ -4078,16 +4079,19 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     with M5's noise texture (`core/noise.h`: 256x256 RGBA8 of the LFSR states, `GPU_REPEAT`, `back/shade.cpp`:65,
     `noise_get()` :194; in linear memory, promoted to VRAM when there is room).
     *Detection from the curves (round 3, major 2: the test must be able to fail).* Tried **last**, after part 1 and part 2
-    (with dodge's wrap normalised) have both rejected the curves. g = the affine lower envelope (a line through the minima
-    of 16 windows of 16 entries) and g must itself pass part 1's affine test (identity without a liquid); residuals
+    (with dodge's wrap normalised) have both rejected the curves. g = the **lower supporting line** (round 4, major 1: a line
+    through window minima runs ~mask/17 above the true g, since each minimum of 16 non-negative offsets is above 0): fit a
+    line through the minima of 16 windows of 16 entries, then **lower its intercept by the most negative residual**, so that
+    `min r = 0`; part 1's affine test runs on the lowered line; **without a liquid, g must simply be the identity within
+    `fade_tol`** (no line fitted). Wrapped entries are measured against the lowered line with the +65 536 rule below. Residuals
     `r(i) = c[i] − g16(i)` as signed values, **no modulo** (an entry that wrapped above 65 535 shows as a large negative
     residual and is allowed only within `mask` of 0 after adding 65 536, SW's own wrap); then SW's structure must hold:
     one **mask = 2^k − 1** (k ≥ 8) **shared by the three channels** (SW computes one mask from the transparency,
     `fades.cpp`:613-623), every residual in [0, mask], the residuals **spread** over it (each channel's mean in
     [mask/4, 3·mask/4] and its maximum ≥ mask/2). Anything else is unclassified and stays non-direct. *Strength:* mask
     (65 535 at the start, halving as the fade decays). Host tests: every part 1 and part 2 replica, composed or not, and
-    the dodge replicas at every *t*, **never** classify as static; randomize replicas at every *t* (alone and over each
-    liquid) always do. *The pass* (after part 1's quad for g, which is drawn only with a liquid): one full-screen quad
+    the dodge replicas at every *t*, **never** classify as static; randomize replicas at every mask k = 8..16 (alone and over
+    each liquid) always do. *The pass* (after part 1's quad for g, which is drawn only with a liquid): one full-screen quad
     textured by the noise on unit 0 at texcoords `(x + ox, y + oy) / 256` with a new pseudo-random (ox, oy) every frame, TEV
     `REPLACE TEXTURE0`, the **alpha test** `GEQUAL noise_ref(65535 − M)` (M5's density rule, `core/noise.h`, so about M/65536
     of the pixels become static), blend `ONE, ZERO`: those pixels show the noise's colour, the others the picture. **The
@@ -5460,4 +5464,13 @@ uniform (no new attribute); stage 0 as one `MULTIPLY_ADD` (five stages, one spar
 `noise_get()` in `direct_policy` with a fallback on nullptr; three commits behind `fade_parts`. Confirmed by the critic: the
 TEV sources and operands, K > 1, the negate closed form. Revision 3 goes to the critic once more (round 4) before the
 fresh session.
+
+### M6b pre-implementation, round 4 (critic: one major, fixable in place; applied; specification approved)
+
+Seven of revision 3's eight fixes confirmed correct and complete. The one major: part 3's envelope through window minima runs
+about mask/17 above the true line (each minimum of 16 non-negative random offsets is above 0), so ~6 % of entries got negative
+residuals and mid-fade static frames would have been unclassified, failing the spec's own host test. Applied as the critic
+wrote it: the line is lowered by the most negative residual (`min r = 0`), part 1's test runs on the lowered line, and without
+a liquid g must be the identity; the host test covers masks k = 8..16. The critic stated no fifth round is needed when applied
+as written. **The specification is approved; `KICKOFF_M6B.md` starts the build in a fresh session.**
 
