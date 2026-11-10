@@ -4412,20 +4412,24 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     (round 2, major 2): when the wanted target is again a texture target with the same `tw x th`, both textures and
     targets are **kept**, `s_w / s_h` (the viewport) change, the right texture is cleared as "just created", and the
     readback buffer `s_argb` (`malloc(w*h)`, `view.cpp`:257-259) is **allocated once for 512x256** on the texture path so
-    a larger view cannot overflow it. And **with stereo allocated a view that does not fit the texture target (Classic's
-    640x320) is drawn by SW** (new skip reason `stereo_size`, decided before `view_ensure` is asked) and never creates the
-    unlinked 800 KiB target: the textures are never deleted for a size change. That costs nothing measured (Classic @60:
-    GPU 52.89 against SW 52.90 fps, `PERF.md` "Stage 10 M8"; under the preference Classic is already `fallback_sw`).
-    `mode readback` with `stereo 1` in a file is likewise not stereo-allocated for the view (no texture target exists):
-    `off=mode`.
+    a larger view cannot overflow it. And **with stereo allocated a view larger than 512x256 is drawn by SW** (new skip reason `stereo_size`, decided
+    before `view_ensure` is asked) and never creates the unlinked target: the textures are never deleted for a size
+    change. **Corrected after the code review of commit 1:** Classic with the HUD is **480x240** on the 3DS (640x320 at the
+    75 % size, `screen.cpp`:400-409, :466-472; M6 had recorded it), not 640x320: it fits and stays on the kept texture
+    target (readback, or `fallback_sw` under the preference). `stereo_size` is reached only by Classic with the HUD hidden
+    (480x360, `screen.cpp`:436-442) or a Lua HUD's view rectangle (:429-435).
+    `mode readback` with `stereo 1` in a file is likewise not stereo-allocated (no texture target exists): `off=mode`,
+    and, as built, the cap is then 3 584 (nothing was allocated); `g3a` likewise (`off=g3a`).
     Test key **`stereo_fail 1`**: the second texture's allocation is treated as failed (T5b below).
   - *Additions to the tests (critic round 1).* **T2** also requires, on every check, `gfxIs3D()` true and
     `gfxGetFramebuffer(GFX_TOP, GFX_LEFT)` ≠ `(…, GFX_RIGHT)` (in 2D mode libctru returns the left buffer for both, so the
     comparison would pass empty-handed; minor 10); a check that fails this is a failed check. **T3** gates `w_low` = 0
     and adds two runs: the Renderer preference toggled mid-level by script (off → on → off; stereo frames after the
     switch on, none after the switch off, 3D mode logged following it, cap 2 944 throughout), and the bottom-screen mode
-    switched mid-level (HUD + Map → Classic → HUD + Map: no `view:` deletion line, Classic frames counted SW
-    (`stereo_size` or `fallback_sw`), stereo resumes). The host tests add `stereo_allocated` and `stereo_vram_cap`: no file
+    switched mid-level (HUD + Map → Classic → HUD + Map, **twice**: under the preference (Classic frames counted `fallback_sw`, no
+    `view:` line at all) and with a file `mode direct`, `fallback readback`, `stereo 1` (the log shows `view: 400x240 ->
+    480x240, the texture targets are kept` and back, never `target deleted`; `r_clears` +1 on the first stereo frame after
+    the return; stereo resumes), plus one Classic run with the HUD hidden: `stereo_size` > 0, no deletion line). The host tests add `stereo_allocated` and `stereo_vram_cap`: no file
     → 2 944; file `stereo 0` → 3 584; file `stereo 1` → 2 944; an explicit `vram_cap` wins in all three. **T5b**:
     `stereo_fail 1` gives the one log line, `off=vram`, 0 stereo frames, and M6's direct gates otherwise unchanged.
     **Bench** gains the row "`stereo 1`, slider 0" against "`stereo 0`" (does 3D mode alone cost anything; Azahar cannot
@@ -5865,3 +5869,16 @@ textures, `stereo_fail` and T5b belong to commit 1; `gfxSet3D(enabled)` before t
 frame only if `gfxIs3D()`; the static polygon's noise and `Degenerate`; section 6's heading and test list. Two revise rounds
 are the workflow's limit: the spec is taken as **approved for implementation** with these applied; the code review of each
 commit is the next check.
+
+### M9 commit 1: code review (coordinator, 2026-11-10)
+
+Commit `8de3697da` (the stereo path at parallax 0). The implementer's gates: host tests; T2 on L0 / L6 / L20, the Fade Test
+and the L01 film, both fill values, both Azahar backends: every `stereo_check` 0 differing pixels, 3D mode on, distinct
+buffers, 0 replay discards (the software-backend films are **partial**: 4 088 and 5 999 of about 18 800 frames); T5 with
+`stereo 0` and with `stereo 1` at slider 0; T5b; four builds, 0 warnings; OFF builds identical to the baseline. The critic
+(Opus) rebuilt, ran the host tests, read the logs: **approve**, no blocker or major, 6 minors. Applied here: the spec's
+Classic size (480x240, not 640x320) and T3's bottom-screen run reworded. Carried into commit 2: `stereo_end()` in
+`abandon()`; the right-eye clear issued before the promotions (a tight GX budget otherwise discards the first stereo frame
+after a map or terminal); the tautological host GX test replaced by one that mirrors the real order; the dead `retired`
+comment in `present_composite`. For T6 and the bench: free VRAM at exit with the 2 944 cap is 116 / 2 770 / 2 706 KiB on
+L0 / L6 / L20; L6's 2 048 KiB landscape part is no longer promoted and is sampled from linear memory.
