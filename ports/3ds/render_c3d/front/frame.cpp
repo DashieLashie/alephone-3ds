@@ -39,6 +39,7 @@
 #include "../back/view_shared.h"
 #include "../back/overlay.h"
 #include "../back/shade.h"
+#include "../back/stereo.h"
 #include "../core/bmp.h"
 #include "../core/calibrate.h"
 #include "../core/classify.h"
@@ -48,6 +49,7 @@
 #include "../core/fade_fit.h"
 #include "../core/overlay_bands.h"
 #include "../core/shade_lut.h"
+#include "../core/stereo.h"
 #include "../core/stats.h"
 
 #include "a1_3ds_platform.h"
@@ -440,8 +442,9 @@ bool run_diff_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 
 enum class ScanReason : int { None = -1, Landscape, Static, Other, Bitmap, Wrap, Flash, kCount };
 const char* const kScanNames[] = {"landscape", "static", "other", "bitmap", "wrap", "flash"};
-constexpr int kSkipCount = static_cast<int>(back::SkipReason::kCount) + 1;   // + config
+constexpr int kSkipCount = static_cast<int>(back::SkipReason::kCount) + 2;   // + config, stereo_size
 constexpr int kSkipConfig = static_cast<int>(back::SkipReason::kCount);
+constexpr int kSkipStereoSize = kSkipConfig + 1;   // M9: stereo allocated and the view does not fit the 512x256 textures
 constexpr int kDiscardCount = static_cast<int>(back::DiscardReason::kCount);
 constexpr unsigned kOffAfter = 10;
 
@@ -580,6 +583,55 @@ struct DirectFront
 	FadeKind fade_last_kind = FadeKind::None;   // the kind of the last fit logged
 } s_d;
 FadeCache s_fade_cache;
+
+// M9 (design 7, "M9 specification", "The ramp", "Counters and log lines"). In this commit the slider is not read (part 2 wires
+// it): the strength stays 0, so a stereo frame (stereo_force) is the full path at zero parallax, which is T2.
+constexpr bool kStereoSliderWired = false;
+struct StereoFront
+{
+	StereoRamp ramp;
+	bool seen = false;               // a stereo-capable direct frame ran since the last hook 3a (s_stereo_seen)
+	bool prev = false, cur = false;  // the previous / this frame (hook 3a to hook 3a) ran as a stereo frame: the right clear
+	unsigned stereo = 0, mono = 0, not3d = 0, ramp_resets = 0, discards = 0;
+	float p_now = 0.0f, p_max = 0.0f, P_now = 0.0f, slider = 0.0f;
+	int last = -1;                   // 1 stereo, 0 mono, for the change lines
+	unsigned lines = 0, changes = 0;
+} s_s;
+
+// Every change between stereo and mono direct frames, once (at most 20 lines, then counted), as the mode changes.
+void note_stereo(bool stereo)
+{
+	const int now = stereo ? 1 : 0;
+	if (now == s_s.last)
+		return;
+	s_s.last = now;
+	++s_s.changes;
+	if (s_s.lines < 20)
+	{
+		++s_s.lines;
+		printf("[c3d] stereo: frame %u %s (p %.3f)\n", s_frame, stereo ? "stereo" : "mono", s_s.p_now);
+	}
+}
+
+void stereo_abort()
+{
+	if (s_s.ramp.p > 0.0f)
+		++s_s.ramp_resets;
+	stereo_reset(s_s.ramp);
+	back::stereo_frame_set(false);
+}
+
+int stereo_counts_text(char* buf, size_t size)
+{
+	const int n = snprintf(buf, size,
+	                       "stereo=%u mono=%u p=%.3f pmax=%.3f P=%.2f slider=%.2f not3d=%u ramp_resets=%u off=%s fill=%d ",
+	                       s_s.stereo, s_s.mono, static_cast<double>(s_s.p_now), static_cast<double>(s_s.p_max),
+	                       static_cast<double>(s_s.P_now), static_cast<double>(s_s.slider), s_s.not3d, s_s.ramp_resets,
+	                       back::stereo_off_name(back::stereo_off_reason()), back::config().stereo_fill ? 1 : 0);
+	if (n > 0 && n < static_cast<int>(size))
+		back::draw_stereo_text(buf + n, size - n);
+	return n;
+}
 
 // The kind of frame play mode makes this frame, logged on a change (at most 20 lines, then counted).
 void note_mode(int mode)
@@ -846,11 +898,11 @@ int play_counts_text(char* buf, size_t size)
 	return snprintf(buf, size,
 	                "frames=%u c3d=%u sw=%u overflow=%u off_frames=%u scan=%u/%u/%u/%u/%u/%u"
 	                "(landscape/static/other/bitmap/wrap/flash) discard=%u/%u/%u/%u/%u/%u(unsup/ring/cmdbuf/gx/begin/tex) "
-	                "skip=%u/%u/%u/%u/%u(down/gate/size/pref/config) offs=%u ons=%u max_run=%u sentinel=%llu play_checks=%u "
+	                "skip=%u/%u/%u/%u/%u/%u(down/gate/size/pref/config/stereo_size) offs=%u ons=%u max_run=%u sentinel=%llu play_checks=%u "
 	                "copied=%llu empty_frames=%u static_frames=%u static_checks=%u static_px=%llu",
 	                p.frames, p.c3d, p.sw, p.overflow, p.off_frames, p.scan[0], p.scan[1], p.scan[2], p.scan[3], p.scan[4],
 	                p.scan[5], p.discard[0], p.discard[1], p.discard[2], p.discard[3], p.discard[4], p.discard[5],
-	                p.skip[0], p.skip[1], p.skip[2], p.skip[3], p.skip[4], p.offs, p.ons, p.max_run, p.sentinel, p.checks,
+	                p.skip[0], p.skip[1], p.skip[2], p.skip[3], p.skip[4], p.skip[5], p.offs, p.ons, p.max_run, p.sentinel, p.checks,
 	                p.copied, p.empty_frames, p.static_frames, p.static_checks, p.static_px);
 }
 
@@ -918,6 +970,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		skip = static_cast<int>(back::SkipReason::Pref);
 	else if (cfg.fallback_sw && cfg.mode == Mode::Direct && !back::view_direct_ok())
 		skip = kSkipConfig;   // M8: no texture target, so no direct frame: SW rather than readback
+	else if (dmode && back::stereo_objects_wanted() && (w > 512 || h > 256))
+		skip = kSkipStereoSize;   // M9: the textures are never deleted for a size change; SW draws what does not fit them
 	else if (!back::view_play_ready(w, h, &why))
 		skip = static_cast<int>(why);
 	const bool forced_sw = dmode && cfg.sw_every && P.frames % cfg.sw_every == 0;
@@ -954,6 +1008,26 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	}
 	const bool direct = dmode && not_direct < 0;
 	const ViewKind kind = direct ? ViewKind::Direct : ViewKind::Readback;
+
+	// M9: the ramp, once per frame decided direct. Capable: stereo enabled and usable, the right screen target exists, not
+	// a calibration or the 1024x512 probe. A stereo frame: p > 0, or stereo_force (the full path even at strength 0).
+	bool stereo_capable = false, stereo_frame = false;
+	float stereo_p = 0.0f;
+	if (direct)
+	{
+		stereo_capable = cfg.stereo && back::stereo_usable() && back::present_right_ready() && !cfg.calibrate && !cfg.g3a;
+		s_s.slider = kStereoSliderWired && stereo_capable ? back::stereo_slider(cfg) : 0.0f;
+		stereo_p = stereo_step(s_s.ramp, stereo_capable, s_s.slider, cfg.stereo_ramp);
+		stereo_frame = stereo_capable && (stereo_p > 0.0f || cfg.stereo_force);
+		if (stereo_frame && !back::stereo_is_3d())
+		{
+			// In 2D mode the right framebuffer is the left one: a right-target transfer would overwrite the left image.
+			++s_s.not3d;
+			stereo_frame = false;
+			stereo_abort();
+			stereo_p = 0.0f;
+		}
+	}
 
 	Rasterizer_SW_Class* swr = static_cast<Rasterizer_SW_Class*>(sw);
 	const uint16 s0 = texture_random_seed();
@@ -1037,6 +1111,12 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				seeded = true;
 			}
 			opt.sentinel = false;   // mode direct's readback copies every pixel and checks no sentinel (critic, M6 code minor 1)
+			opt.stereo = stereo_frame;
+			opt.P = stereo_pixels(stereo_p, cfg.stereo_k);
+			opt.w0 = static_cast<float>(cfg.stereo_w0);
+			opt.near = static_cast<float>(cfg.stereo_near) / 100.0f;
+			opt.fill = cfg.stereo_fill;
+			opt.clear_right = !s_s.prev;
 		}
 		if (direct && cfg.calibrate)
 		{
@@ -1051,6 +1131,12 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		else
 		{
 			vb = back::view_begin(w, h, 0, opt);
+			if (vb.kind == back::ViewBegin::Kind::Ok && stereo_frame && !vb.stereo)
+			{
+				// The right-eye objects could not be made (stereo is off for the run): this frame is flat.
+				stereo_frame = false;
+				stereo_abort();
+			}
 			if (vb.kind == back::ViewBegin::Kind::Ok)
 			{
 				s_play_rast.set_target(w, h);
@@ -1068,19 +1154,28 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	}
 	if (vb.kind == back::ViewBegin::Kind::Skipped)
 	{
+		if (stereo_capable)
+			stereo_abort();
 		++P.skip[static_cast<int>(vb.skip)];
 		discarded_replay(false);
 		return true;
 	}
 	if (vb.kind == back::ViewBegin::Kind::Discarded)
 	{
+		if (stereo_capable)
+			stereo_abort();
 		play_discard(vb.discard);
 		discarded_replay(true);
 		return true;
 	}
 	if (!ve.ok)
 	{
-		// (4) a discard: nothing was copied into dest.
+		// (4) a discard: nothing was copied into dest. M9: a discarded frame resets the ramp (a replay discard counts apart).
+		if (stereo_capable)
+		{
+			stereo_abort();
+			s_s.discards += stereo_frame;
+		}
 		play_discard(ve.discard);
 		discarded_replay(true);
 		return true;
@@ -1103,6 +1198,21 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			s_d.fade_static += s_d.fade_this == FadeKind::Static;
 			s_d.this_frame = true;
 			note_mode(-1);
+			// M9: the ramp's bookkeeping for a direct frame that was drawn; the composite draws two eyes iff stereo.
+			s_s.seen = s_s.seen || stereo_capable;
+			s_s.p_now = stereo_frame ? stereo_p : 0.0f;
+			s_s.P_now = stereo_frame ? stereo_pixels(stereo_p, cfg.stereo_k) : 0.0f;
+			if (s_s.p_now > s_s.p_max)
+				s_s.p_max = s_s.p_now;
+			if (stereo_frame)
+			{
+				++s_s.stereo;
+				s_s.cur = true;
+				back::stereo_frame_set(true);
+			}
+			else
+				++s_s.mono;
+			note_stereo(stereo_frame);
 			if (cfg.calibrate)
 				direct_forget_texture(s_d.st);   // it holds the calibration picture, not the view (critic, M6 code minor 5)
 		}
@@ -1136,6 +1246,14 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				s_d.fade_fold -= s_d.fade_this == FadeKind::Fold;
 				s_d.fade_static -= s_d.fade_this == FadeKind::Static;
 				--P.c3d;
+				// M9: a stereo decision turned into SW: the ramp restarts and the handed-over flag goes.
+				s_s.cur = false;
+				if (stereo_frame)
+					--s_s.stereo;
+				else
+					--s_s.mono;
+				stereo_abort();
+				s_s.seen = false;
 				++s_d.sw;
 				++s_d.reason[kReasonPlay];
 				note_mode(kReasonPlay);
@@ -1244,6 +1362,11 @@ void stats_tick()
 		char buf[1024];
 		direct_counts_text(buf, sizeof buf);
 		printf("[c3d] direct %s\n", buf);
+		if (s_s.stereo + s_s.mono)
+		{
+			stereo_counts_text(buf, sizeof buf);
+			printf("[c3d] stereo: %s\n", buf);
+		}
 	}
 	fflush(stdout);
 }
@@ -1343,6 +1466,11 @@ void frame_final_stats()
 		char buf[1024];
 		direct_counts_text(buf, sizeof buf);
 		printf("[c3d] direct final %s bottom_pending=%u\n", buf, overlay_bottom_pending());
+		if (s_s.stereo + s_s.mono)
+		{
+			stereo_counts_text(buf, sizeof buf);
+			printf("[c3d] stereo final: %s changes=%u discards=%u\n", buf, s_s.changes, s_s.discards);
+		}
 		fflush(stdout);
 	}
 }
@@ -1354,6 +1482,18 @@ void frame_final_stats()
 void direct_policy(unsigned blocks)
 {
 	const Config& cfg = frame_config();
+	// M9: frames that never reached a stereo-capable direct frame (map, terminal, SW, readback, menus, a discard) restart
+	// the ramp; the stereo flag handed to the composite belongs to one frame; the right-clear rule's "previous frame" is set.
+	if (!s_s.seen)
+	{
+		if (s_s.ramp.p > 0.0f)
+			++s_s.ramp_resets;
+		stereo_reset(s_s.ramp);
+	}
+	s_s.seen = false;
+	s_s.prev = s_s.cur;
+	s_s.cur = false;
+	back::stereo_frame_set(false);
 	// M6b: the fade belongs to this frame only (reset first), then the fit may clear kDirectGamma: the cleared mask is
 	// what is stored, counted and used for overlay_ok (design 7, M6b "Order in direct_policy").
 	back::fade_frame_set(nullptr);

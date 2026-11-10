@@ -10,7 +10,9 @@
 
 #include "a1_c3d.h"
 #include "context.h"
+#include "stereo.h"
 #include "../core/landscape.h"
+#include "../core/stereo.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -90,7 +92,9 @@ TexCache& texcache()
 		TexCacheConfig c;
 		c.linear_cap_kib = cfg.linear_cap;
 		// M6 g3a (test only): 9.1's M7 column, the pool capped at 2 048 KiB next to the 2 MiB view target.
-		c.vram_cap_kib = cfg.g3a && cfg.mode == Mode::Direct ? std::min(cfg.vram_cap, 2048u) : cfg.vram_cap;
+		// M9: 2 944 KiB when the right-eye objects are allocated (887 KiB of VRAM), else 3 584; an explicit vram_cap wins.
+		const unsigned vram_cap = stereo_vram_cap(cfg, stereo_objects_wanted());
+		c.vram_cap_kib = cfg.g3a && cfg.mode == Mode::Direct ? std::min(vram_cap, 2048u) : vram_cap;
 		c.promote_max = cfg.promote_max;
 		c.fail_every = cfg.fail_every;
 		s_cache = new TexCache(s_alloc, c);

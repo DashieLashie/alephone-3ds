@@ -22,6 +22,7 @@
 #include "../include/a1_c3d_port.h"
 #include "draw.h"
 #include "shade.h"
+#include "stereo.h"
 #include "texcache.h"
 #include "view.h"
 #include "../core/geometry.h"
@@ -133,7 +134,7 @@ void load_config()
 	       "two_frame %d, zero_copy %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
 	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
 	       "ring_indices %u, reserve_extra %u, textures %d, uv_half %d, diff_tol %u, vram_cap %u, "
-	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, overlays %u, direct_check %u, overlay_audit %u, seed_check %d, band_from_end %d, view_v_flip %d, g3a %d, sw_every %u, fallback %s, film \"%s\"\n",
+	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, overlays %u, direct_check %u, overlay_audit %u, seed_check %d, band_from_end %d, view_v_flip %d, g3a %d, sw_every %u, fallback %s, stereo %d, stereo_k %u, stereo_w0 %u, stereo_near %u, stereo_weapon %d, stereo_ramp %u, stereo_fill %d, stereo_slider %d, stereo_force %d, stereo_cal %d, stereo_check %u, stereo_gaps %d, stereo_fail %d, vram_cap_set %d, film \"%s\"\n",
 	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
 	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
 	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.zero_copy, s_cfg.renderer_c3d ? "c3d" : "sw",
@@ -142,7 +143,7 @@ void load_config()
 	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
 	       s_cfg.ring_vertices, s_cfg.ring_indices, s_cfg.reserve_extra, s_cfg.textures, s_cfg.uv_half,
 	       s_cfg.diff_tol, s_cfg.vram_cap, s_cfg.linear_cap, s_cfg.promote_max, s_cfg.lit, s_cfg.alpha_x2, s_cfg.play,
-	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.overlays, s_cfg.direct_check, s_cfg.overlay_audit, s_cfg.seed_check, s_cfg.band_from_end, s_cfg.view_v_flip, s_cfg.g3a, s_cfg.sw_every, s_cfg.fallback_sw ? "sw" : "readback", s_cfg.film.c_str());
+	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.overlays, s_cfg.direct_check, s_cfg.overlay_audit, s_cfg.seed_check, s_cfg.band_from_end, s_cfg.view_v_flip, s_cfg.g3a, s_cfg.sw_every, s_cfg.fallback_sw ? "sw" : "readback", s_cfg.stereo, s_cfg.stereo_k, s_cfg.stereo_w0, s_cfg.stereo_near, s_cfg.stereo_weapon, s_cfg.stereo_ramp, s_cfg.stereo_fill, s_cfg.stereo_slider, s_cfg.stereo_force, s_cfg.stereo_cal, s_cfg.stereo_check, s_cfg.stereo_gaps, s_cfg.stereo_fail, s_cfg.vram_cap_set, s_cfg.film.c_str());
 	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
 	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
 	// own atexit handlers, so it runs before close_outputs flushes the log.
@@ -390,6 +391,7 @@ void config_preference(bool gpu)
 		}
 		return;
 	}
+	const bool was_stereo = s_cfg.stereo;
 	if (config_apply_preference(s_cfg, gpu))
 	{
 		if (gpu)
@@ -397,6 +399,16 @@ void config_preference(bool gpu)
 		printf("[c3d] preference: Renderer %s\n", gpu ? "GPU (renderer c3d, mode direct, fallback sw)" : "Software");
 		fflush(stdout);
 	}
+	// M9: 3D mode follows enabled (a mode byte only; it takes effect at the next top swap). Before citro3d is up the
+	// objects are not decided yet: present_init reads cfg.stereo itself.
+	if (s_cfg.stereo != was_stereo && s_up)
+		stereo_follow(s_cfg);
+}
+
+bool config_has_file()
+{
+	load_config();
+	return s_cfg_file;
 }
 
 bool ensure_up()
@@ -556,8 +568,9 @@ void frame_end(int drawn_linked_targets, bool gate_was_closed, FrameKind kind)
 	const int total = s_gx.end_frame(drawn_linked_targets);
 	if (kind == FrameKind::Present && total > 4)
 		printf("[c3d] warning: %d GX queue entries in one present frame (design: <= 4)\n", total);
-	else if (kind == FrameKind::Composite && total > kMaxBandsForWarning + 2)
-		printf("[c3d] warning: %d GX queue entries in one composite frame (M6: <= %d)\n", total, kMaxBandsForWarning + 2);
+	else if (kind == FrameKind::Composite && total > kMaxBandsForWarning + 1 + drawn_linked_targets)
+		printf("[c3d] warning: %d GX queue entries in one composite frame (M6: <= %d, M9 with two eyes: <= 7)\n", total,
+		       kMaxBandsForWarning + 1 + drawn_linked_targets);
 	else if (kind == FrameKind::View && total > 27)
 		printf("[c3d] warning: %d GX queue entries in one view frame (design 2.4: <= 27)\n", total);
 	if (gate_was_closed)

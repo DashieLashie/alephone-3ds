@@ -33,6 +33,8 @@ const Config& config();
 // decision. Without a debug-c3d file it switches the configuration (config_apply_preference) and logs the change;
 // with the file it is ignored (logged once): the file decides, so every test and runbook keeps working.
 void config_preference(bool gpu);
+// M9: a debug-c3d file was found (the Renderer preference is then ignored, and stereo is allocated by the file's key).
+bool config_has_file();
 
 // --- the frame, and the GX queue budget (design 2.4) ---
 
@@ -61,7 +63,7 @@ FrameStart frame_begin(FrameZone zone = FrameZone::Wait);
 // What a frame is, for the queue warning of frame_end(): a present (design: <= 4 entries) or an M0
 // view frame (back/view.cpp: the calibration frame, whose readback transfer is queued inside it and
 // counted by gx_op; design 2.4: <= 27).
-// M6: Composite = a direct frame's present (band uploads + end + 1 linked: <= 6).
+// M6: Composite = a direct frame's present (band uploads + end + 1 linked: <= 6; M9: a stereo one, 2 linked: <= 7).
 enum class FrameKind { Present, View, Composite };
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) with the queue accounting of the frame closed.
 // `gate_was_closed`: the gate condition held when the present began (diagnostic d2).
@@ -168,6 +170,15 @@ bool present_init();       // after C3D_Init: target, texture, shader, buffers
 void present_detach();     // before C3D_Fini: unlink the screen target
 void present_free();       // after C3D_Fini: texture, shader, buffers
 uint32_t present_counter();
+
+// --- M9 (design 7, "M9 specification"); defined in present.cpp ---
+// This frame's view was drawn for two eyes: the next composite draws two. direct_policy clears it first every frame (as
+// the fade); the composite consumes it.
+void stereo_frame_set(bool stereo);
+// The right screen target exists (linked to GFX_TOP / GFX_RIGHT).
+bool present_right_ready();
+// Stereo is off for the run for want of VRAM (view_ensure, out of frame): the right screen target is detached and deleted.
+void present_stereo_drop();
 
 // --- M6b (design 7, M6b specification "The mechanism", "Lifetime"); defined in present.cpp ---
 // This frame's fade, handed from hook 3a (front/frame.cpp) to the composite: copied; nullptr clears it. direct_policy

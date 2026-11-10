@@ -37,6 +37,14 @@ C3D_RenderTarget* view_target();
 // target is such a texture target; view_texture() is its texture (nullptr otherwise).
 bool view_is_texture();
 C3D_Tex* view_texture();
+// M9: the right eye's view target and texture (made with the first when stereo is allocated; nullptr otherwise or once
+// stereo is off for the run for want of VRAM). Never seeded or read back. view_right_take_fresh(): the target was just
+// created, or the view's size changed since the last call (the next stereo frame clears it); clears the flag.
+C3D_RenderTarget* view_target_right();
+C3D_Tex* view_texture_right();
+bool view_right_take_fresh();
+// gx_op: clears the right target to `rgba` (0xRRGGBBAA), like view_clear_target (same rule: right after frame_begin).
+bool view_clear_target_right(uint32_t rgba);
 // False once a texture target could not be made (logged once): direct frames are off for the run.
 bool view_direct_ok();
 // The projection's extent in pixels: the whole target for a texture target (512x256; g3a draws at 2x into its

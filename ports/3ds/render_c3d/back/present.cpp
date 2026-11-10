@@ -36,9 +36,11 @@
 #include "context.h"
 #include "overlay.h"
 #include "shade.h"
+#include "stereo.h"
 #include "view_shared.h"
 
 #include "../core/noise.h"
+#include "../core/stereo.h"
 
 #include "../include/a1_c3d_port.h"
 #include "a1_3ds_platform.h"
@@ -111,6 +113,7 @@ constexpr u32 kUploadTransferFlags =
 struct Vertex { float x, y, z, u, v; };
 
 C3D_RenderTarget* s_target = nullptr;
+C3D_RenderTarget* s_target_r = nullptr;   // M9: the right eye, linked to GFX_TOP / GFX_RIGHT; drawn on stereo frames only
 C3D_Tex s_tex;
 bool s_tex_ready = false;
 DVLB_s* s_dvlb = nullptr;
@@ -144,7 +147,13 @@ struct CompositeCounters
 	unsigned fade_checks = 0, fade_bad = 0, fade_max = 0, fade_unchecked = 0;
 	unsigned long long fade_quirk_px = 0;
 	double fade_min_within2 = 100.0;
+	// M9: composites with two eyes; stereo_check: right framebuffer against the left, bad ones (RGB differences, 2D mode or
+	// one buffer for both eyes), RGB-different pixels over all checks, alpha-only differences, checks not made
+	unsigned stereo_composites = 0, stereo_checks = 0, stereo_check_bad = 0, stereo_check_skipped = 0;
+	unsigned long long stereo_diff_px = 0, stereo_alpha_px = 0;
 } s_cn;
+// M9: this frame's view was drawn for two eyes (stereo_frame_set), consumed by the composite.
+bool s_stereo_set = false;
 // M6b: this frame's fade (fade_frame_set), consumed by the composite.
 FadeFrame s_fade;
 bool s_fade_set = false;
@@ -771,16 +780,95 @@ void direct_check_compare(const u32* fb, const uint32_t* view, const Band* bands
 	       fade ? " " : "", fade ? fade_kind_name(fade->fit.kind) : "", quirk);
 }
 
+// What one eye's composite draws (the quads were written once by present_composite).
+struct CompositeJob
+{
+	int nb;                     // overlay bands
+	FadeKind fkind;             // the frame's fade (M6b)
+	const FadeRange* ranges;    // part 2's row ranges
+	int nr;
+	C3D_Tex* otex;              // the overlay texture
+	C3D_Tex* noise;             // part 3's noise texture
+	bool flip;                  // view_v_flip
+};
+
+// M9 (design 7, "M9 specification", "The composite"): one eye of a direct frame's composite, from the full state block to
+// the end of the fade passes: the present's draw state, the target, the projection, the view texture, the view quad, the
+// bands, the fade. It starts from every piece of state the previous eye may have left (the band blend, a fade's blend,
+// TEV stages and alpha test, the fold's unit 1 and the t1map uniform), because for the second eye it is called with the
+// first eye's leftovers: set_present_draw sets stage 0 and the colour mask in full, the block below the rest, and
+// draw_fade_*() restore stages 1-3, unit 1, the alpha test, the blend and the blend colour (0) at their ends.
+void composite_eye(C3D_RenderTarget* target, C3D_Tex* vtex, const CompositeJob& job)
+{
+	set_present_draw(Swizzle::Plain);
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_FrameDrawOn(target);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
+	__real_C3D_TexBind(0, vtex);
+	C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+	if (job.nb)
+	{
+		__real_C3D_TexBind(0, job.otex);
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE,
+		               GPU_ONE_MINUS_SRC_ALPHA);
+		for (int i = 0; i < job.nb; ++i)
+			C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * (1 + i), 4);
+		s_cn.band_quads += job.nb;
+	}
+	// M6b: the fade after the overlays (SW applies the curves to the crosshair and the text too).
+	if (job.fkind == FadeKind::Affine && !fade_affine_is_identity(s_fade.fit))
+		draw_fade_affine(s_fade.fit);
+	else if (job.fkind == FadeKind::Fold)
+		draw_fade_fold(s_fade.fit, vtex, job.otex, job.ranges, job.nr, job.nb, job.flip);
+	else if (job.fkind == FadeKind::Static && job.noise)
+		draw_fade_static(s_fade.fit, job.noise);
+}
+
+// stereo_check (test only): the right framebuffer against the left, pixel for pixel in RGB (the LCD ignores A; alpha-only
+// differences are counted apart). Also the two things that make the comparison mean something: 3D mode is on, and the two
+// eyes' buffers are not the same buffer (in 2D mode libctru returns the left buffer for both: gfxGetFramebuffer+0x28-0x34).
+void stereo_check_compare(const u32* fl, const u32* fr, bool is3d)
+{
+	GSPGPU_InvalidateDataCache(fl, kFbPixels * sizeof(u32));
+	GSPGPU_InvalidateDataCache(fr, kFbPixels * sizeof(u32));
+	unsigned differ = 0, alpha_only = 0;
+	const bool distinct = fl != fr;
+	for (size_t i = 0; i < kFbPixels; ++i)
+	{
+		const u32 a = fl[i], b = fr[i];
+		if (a == b)
+			continue;
+		if ((a ^ b) & 0xFFFFFF00u)
+			++differ;
+		else
+			++alpha_only;
+	}
+	++s_cn.stereo_checks;
+	s_cn.stereo_diff_px += differ;
+	s_cn.stereo_alpha_px += alpha_only;
+	const bool bad = differ || !is3d || !distinct;
+	s_cn.stereo_check_bad += bad;
+	printf("[c3d] stereo_check: present %u: differ=%u alpha_only=%u is3d=%d distinct=%d%s\n", s_present, differ, alpha_only,
+	       is3d ? 1 : 0, distinct ? 1 : 0, bad ? " BAD" : "");
+}
+
 // M6 (design 7, M6 specification "The composite frame"): a direct frame's present. One C3D frame: the band uploads, the
 // view quad (view texture, ONE/ZERO), one quad per band (overlay texture, ONE/ONE_MINUS_SRC_ALPHA), the restore, the
 // VBlank guard, C3D_FrameEnd. No staging fill, no upload of main_surface.
 bool present_composite(const Config& cfg, unsigned n, bool trace)
 {
 	C3D_Tex* const vtex = view_texture();
+	C3D_Tex* const vtex_r = view_texture_right();
 	C3D_Tex* const otex = overlay_texture();
 	// M6b: this frame's fade, consumed whatever happens below.
 	const bool fade = s_fade_set;
 	s_fade_set = false;
+	// M9: this frame's view was drawn for two eyes (and the right-eye objects exist): two eyes, else today's frame.
+	const bool stereo = s_stereo_set && s_target_r && vtex_r;
+	s_stereo_set = false;
 	switch (begin_present_frame(FrameZone::Wait))   // the view frame's GPU time not hidden by the CPU: c3d_wait
 	{
 	case Begin::Ok:
@@ -878,31 +966,12 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		BufInfo_Add(&s_cbuf, s_cvbo, sizeof(Vertex), 2, 0x10);
 		C3D_SetBufInfo(&s_cbuf);
 
-		set_present_draw(Swizzle::Plain);
-		C3D_CullFace(GPU_CULL_NONE);
-		C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
-		C3D_AlphaTest(false, GPU_ALWAYS, 0);
-		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-		C3D_FrameDrawOn(s_target);
-		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_projection, &s_projection);
-		__real_C3D_TexBind(0, vtex);
-		C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
-		if (nb)
-		{
-			__real_C3D_TexBind(0, otex);
-			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE,
-			               GPU_ONE_MINUS_SRC_ALPHA);
-			for (int i = 0; i < nb; ++i)
-				C3D_DrawArrays(GPU_TRIANGLE_STRIP, 4 * (1 + i), 4);
-			s_cn.band_quads += nb;
-		}
-		// M6b: the fade after the overlays (SW applies the curves to the crosshair and the text too).
-		if (fkind == FadeKind::Affine && !fade_affine_is_identity(s_fade.fit))
-			draw_fade_affine(s_fade.fit);
-		else if (fkind == FadeKind::Fold)
-			draw_fade_fold(s_fade.fit, vtex, otex, ranges, nr, nb, cfg.view_v_flip);
-		else if (fkind == FadeKind::Static && noise)
-			draw_fade_static(s_fade.fit, noise);
+		// M9: each eye is the same composite from its own view texture into its own linked target ("overlays at zero
+		// parallax": the same quads, the same bands, the same fade).
+		CompositeJob job{nb, fkind, ranges, nr, otex, noise, cfg.view_v_flip};
+		composite_eye(s_target, vtex, job);
+		if (stereo)
+			composite_eye(s_target_r, vtex_r, job);
 		// The restore: the present's texture (the record), its buffer info, the plain blend.
 		__real_C3D_TexBind(0, static_cast<C3D_Tex*>(tex_recorded()));
 		C3D_SetBufInfo(&s_saved_cbuf);
@@ -926,8 +995,25 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		if (fb_w != kScreenH || fb_h != kScreenW)
 			check_fb = nullptr;
 	}
-	frame_end(1, trace, FrameKind::Composite);
+	// stereo_check (test only): both eyes' framebuffers, taken like the left one's above, before C3D_FrameEnd (the
+	// transfers' destinations; the swap comes after).
+	const bool scheck = stereo && cfg.stereo_check && (s_cn.stereo_composites + 1) % cfg.stereo_check == 0;
+	const u32* scheck_l = nullptr;
+	const u32* scheck_r = nullptr;
+	bool scheck_3d = false;
+	if (scheck)
+	{
+		u16 lw = 0, lh = 0, rw = 0, rh = 0;
+		scheck_3d = stereo_is_3d();
+		scheck_l = reinterpret_cast<const u32*>(gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &lw, &lh));
+		scheck_r = reinterpret_cast<const u32*>(gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &rw, &rh));
+		if (lw != kScreenH || lh != kScreenW || rw != kScreenH || rh != kScreenW)
+			scheck_l = scheck_r = nullptr;
+	}
+	frame_end(stereo ? 2 : 1, trace, FrameKind::Composite);
 	++s_cn.composites;
+	s_cn.stereo_composites += stereo;
+	bool retired = false;   // a test frame has begun after the composite: its queue entry has retired
 	if (check)
 	{
 		// Test only, after the composite and in frames of its own (so the composite is the same with or without the check,
@@ -953,6 +1039,20 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		if (!done)
 			++s_cn.check_skipped;
 	}
+	if (scheck)
+	{
+		// Test only: an empty frame retires the composite (unless direct_check's frames above did), then the compare.
+		if (!retired && !(cfg.suspend_gate && gate_closed()) && frame_begin(FrameZone::Wait) == FrameStart::Ok)
+		{
+			frame_end(0, false, FrameKind::View);
+			note_view_frame();
+			retired = true;
+		}
+		if (retired && scheck_l && scheck_r)
+			stereo_check_compare(scheck_l, scheck_r, scheck_3d);
+		else
+			++s_cn.stereo_check_skipped;
+	}
 	bool burst = false;
 	for (unsigned first : {120u, 600u, 1200u, 1800u})
 		burst = burst || (n >= first && n < first + 6);
@@ -973,6 +1073,26 @@ void fade_frame_set(const FadeFrame* frame)
 	s_fade_set = frame != nullptr;
 	if (frame)
 		s_fade = *frame;
+}
+
+void stereo_frame_set(bool stereo)
+{
+	s_stereo_set = stereo;
+}
+
+bool present_right_ready()
+{
+	return s_target_r != nullptr;
+}
+
+void present_stereo_drop()
+{
+	// Out of frame (view_ensure): the right screen target goes, so no VRAM is left to a stereo that is off for the run.
+	if (!s_target_r)
+		return;
+	C3D_RenderTargetDetachOutput(s_target_r);
+	C3D_RenderTargetDelete(s_target_r);   // renderqueue.h:64; unlinked now, so it waits for the queue itself
+	s_target_r = nullptr;
 }
 
 bool present_close_frame()
@@ -1015,6 +1135,11 @@ bool present_init()
 	memset(s_staging, 0, kStagingBytes);
 	GSPGPU_FlushDataCache(s_staging, kStagingBytes);
 
+	// M9 (design 7, "M9 specification", "Right-eye objects and 3D mode"): 3D mode before the targets (the example's order,
+	// stereoscopic_2d/source/main.cpp:27-37), then the right screen target exactly as the left, whatever the mode byte is
+	// then. It is drawn only on stereo frames.
+	const bool stereo_wanted = stereo_begin(config(), config_has_file());
+
 	s_target = C3D_RenderTargetCreate(kScreenH, kScreenW, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
 	if (!s_target)
 	{
@@ -1022,6 +1147,15 @@ bool present_init()
 		return false;
 	}
 	C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT, kTargetTransferFlags);
+
+	if (stereo_wanted)
+	{
+		s_target_r = C3D_RenderTargetCreate(kScreenH, kScreenW, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
+		if (s_target_r)
+			C3D_RenderTargetSetOutput(s_target_r, GFX_TOP, GFX_RIGHT, kTargetTransferFlags);
+		else
+			stereo_turn_off(StereoOff::Vram);   // "[c3d] stereo: off for the run (vram)"; the left target is untouched
+	}
 
 	if (!C3D_TexInitVRAM(&s_tex, kTexW, kTexH, GPU_RGBA8))
 	{
@@ -1072,14 +1206,18 @@ bool present_init()
 void present_detach()
 {
 	s_vram_free_at_exit = vramSpaceFree();   // the targets and textures still allocated (G3-a)
+	if (s_target_r)
+		C3D_RenderTargetDetachOutput(s_target_r);
 	if (s_target)
 		C3D_RenderTargetDetachOutput(s_target);
+	stereo_end();   // 2D mode again: SDL's present, the fatal screen and whatever follows citro3d
 }
 
 void present_free()
 {
-	// The target is destroyed by C3D_Fini (every target of the context is).
+	// The targets are destroyed by C3D_Fini (every target of the context is).
 	s_target = nullptr;
+	s_target_r = nullptr;
 	if (s_program_ready)
 		shaderProgramFree(&s_program);
 	s_program_ready = false;
@@ -1099,12 +1237,16 @@ void present_free()
 		printf("[c3d] composite final: composites=%u band_quads=%u present_diff_not_checkable=%u audits=%u leaks=%u "
 		       "direct_checks=%u bad=%u big=%u skipped=%u min_within=%.3f%% max R %u G %u B %u bottom_pending=%u "
 		       "vram_free_kib=%lu fade_quads=%u fade_passes=%u fade_noise=%u fade_restores=%u fade_checks=%u fade_bad=%u "
-		       "fade_min_within_2=%.3f%% fade_max=%u fade_unchecked=%u fade_quirk_px=%llu (at exit, before the release)\n",
+		       "fade_min_within_2=%.3f%% fade_max=%u fade_unchecked=%u fade_quirk_px=%llu stereo_composites=%u "
+		       "stereo_checks=%u stereo_check_bad=%u stereo_check_skipped=%u stereo_diff_px=%llu stereo_alpha_px=%llu "
+		       "(at exit, before the release)\n",
 		       s_cn.composites, s_cn.band_quads, s_cn.not_checkable, s_cn.audits, s_cn.leaks, s_cn.checks, s_cn.check_bad,
 		       s_cn.check_big, s_cn.check_skipped, s_cn.check_min_within, s_cn.check_max[0], s_cn.check_max[1],
 		       s_cn.check_max[2], overlay_bottom_pending(), static_cast<unsigned long>(s_vram_free_at_exit / 1024),
 		       s_cn.fade_quads, s_cn.fade_passes, s_cn.fade_noise, s_cn.fade_restores, s_cn.fade_checks, s_cn.fade_bad,
-		       s_cn.fade_min_within2, s_cn.fade_max, s_cn.fade_unchecked, s_cn.fade_quirk_px);
+		       s_cn.fade_min_within2, s_cn.fade_max, s_cn.fade_unchecked, s_cn.fade_quirk_px, s_cn.stereo_composites,
+		       s_cn.stereo_checks, s_cn.stereo_check_bad, s_cn.stereo_check_skipped, s_cn.stereo_diff_px,
+		       s_cn.stereo_alpha_px);
 	free(s_check_ref);
 	s_check_ref = nullptr;
 	if (s_staging)

@@ -46,6 +46,7 @@ struct ViewBegin
 	SkipReason skip;        // Skipped
 	DiscardReason discard;  // Discarded (frame_begin or C3D_FrameDrawOn failed, or the GX budget refused the clear:
 	                        // the frame is already closed)
+	bool stereo = false;    // M9, Ok: the frame was begun for two eyes (ViewOptions::stereo, and the right-eye objects exist)
 };
 
 // Starts one C3D view frame for a w x h view (the harness's replay of one recording): the gates and the
@@ -57,11 +58,21 @@ struct ViewBegin
 // texture target); `seed_rows` (dest's row addresses, w x h ARGB) = the target is first seeded from them (the frame's
 // first GX operation); `sentinel` false = no sentinel fill of the staging (a direct frame reads nothing back; a seeded one
 // holds the seed there).
+// M9 (design 7, "M9 specification"; direct frames only): `stereo` = a frame for two eyes. P is the parallax strength in
+// pixels (0 allowed), w0 the convergence depth, near the pop-out limit; `fill` = each eye is drawn unshifted first, then
+// shifted (4 passes), else shifted only (2). The first pass is the streamed one (the left eye); the others replay the draw
+// list in view_end_direct. `clear_right`: the right texture is cleared to opaque black first (the previous world frame
+// was not a stereo frame); a just-created one is cleared whatever this says. View_begin turns `stereo` off when the
+// right-eye objects do not exist (ViewBegin::stereo says what it did).
 struct ViewOptions
 {
 	bool clear = true;
 	const uint8_t* const* seed_rows = nullptr;
 	bool sentinel = true;
+	bool stereo = false;
+	float P = 0.0f, w0 = 1024.0f, near = 1.0f;
+	bool fill = true;
+	bool clear_right = false;
 };
 ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0, const ViewOptions& opt = ViewOptions());
 // The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
@@ -124,6 +135,8 @@ void draw_free();
 
 // For the "[c3d] cmdbuf ..." line (context.cpp): the counters of this file as text.
 int draw_stats_text(char* buf, size_t size);
+// M9: this file's share of the "[c3d] stereo:" lines (passes, recs_max, replay_discards, r_clears).
+int draw_stereo_text(char* buf, size_t size);
 
 } // namespace back
 } // namespace a1_c3d

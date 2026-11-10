@@ -153,6 +153,20 @@
 	  fade_tol N        0..32, default 2: the fit's tolerance in 8-bit steps
 	  fade_parts N      0..7, default 7; test only: the parts that may classify the curves (1 affine, 2 fold, 4 static)
 
+	Keys of M9 (design 7, M9 specification "Parameters and keys"; stereo 3D in mode direct):
+	  stereo 0|1        default 0 in a file; without a file the Renderer preference sets it (GPU = 1). The right-eye
+	                    objects exist from present_init when it is 1 (file) or there is no file (core/stereo.h)
+	  stereo_k N        0..512, default 96: K = N/16 pixels per eye at slider 1 (console-tuned)
+	  stereo_w0 N       64..32767, default 1024: the convergence depth w0 (1024 = 1 WU)
+	  stereo_near N     0..400, default 100: near = N/100, the limit of the pop-out
+	  stereo_weapon N   -100..100, default -50: the weapon's parallax as N/100 of P (negative = in front of the screen)
+	  stereo_ramp N     1..600, default 15: the ramp's length in frames (full range)
+	  stereo_fill 0|1   default 1: each eye is drawn unshifted first, then shifted (4 view passes); 0 = shifted only
+	  test only: stereo_slider N (-1 = the hardware slider, default; 0..100 = that percentage), stereo_force 0|1 (every
+	  direct frame takes the stereo path even at strength 0), stereo_check N (every N-th stereo composite compares the
+	  right framebuffer with the left), stereo_fail 0|1 (the second view texture's allocation fails), stereo_cal 0|1 and
+	  stereo_gaps 0|1 (M9 part 2: parsed, no effect yet)
+
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation; either version 3 of the License, or
@@ -236,6 +250,22 @@ struct Config
 	bool fades = true;
 	unsigned fade_tol = 2;
 	unsigned fade_parts = 7;                // test only: FadePart bits (core/fade_fit.h)
+	// M2 (set by the parser when the key is read: core/stereo.h stereo_vram_cap)
+	bool vram_cap_set = false;
+	// M9
+	bool stereo = false;
+	unsigned stereo_k = 96;                 // K = stereo_k / 16 pixels
+	unsigned stereo_w0 = 1024;
+	unsigned stereo_near = 100;             // near = stereo_near / 100
+	int stereo_weapon = -50;                // t = stereo_weapon / 100
+	unsigned stereo_ramp = 15;
+	bool stereo_fill = true;
+	int stereo_slider = -1;                 // test only: -1 = the hardware slider
+	bool stereo_force = false;              // test only
+	bool stereo_cal = false;                // test only (M9 part 2)
+	unsigned stereo_check = 0;              // test only
+	bool stereo_gaps = false;               // test only (M9 part 2)
+	bool stereo_fail = false;               // test only
 };
 
 // Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
@@ -245,8 +275,8 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 void config_parse(Config& cfg, const std::string& text, std::vector<std::string>& problems);
 
 // M8: the Renderer preference over a configuration without a debug-c3d file. gpu: renderer c3d, mode direct, fallback
-// sw (every other key keeps its default). !gpu: renderer sw; mode and fallback stay, so a view target of mode direct is
-// not re-created by a later switch back. Returns whether renderer_c3d changed.
+// sw (every other key keeps its default); M9: stereo follows gpu. !gpu: renderer sw; mode and fallback stay, so a view target of mode direct is
+// not re-created by a later switch back. Returns whether renderer_c3d changed (stereo changes with it).
 bool config_apply_preference(Config& cfg, bool gpu);
 
 } // namespace a1_c3d

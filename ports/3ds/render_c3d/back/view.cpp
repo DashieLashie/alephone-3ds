@@ -36,6 +36,7 @@ staging, readback and conversion are the shared functions of view_shared.h, used
 #include "view.h"
 
 #include "context.h"
+#include "stereo.h"
 #include "view_shared.h"
 #include "../core/calibrate.h"
 #include "../core/config.h"
@@ -93,6 +94,13 @@ C3D_Tex s_vtex;
 bool s_vtex_ready = false;
 bool s_is_tex = false;
 int s_tw = 0, s_th = 0, s_sw = 0, s_sh = 0;
+// M9 (design 7, "M9 specification", "Right-eye objects and 3D mode", "The view textures stay"): the right eye's view texture
+// and target, made with the left whenever it is made in mode direct and stereo is allocated. Never read back or seeded.
+C3D_Tex s_vtex_r;
+bool s_vtex_r_ready = false;
+C3D_RenderTarget* s_target_r = nullptr;
+bool s_right_fresh = false;             // just created, or the view's size changed: the next stereo frame clears it
+bool s_logged_keep_refused = false;
 bool s_tex_failed = false;              // a texture target could not be made: logged once, not retried
 u32* s_staging = nullptr;               // linear, sw*sh*4 bytes
 uint32_t* s_argb = nullptr;             // malloc, w*h: the converted readback handed to the caller
@@ -123,8 +131,20 @@ inline u32 tev_constant(uint32_t argb)
 }
 
 // Deletes the target (out of frame: C3D_RenderTargetDelete panics inside one) and, for a texture target, its texture.
+void delete_right()
+{
+	if (s_target_r)
+		C3D_RenderTargetDelete(s_target_r);   // never linked
+	s_target_r = nullptr;
+	if (s_vtex_r_ready)
+		C3D_TexDelete(&s_vtex_r);
+	s_vtex_r_ready = false;
+	s_right_fresh = false;
+}
+
 void delete_target()
 {
+	delete_right();
 	if (s_target)
 		C3D_RenderTargetDelete(s_target);   // renderqueue.h:63; never linked, so no output to detach
 	s_target = nullptr;
@@ -222,6 +242,29 @@ bool view_ensure(int w, int h)
 	const bool g3a = want_tex && config().g3a;
 	if (s_target && s_w == w && s_h == h && s_is_tex == want_tex)
 		return true;
+	// M9 "The view textures stay": a texture target again, of the same texture size: both textures and targets are kept (a
+	// late 512 KiB allocation, twice with stereo, may not be contiguous once the pool has filled); only the viewport
+	// changes, the right texture is cleared as just created, and s_argb was made for 512x256 once.
+	if (s_target && s_is_tex && want_tex && s_tw == (g3a ? 1024 : 512) && s_th == (g3a ? 512 : 256))
+	{
+		printf("[c3d] view: %dx%d -> %dx%d, the texture targets are kept\n", s_w, s_h, w, h);
+		fflush(stdout);
+		s_w = w;
+		s_h = h;
+		s_right_fresh = s_target_r != nullptr;
+		return true;
+	}
+	// With the right-eye objects allocated a view that does not fit is drawn by SW (the front end's stereo_size) and never
+	// deletes the textures; this refusal is the guard for a caller that did not ask (readback calibration in mode direct).
+	if (s_target && s_is_tex && !want_tex && stereo_objects_wanted())
+	{
+		if (!s_logged_keep_refused)
+		{
+			s_logged_keep_refused = true;
+			printf("[c3d] view: %dx%d does not fit the texture targets, which stay (stereo): refused\n", w, h);
+		}
+		return false;
+	}
 	if (s_target)
 	{
 		delete_target();
@@ -249,12 +292,36 @@ bool view_ensure(int w, int h)
 			return view_ensure(w, h);
 		}
 		s_is_tex = true;
+		// M9: the right eye's texture and target, exactly as the first. A failure gives stereo up for the run and frees
+		// whichever of the right-eye objects was made; direct mode itself is untouched.
+		if (!g3a && stereo_objects_wanted())
+		{
+			if (!config().stereo_fail)
+				s_vtex_r_ready = C3D_TexInitVRAM(&s_vtex_r, tw, th, GPU_RGBA8);
+			if (s_vtex_r_ready)
+			{
+				C3D_TexSetFilter(&s_vtex_r, GPU_NEAREST, GPU_NEAREST);
+				C3D_TexSetWrap(&s_vtex_r, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+				s_target_r = C3D_RenderTargetCreateFromTex(&s_vtex_r, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(-1));
+			}
+			if (!s_target_r)
+			{
+				delete_right();
+				present_stereo_drop();
+				stereo_turn_off(StereoOff::Vram);
+			}
+			else
+				s_right_fresh = true;
+		}
+		else if (g3a && stereo_objects_wanted())
+			stereo_turn_off(StereoOff::G3a);
 	}
 	else
 		// renderqueue.h:62; C3D_DEPTHTYPE(-1) = no depth buffer, as present.cpp. Never SetOutput.
 		s_target = C3D_RenderTargetCreate(w, h, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
 	const size_t staging_bytes = static_cast<size_t>(sw) * sh * sizeof(u32);
-	const size_t bytes = static_cast<size_t>(w) * h * sizeof(u32);
+	// M9: the converted readback of a texture target is made once for 512x256, so a larger view cannot overflow it.
+	const size_t bytes = want_tex ? static_cast<size_t>(512) * 256 * sizeof(u32) : static_cast<size_t>(w) * h * sizeof(u32);
 	s_staging = static_cast<u32*>(linearAlloc(staging_bytes));
 	s_argb = static_cast<uint32_t*>(malloc(bytes));
 	if (!s_vbo)
@@ -286,8 +353,9 @@ bool view_ensure(int w, int h)
 		s_uloc_known = true;
 	}
 	if (s_is_tex)
-		printf("[c3d] view: %dx%d view on a %dx%d VRAM texture target, readback staging %dx%d (%lu KiB), projection "
-		       "uniform %d\n", w, h, tw, th, sw, sh, static_cast<unsigned long>(staging_bytes / 1024), s_uloc_projection);
+		printf("[c3d] view: %dx%d view on a %dx%d VRAM texture target%s, readback staging %dx%d (%lu KiB), projection "
+		       "uniform %d\n", w, h, tw, th, s_target_r ? " (+ the right eye's)" : "", sw, sh,
+		       static_cast<unsigned long>(staging_bytes / 1024), s_uloc_projection);
 	else
 		printf("[c3d] view: %dx%d unlinked RGBA8 target, readback staging %lu KiB, projection uniform %d\n", w, h,
 		       static_cast<unsigned long>(staging_bytes / 1024), s_uloc_projection);
@@ -303,6 +371,23 @@ bool view_is_texture()
 C3D_Tex* view_texture()
 {
 	return s_target && s_is_tex ? &s_vtex : nullptr;
+}
+
+C3D_RenderTarget* view_target_right()
+{
+	return s_target && s_is_tex ? s_target_r : nullptr;
+}
+
+C3D_Tex* view_texture_right()
+{
+	return s_target && s_is_tex && s_target_r ? &s_vtex_r : nullptr;
+}
+
+bool view_right_take_fresh()
+{
+	const bool fresh = s_right_fresh;
+	s_right_fresh = false;
+	return fresh;
 }
 
 bool view_direct_ok()
@@ -377,6 +462,20 @@ bool view_clear_target(uint32_t rgba)
 {
 	// renderqueue.h:72; one GX queue entry, counted by gx_op.
 	if (gx_op([&] { C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, rgba, 0); }))
+		return true;
+	if (!s_logged_gx)
+	{
+		s_logged_gx = true;
+		printf("[c3d] GX budget: view clear refused\n");
+	}
+	return false;
+}
+
+bool view_clear_target_right(uint32_t rgba)
+{
+	if (!s_target_r)
+		return false;
+	if (gx_op([&] { C3D_RenderTargetClear(s_target_r, C3D_CLEAR_COLOR, rgba, 0); }))
 		return true;
 	if (!s_logged_gx)
 	{
@@ -662,9 +761,14 @@ void view_free()
 	// C3D_Fini destroyed the target with the rest of the context (as present_free notes), but not the texture under a
 	// texture target (C3D_TexDelete: vramFree, no citro3d context needed).
 	s_target = nullptr;
+	s_target_r = nullptr;
 	if (s_vtex_ready)
 		C3D_TexDelete(&s_vtex);
 	s_vtex_ready = false;
+	if (s_vtex_r_ready)
+		C3D_TexDelete(&s_vtex_r);
+	s_vtex_r_ready = false;
+	s_right_fresh = false;
 	s_is_tex = false;
 	s_tex_failed = false;
 	s_w = s_h = s_tw = s_th = s_sw = s_sh = 0;

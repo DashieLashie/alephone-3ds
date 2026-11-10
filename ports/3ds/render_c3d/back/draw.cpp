@@ -25,6 +25,7 @@
 
 #include "context.h"
 #include "shade.h"
+#include "stereo.h"
 #include "view_shared.h"
 #include "../core/calibrate.h"
 #include "../core/noise.h"
@@ -96,6 +97,9 @@ struct Frame
 	unsigned blend = 0;                // M4: 0 = 2.4's world blend; 0x100 | c = the tinted blend with constant c
 	bool tinted_used = false;          // M4: the tinted blend was set this frame (restore_state puts the world's back)
 	unsigned mode = 0;                 // M5: 0 = Lit (M3's TEV, the LUT on unit 1); 0x10000 | masked << 8 | ref = Static
+	bool stereo = false;               // M9: a frame for two eyes
+	float eye_w0 = 1024.0f, eye_near = 1.0f, eye_p = 0.0f;
+	bool fill = true;
 	uint32_t sentinel_argb = 0;
 	int w = 0, h = 0;
 	int half = 0;
@@ -119,7 +123,24 @@ struct Counters
 	unsigned blend_sets = 0, blend_restores = 0;   // M4: tinted/world blend switches between draws; restores
 	unsigned static_sets = 0, static_restores = 0, static_frames_ended = 0;   // M5: Lit/Static switches
 	unsigned direct_frames = 0, seeds = 0, syncs = 0, seed_checks = 0;   // M6
+	// M9: view frames begun for two eyes, passes drawn (all, the streamed one included), replayed draws, the draw list's
+	// high-water mark, replay discards by reason, right-texture clears
+	unsigned stereo_frames = 0, passes = 0, replay_draws = 0, recs_max = 0, recs_cap = 0, r_clears = 0;
+	unsigned replay_discards[static_cast<int>(DiscardReason::kCount)] = {};
 } s_n;
+
+// M9 "The draw list and the passes": one record per issued draw, appended by issue_pending on every frame; the other
+// passes of a stereo frame replay it. uint32_t: ring_indices may be 65 536. The record is sufficient: the LUT, the noise
+// texture, TEV, unit 1 and the alpha test are per frame or rebuilt from `mode`, and the ring half is not rewritten before
+// C3D_FrameEnd.
+struct DrawRec
+{
+	uint32_t first, count;
+	void* tex;           // the texture bound on unit 0 for the draw, or null (none bound yet: unmasked static, textures 0)
+	unsigned blend, mode;
+};
+DrawRec* s_recs = nullptr;   // malloc, capacity ring_indices / 3 (a draw has at least 3 indices: the list cannot fill first)
+unsigned s_recs_cap = 0, s_nrecs = 0;
 
 // --- helpers ---
 
@@ -169,6 +190,9 @@ bool world_init()
 	AttrInfo_AddLoader(&s_attr, 3, GPU_UNSIGNED_BYTE, 4);
 	printf("[c3d] draw: world program %s (uniforms proj %d, stereo %d)\n", s_uloc_proj >= 0 ? "ready" : "unusable",
 	       s_uloc_proj, s_uloc_stereo);
+	// M9: no stereo uniform, no stereo frames (the right-eye objects stay allocated and are never drawn).
+	if (s_uloc_stereo < 0)
+		stereo_turn_off(StereoOff::Uniform);
 	if (s_uloc_proj < 0)
 	{
 		// Without the projection uniform nothing can be placed: freed now, so a later call starts afresh
@@ -195,9 +219,11 @@ bool rings_init()
 	const size_t ibytes = static_cast<size_t>(s_ring_i) * sizeof(uint16_t);
 	s_vbo = static_cast<Vertex*>(linearAlloc(2 * vbytes));
 	s_ibo = static_cast<uint16_t*>(linearAlloc(2 * ibytes));
-	if (!s_vbo || !s_ibo)
+	s_recs_cap = s_n.recs_cap = s_ring_i / 3;
+	s_recs = static_cast<DrawRec*>(malloc(static_cast<size_t>(s_recs_cap) * sizeof(DrawRec)));
+	if (!s_vbo || !s_ibo || !s_recs)
 	{
-		go_off("no linear memory for the rings");
+		go_off("no memory for the rings and the draw list");
 		return false;
 	}
 	bool ok = true;
@@ -269,6 +295,15 @@ void issue_pending()
 		discard(DiscardReason::Cmdbuf);
 		return;
 	}
+	// M9: the record of this draw (on every frame: one code path; cheap). Full: given up like a full ring.
+	if (s_nrecs >= s_recs_cap)
+	{
+		discard(DiscardReason::Ring);
+		return;
+	}
+	s_recs[s_nrecs++] = DrawRec{s_f.pfirst, s_f.pcount, s_f.bound_tex, s_f.blend, s_f.mode};
+	if (s_nrecs > s_n.recs_max)
+		s_n.recs_max = s_nrecs;
 	const uint32_t* const a = cmd_pos();
 	// base.h:24; the indices are relative to the half's vertex start (BufInfo_Add of the half).
 	C3D_DrawElements(GPU_TRIANGLES, static_cast<int>(s_f.pcount), C3D_UNSIGNED_SHORT,
@@ -510,6 +545,7 @@ bool view_play_ready(int w, int h, SkipReason* why)
 ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 {
 	s_f = Frame();
+	s_nrecs = 0;
 	// Design 5.6.1 a: no citro3d call without the GPU rights, while suspended or closing, or with a
 	// release pending; nothing is drawn, so this is a skip.
 	if (s_off || !is_up() || release_pending())
@@ -540,6 +576,13 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 	if (!view_ensure(w, h))
 		return skipped(SkipReason::Size);
 
+	// M9: a stereo frame needs the right-eye objects, which view_ensure has just made (or failed to: stereo is then off for
+	// the run and the frame is flat). The uniform's values for the streamed pass are set below.
+	s_f.stereo = opt.stereo && stereo_usable() && view_texture_right() != nullptr;
+	s_f.eye_p = opt.P;
+	s_f.eye_w0 = opt.w0;
+	s_f.eye_near = opt.near;
+	s_f.fill = opt.fill;
 	// The ring half of this frame and its BufInfo (a local struct: nothing of the context is touched
 	// yet). BufInfo_Add's return is checked every frame (buffers.o +0x18-0x38: below the base it returns
 	// -2 with a half-built slot).
@@ -604,6 +647,25 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 	if (lit)
 		noise_frame_start();
 	texcache_frame_start(s_k);
+
+	// M9 "What the two textures hold": the right texture is cleared to opaque black on a stereo frame when the previous
+	// world frame was not one, or it was just created / the view changed size; else it keeps its last picture. One GX
+	// entry, with the other grouped operations right after frame_begin (the command buffer is still empty).
+	if (s_f.stereo)
+	{
+		const bool fresh = view_right_take_fresh();
+		if (opt.clear_right || fresh)
+		{
+			if (!view_clear_target_right(0x000000FFu))
+			{
+				frame_end(0, false, FrameKind::View);
+				note_view_frame();
+				s_f.open = false;
+				return discarded_at_begin(DiscardReason::Gx);
+			}
+			++s_n.r_clears;
+		}
+	}
 
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
 	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered" (M4: the tinted check's grey,
@@ -672,9 +734,19 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 	Mtx_Ortho(&s_proj, 0.0f, static_cast<float>(view_proj_width()), static_cast<float>(view_proj_height()), 0.0f, 0.0f,
 	          1.0f, true);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uloc_proj, &s_proj);
+	// M9: the streamed pass is the left eye: unshifted with fill (the centre pass), else shifted by -P. A flat frame sets
+	// (0, 1, 0, 0), not all zeros: every term of the shader's sum stays finite.
 	if (s_uloc_stereo >= 0)
-		C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_stereo, 0.0f, 0.0f, 0.0f, 0.0f);
-	return ViewBegin{ViewBegin::Kind::Ok, SkipReason::Down, DiscardReason::Unsupported};
+	{
+		if (s_f.stereo && !s_f.fill)
+			C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_stereo, -s_f.eye_p, s_f.eye_w0, -s_f.eye_near, 0.0f);
+		else
+			C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_stereo, 0.0f, 1.0f, 0.0f, 0.0f);
+	}
+	s_n.stereo_frames += s_f.stereo;
+	ViewBegin ok{ViewBegin::Kind::Ok, SkipReason::Down, DiscardReason::Unsupported};
+	ok.stereo = s_f.stereo;
+	return ok;
 }
 
 bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* tex)
@@ -887,11 +959,92 @@ ViewEnd view_end_play_full(uint8_t* const* rows, unsigned* sentinel_count, unsig
 	return play_copy(rows, sentinel_count, copied, true);
 }
 
+namespace {
+
+// A replay pass gives the frame up: counted by reason (the first reason of the frame stays, as discard()).
+void replay_discard(DiscardReason r)
+{
+	++s_n.replay_discards[static_cast<int>(r)];
+	discard(r);
+}
+
+// One further pass of a stereo frame (M9 "The draw list and the passes"): switch to the eye's target, set the uniform
+// (x = e * P pixels, w0, -near), and issue every record again with the state it was issued with. Draws only; the state
+// the streamed pass left (program, attributes, buffers, TEV, the LUT on unit 1) is still in force. citro3d's state flush
+// on the first draw writes the new target's frame buffer registers (the stereo examples draw both eyes in one frame:
+// stereoscopic_2d/source/main.cpp:53-80).
+void replay_pass(C3D_RenderTarget* target, float x)
+{
+	if (s_f.discarded)
+		return;
+	if (!C3D_FrameDrawOn(target))   // renderqueue.h:32
+	{
+		replay_discard(DiscardReason::Begin);
+		return;
+	}
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_stereo, x, s_f.eye_w0, -s_f.eye_near, 0.0f);
+	for (unsigned i = 0; i < s_nrecs; ++i)
+	{
+		const DrawRec& r = s_recs[i];
+		set_blend(r.blend);
+		if (!set_mode(r.mode))
+		{
+			replay_discard(DiscardReason::Tex);
+			return;
+		}
+		// null = keep the current bind: C3D_TexBind(n, NULL) dereferences it (an unmasked static draw and `textures 0`
+		// record null)
+		if (r.tex && r.tex != s_f.bound_tex)
+		{
+			__real_C3D_TexBind(0, static_cast<C3D_Tex*>(r.tex));
+			s_f.bound_tex = r.tex;
+			++s_n.tex_bind_calls;
+		}
+		if (!reserve_left())
+		{
+			replay_discard(DiscardReason::Cmdbuf);
+			return;
+		}
+		const uint32_t* const a = cmd_pos();
+		C3D_DrawElements(GPU_TRIANGLES, static_cast<int>(r.count), C3D_UNSIGNED_SHORT, ibo_half(s_f.half) + r.first);
+		const uint32_t* const b = cmd_pos();
+		cmdbuf_note_draw(b > a ? static_cast<uint32_t>(b - a) : 0);
+		++s_n.draws;
+		++s_n.replay_draws;
+	}
+	++s_n.passes;
+}
+
+// The passes after the streamed one: with fill: L shifted, R centre, R shifted; without: R shifted. (The streamed pass
+// was L centre, or L shifted without fill.)
+void replay_stereo()
+{
+#ifdef A1_PROFILE
+	A1_PROF_SCOPE(C3dStereo);
+#endif
+	C3D_RenderTarget* const left = view_target();
+	C3D_RenderTarget* const right = view_target_right();
+	const float P = s_f.eye_p;
+	if (s_f.fill)
+	{
+		replay_pass(left, -P);
+		replay_pass(right, 0.0f);
+	}
+	replay_pass(right, P);
+}
+
+} // namespace
+
 ViewEnd view_end_direct()
 {
 	if (!s_f.open)
 		return ViewEnd{false, DiscardReason::Begin};
 	issue_pending();
+	if (s_f.stereo && !s_f.discarded)
+	{
+		++s_n.passes;   // the streamed pass
+		replay_stereo();
+	}
 	restore_state();
 	flush_rings();   // the draws run at C3D_FrameEnd(GX_CMDLIST_FLUSH), which skips the whole-heap flush (0.3)
 	if (s_f.discarded)
@@ -979,8 +1132,20 @@ void draw_free()
 		linearFree(s_ibo);
 	s_vbo = nullptr;
 	s_ibo = nullptr;
+	free(s_recs);
+	s_recs = nullptr;
+	s_recs_cap = s_nrecs = 0;
 	s_rings_ready = false;
 	s_f = Frame();
+}
+
+int draw_stereo_text(char* buf, size_t size)
+{
+	const Counters& n = s_n;
+	return snprintf(buf, size, "views=%u passes=%u replay_draws=%u recs_max=%u/%u replay_discards=%u/%u/%u/%u/%u/%u r_clears=%u",
+	                n.stereo_frames, n.passes, n.replay_draws, n.recs_max, n.recs_cap, n.replay_discards[0],
+	                n.replay_discards[1], n.replay_discards[2], n.replay_discards[3], n.replay_discards[4],
+	                n.replay_discards[5], n.r_clears);
 }
 
 int draw_stats_text(char* buf, size_t size)

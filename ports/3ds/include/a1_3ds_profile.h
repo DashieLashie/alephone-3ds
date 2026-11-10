@@ -47,6 +47,7 @@ enum Zone
 	C3dTex,     // M2 texture uploads: conversion into a linear texture, its flush, VRAM promotions issued (nested in c3d_draw)
 	C3dOverlay, // M6 hook 3b: the overlay bands (rounding, merging) and the dirty-tile clear of the overlay surface
 	C3dComposite, // M6 the composite frame's CPU part: band uploads, quads, restore (inside Present; its wait is c3d_wait)
+	C3dStereo,  // M9 the replayed passes of a stereo view frame (nested in c3d_draw)
 #endif
 	kZoneCount
 };

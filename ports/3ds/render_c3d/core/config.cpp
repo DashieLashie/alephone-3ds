@@ -36,6 +36,21 @@ bool parse_int(const std::string& value, long lo, long hi, long& out)
 	return true;
 }
 
+// An integer in [lo, hi] with an optional leading '-'.
+bool parse_signed(const std::string& value, long lo, long hi, int& out)
+{
+	const bool neg = !value.empty() && value[0] == '-';
+	long v = 0;
+	if (!parse_int(neg ? value.substr(1) : value, 0, 1000000, v))
+		return false;
+	if (neg)
+		v = -v;
+	if (v < lo || v > hi)
+		return false;
+	out = static_cast<int>(v);
+	return true;
+}
+
 bool parse_unsigned(const std::string& value, long lo, long hi, unsigned& out)
 {
 	long v = 0;
@@ -164,7 +179,12 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 	if (key == "diff_tol")
 		return parse_unsigned(value, 0, 255, cfg.diff_tol);
 	if (key == "vram_cap")
-		return parse_unsigned(value, 0, 4096, cfg.vram_cap);
+	{
+		if (!parse_unsigned(value, 0, 4096, cfg.vram_cap))
+			return false;
+		cfg.vram_cap_set = true;
+		return true;
+	}
 	if (key == "linear_cap")
 		return parse_unsigned(value, 64, 16384, cfg.linear_cap);
 	if (key == "promote_max")
@@ -209,6 +229,32 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 0, 32, cfg.fade_tol);
 	if (key == "fade_parts")
 		return parse_unsigned(value, 0, 7, cfg.fade_parts);
+	if (key == "stereo")
+		return parse_flag(value, cfg.stereo);
+	if (key == "stereo_k")
+		return parse_unsigned(value, 0, 512, cfg.stereo_k);
+	if (key == "stereo_w0")
+		return parse_unsigned(value, 64, 32767, cfg.stereo_w0);
+	if (key == "stereo_near")
+		return parse_unsigned(value, 0, 400, cfg.stereo_near);
+	if (key == "stereo_weapon")
+		return parse_signed(value, -100, 100, cfg.stereo_weapon);
+	if (key == "stereo_ramp")
+		return parse_unsigned(value, 1, 600, cfg.stereo_ramp);
+	if (key == "stereo_fill")
+		return parse_flag(value, cfg.stereo_fill);
+	if (key == "stereo_slider")
+		return parse_signed(value, -1, 100, cfg.stereo_slider);
+	if (key == "stereo_force")
+		return parse_flag(value, cfg.stereo_force);
+	if (key == "stereo_cal")
+		return parse_flag(value, cfg.stereo_cal);
+	if (key == "stereo_check")
+		return parse_unsigned(value, 0, 100000, cfg.stereo_check);
+	if (key == "stereo_gaps")
+		return parse_flag(value, cfg.stereo_gaps);
+	if (key == "stereo_fail")
+		return parse_flag(value, cfg.stereo_fail);
 	if (key == "fallback")
 	{
 		if (value != "readback" && value != "sw")
@@ -255,6 +301,7 @@ bool config_apply_preference(Config& cfg, bool gpu)
 {
 	const bool changed = cfg.renderer_c3d != gpu;
 	cfg.renderer_c3d = gpu;
+	cfg.stereo = gpu;   // M9 (D1): the GPU renderer turns stereo on; the 3D slider is the control
 	if (gpu)
 	{
 		cfg.mode = Mode::Direct;

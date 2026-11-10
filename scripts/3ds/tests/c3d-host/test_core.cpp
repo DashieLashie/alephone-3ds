@@ -31,6 +31,7 @@
 #include "overlay_bands.h"
 #include "direct_state.h"
 #include "fade_fit.h"
+#include "stereo.h"
 #include "a1_c3d.h"
 
 #include <algorithm>
@@ -5252,6 +5253,255 @@ static void test_m6b_core()
 	test_config_m6b();
 }
 
+
+// --- M9 (design 7, "M9 specification"): the ramp, the shift model, weapon_w, stereo_w, the VRAM rule, the keys ---
+
+static unsigned ramp_frames_to(float T, unsigned N)
+{
+	StereoRamp r;
+	unsigned n = 0;
+	while (n < 4 * N + 4)
+	{
+		++n;
+		if (stereo_step(r, true, T, N) >= (T < kStereoSliderFloor ? 0.0f : std::min(T, 1.0f)))
+			break;
+	}
+	return n;
+}
+
+static void test_m9_ramp()
+{
+	// 0 -> T in ceil(T*N) frames (at most N), monotone, the last step lands on T exactly
+	for (unsigned N : {1u, 2u, 7u, 15u, 30u, 600u})
+		for (int i = 1; i <= 100; ++i)
+		{
+			const float T = static_cast<float>(i) / 100.0f;
+			if (T < kStereoSliderFloor)
+				continue;
+			StereoRamp r;
+			float prev = 0.0f;
+			unsigned n = 0;
+			bool mono = true;
+			while (r.p < T && n < N + 5)
+			{
+				const float p = stereo_step(r, true, T, N);
+				mono = mono && p > prev;
+				prev = p;
+				++n;
+			}
+			const unsigned want = static_cast<unsigned>(std::ceil(static_cast<double>(T) * N - 1e-4));
+			CHECK(mono);
+			CHECK(n == (want < 1 ? 1 : want));
+			CHECK(n <= N);
+			CHECK(r.p == T);
+			CHECK(stereo_step(r, true, T, N) == T);   // stays
+		}
+	CHECK(ramp_frames_to(1.0f, 15) == 15);
+	CHECK(ramp_frames_to(0.5f, 14) == 7);
+	// N = 1 jumps
+	{
+		StereoRamp r;
+		CHECK(stereo_step(r, true, 0.8f, 1) == 0.8f);
+	}
+	// a non-capable frame gives 0 at once, from anywhere
+	{
+		StereoRamp r;
+		for (int i = 0; i < 20; ++i)
+			stereo_step(r, true, 1.0f, 15);
+		CHECK(r.p == 1.0f);
+		CHECK(stereo_step(r, false, 1.0f, 15) == 0.0f && r.p == 0.0f);
+		// and restarts from 0 at 1/N
+		CHECK(std::fabs(stereo_step(r, true, 1.0f, 15) - 1.0f / 15.0f) < 1e-6f);
+	}
+	// a slider drop falls at 1/N per frame; below 1/64 is 0 at once
+	{
+		StereoRamp r;
+		for (int i = 0; i < 20; ++i)
+			stereo_step(r, true, 1.0f, 10);
+		float prev = r.p;
+		int steps = 0;
+		while (r.p > 0.5f + 1e-6f && steps < 20)
+		{
+			const float p = stereo_step(r, true, 0.5f, 10);
+			CHECK(std::fabs((prev - p) - 0.1f) < 1e-5f || p == 0.5f);
+			prev = p;
+			++steps;
+		}
+		CHECK(steps == 5 && r.p == 0.5f);
+		CHECK(stereo_step(r, true, 0.0f, 10) == 0.0f);
+		for (int i = 0; i < 20; ++i)
+			stereo_step(r, true, 1.0f, 10);
+		CHECK(stereo_step(r, true, kStereoSliderFloor * 0.99f, 10) == 0.0f);
+		CHECK(stereo_step(r, true, kStereoSliderFloor, 10) > 0.0f);
+	}
+	// a slider above 1 is 1; reset sets 0
+	{
+		StereoRamp r;
+		for (int i = 0; i < 40; ++i)
+			stereo_step(r, true, 7.0f, 10);
+		CHECK(r.p == 1.0f);
+		stereo_reset(r);
+		CHECK(r.p == 0.0f);
+	}
+	CHECK(stereo_pixels(1.0f, 96) == 6.0f && stereo_pixels(0.5f, 96) == 3.0f && stereo_pixels(0.0f, 96) == 0.0f);
+}
+
+static void test_m9_shift()
+{
+	const float P = 8.0f, w0 = 1024.0f, near = 1.0f;
+	// the four calibration depths, right eye: -P, 0, P/2, within 0.01 of P
+	CHECK(stereo_shift(w0 / 2, +1, P, w0, near) == -P);
+	CHECK(stereo_shift(w0, +1, P, w0, near) == 0.0f);
+	CHECK(stereo_shift(2 * w0, +1, P, w0, near) == P / 2);
+	CHECK(std::fabs(stereo_shift(kWPerspMax, +1, P, w0, near) - P) < 0.01f);
+	// left eye mirrors it
+	CHECK(stereo_shift(w0 / 2, -1, P, w0, near) == P);
+	CHECK(stereo_shift(2 * w0, -1, P, w0, near) == -P / 2);
+	// the near clamp: w = 16 would give -63, limited to -near
+	CHECK(stereo_shift(16.0f, +1, P, w0, 1.0f) == -P);
+	CHECK(stereo_shift(16.0f, +1, P, w0, 0.25f) == -P * 0.25f);
+	CHECK(stereo_shift(16.0f, +1, P, w0, 0.0f) == 0.0f);
+	// P = 0 gives 0 for every finite w >= 1, near any
+	for (float w : {1.0f, 16.0f, 100.0f, 1024.0f, 16777216.0f})
+		for (int e : {-1, 1})
+			CHECK(stereo_shift(w, e, 0.0f, w0, 1.0f) == 0.0f);
+	// affine in 1/w: the shift is e*P*(1 - w0 * (1/w)), the sum the vertex shader does
+	for (float w : {20.0f, 300.0f, 1500.0f, 90000.0f})
+	{
+		const float want = P * (1.0f - w0 * (1.0f / w));
+		CHECK(std::fabs(stereo_shift(w, +1, P, w0, 100.0f) - want) < 1e-3f);
+	}
+}
+
+static void test_m9_weapon_and_w()
+{
+	const float w0 = 1024.0f;
+	CHECK(stereo_weapon_w(w0, 0.0f) == w0);
+	CHECK(stereo_weapon_w(w0, -1.0f) == w0 / 2);
+	CHECK(stereo_weapon_w(w0, 0.5f) == 2 * w0);
+	CHECK(stereo_weapon_w(w0, 1.0f) == kWPerspMax);
+	CHECK(stereo_weapon_w(w0, 0.99f) == kWPerspMax);
+	CHECK(stereo_weapon_w(w0, -0.5f) > w0 / 2 && stereo_weapon_w(w0, -0.5f) < w0);
+	// the weapon's share t of P: shift(weapon_w) = e * P * t (near large enough not to clamp)
+	for (float t : {-1.0f, -0.5f, 0.0f, 0.25f, 0.5f, 0.9f})
+		CHECK(std::fabs(stereo_shift(stereo_weapon_w(w0, t), +1, 8.0f, w0, 10.0f) - 8.0f * t) < 1e-3f);
+	CHECK(stereo_weapon_w(64.0f, -1.0f) == 32.0f);   // never under the clamp's 16 (w0 >= 64)
+	// stereo_w: walls, floors and statics keep the geometric w; rectangles carry their depth (clamped), the weapon
+	// weapon_w, landscapes the far limit
+	CHECK(stereo_w(StereoWKind::Wall, 0, false, 0.0f, 777.0f) == 777.0f);
+	CHECK(stereo_w(StereoWKind::Static, 5, true, 1.0f, 321.0f) == 321.0f);
+	CHECK(stereo_w(StereoWKind::Rectangle, 4096, false, 2048.0f, 0.0f) == 4096.0f);
+	CHECK(stereo_w(StereoWKind::Rectangle, 3, false, 2048.0f, 0.0f) == 16.0f);   // under 16 clamps to 16
+	CHECK(stereo_w(StereoWKind::Rectangle, -5, false, 2048.0f, 0.0f) == 16.0f);
+	CHECK(stereo_w(StereoWKind::Rectangle, 1 << 30, false, 2048.0f, 0.0f) == kWPerspMax);
+	CHECK(stereo_w(StereoWKind::Rectangle, 4096, true, 2048.0f, 0.0f) == 2048.0f);
+	CHECK(stereo_w(StereoWKind::Landscape, 4096, false, 2048.0f, 99.0f) == kWPerspMax);
+	// no stereo w is ever under the clamp
+	for (int d : {0, 1, 15, 16, 17})
+		CHECK(stereo_w(StereoWKind::Rectangle, d, false, 512.0f, 0.0f) >= 16.0f);
+}
+
+static void test_m9_cap_and_keys()
+{
+	// stereo_allocated: no file -> yes; file -> its stereo key
+	CHECK(stereo_allocated(false, false) && stereo_allocated(false, true));
+	CHECK(!stereo_allocated(true, false) && stereo_allocated(true, true));
+	// stereo_vram_cap: no file -> 2944; file stereo 0 -> 3584; file stereo 1 -> 2944; an explicit vram_cap wins in all
+	{
+		Config none;   // what the loader leaves without a file
+		CHECK(stereo_vram_cap(none, stereo_allocated(false, none.stereo)) == 2944);
+		Config f0;
+		std::vector<std::string> problems;
+		config_parse(f0, "renderer c3d\n", problems);
+		CHECK(!f0.stereo && stereo_vram_cap(f0, stereo_allocated(true, f0.stereo)) == 3584);
+		Config f1;
+		config_parse(f1, "stereo 1\n", problems);
+		CHECK(f1.stereo && stereo_vram_cap(f1, stereo_allocated(true, f1.stereo)) == 2944);
+		Config e0, e1, en;
+		config_parse(e0, "vram_cap 2000\n", problems);
+		config_parse(e1, "stereo 1\nvram_cap 2000\n", problems);
+		CHECK(stereo_vram_cap(e0, stereo_allocated(true, e0.stereo)) == 2000);
+		CHECK(stereo_vram_cap(e1, stereo_allocated(true, e1.stereo)) == 2000);
+		CHECK(stereo_vram_cap(e0, stereo_allocated(false, e0.stereo)) == 2000);   // no-file path with an explicit key
+		config_parse(en, "vram_cap 3584\n", problems);   // explicit and equal to the default still counts as set
+		CHECK(en.vram_cap_set && stereo_vram_cap(en, true) == 3584);
+		CHECK(problems.empty());
+	}
+	// the keys: defaults and ranges
+	{
+		Config c;
+		CHECK(!c.stereo && c.stereo_k == 96 && c.stereo_w0 == 1024 && c.stereo_near == 100 && c.stereo_weapon == -50 &&
+		      c.stereo_ramp == 15 && c.stereo_fill && c.stereo_slider == -1 && !c.stereo_force && !c.stereo_cal &&
+		      c.stereo_check == 0 && !c.stereo_gaps && !c.stereo_fail && !c.vram_cap_set);
+		std::vector<std::string> problems;
+		config_parse(c,
+		             "stereo 1\nstereo_k 512\nstereo_w0 64\nstereo_near 400\nstereo_weapon -100\nstereo_ramp 600\nstereo_fill 0\n"
+		             "stereo_slider 100\nstereo_force 1\nstereo_cal 1\nstereo_check 30\nstereo_gaps 1\nstereo_fail 1\n",
+		             problems);
+		CHECK(problems.empty());
+		CHECK(c.stereo && c.stereo_k == 512 && c.stereo_w0 == 64 && c.stereo_near == 400 && c.stereo_weapon == -100 &&
+		      c.stereo_ramp == 600 && !c.stereo_fill && c.stereo_slider == 100 && c.stereo_force && c.stereo_cal &&
+		      c.stereo_check == 30 && c.stereo_gaps && c.stereo_fail);
+		Config d;
+		config_parse(d, "stereo_weapon 100\nstereo_slider -1\nstereo_slider 0\nstereo_weapon +5\n", problems);
+		CHECK(d.stereo_weapon == 100 && d.stereo_slider == 0 && problems.size() == 1);
+		Config e;
+		problems.clear();
+		config_parse(e,
+		             "stereo_k 513\nstereo_w0 63\nstereo_w0 32768\nstereo_near 401\nstereo_weapon -101\nstereo_weapon 101\n"
+		             "stereo_ramp 0\nstereo_ramp 601\nstereo_slider 101\nstereo_slider -2\nstereo_slider -\nstereo\nstereo 2\n",
+		             problems);
+		CHECK(problems.size() == 13);
+		CHECK(!e.stereo && e.stereo_k == 96 && e.stereo_w0 == 1024 && e.stereo_near == 100 && e.stereo_weapon == -50 &&
+		      e.stereo_ramp == 15 && e.stereo_slider == -1);
+	}
+	// the preference: stereo follows gpu; a file-less config otherwise unchanged
+	{
+		Config c;
+		config_apply_preference(c, true);
+		CHECK(c.stereo && c.renderer_c3d);
+		config_apply_preference(c, false);
+		CHECK(!c.stereo && !c.renderer_c3d);
+	}
+}
+
+static void test_m9_gx_accounting()
+{
+	// a stereo composite: <= 4 band uploads (1 each, command buffer empty) + end + 2 linked = 7 of 32
+	{
+		GxQueue q;
+		q.begin_frame();
+		for (int i = 0; i < 4; ++i)
+			CHECK(q.take(false));
+		CHECK(q.end_frame(2) == 7);
+		q.begin_frame();
+		for (int i = 0; i < 4; ++i)
+			CHECK(q.take(false));
+		CHECK(q.end_frame(1) == 6);   // the mono composite
+	}
+	// a stereo view frame: seed + right clear + shade LUT + 8 promotions (cost 2 each at worst) + end <= 24
+	{
+		GxQueue q;
+		q.begin_frame();
+		CHECK(q.take(false));   // seed (the frame's first operation)
+		CHECK(q.take(false));   // the right clear
+		CHECK(q.take(false));   // the shade LUT
+		for (int i = 0; i < 8; ++i)
+			CHECK(q.take(true));
+		CHECK(q.used() == 3 + 16);
+		CHECK(q.end_frame(0) <= 24);
+	}
+}
+
+static void test_m9_core()
+{
+	test_m9_ramp();
+	test_m9_shift();
+	test_m9_weapon_and_w();
+	test_m9_cap_and_keys();
+	test_m9_gx_accounting();
+}
+
 int main()
 {
 	test_config();
@@ -5281,6 +5531,7 @@ int main()
 	test_m5_core();
 	test_m6_core();
 	test_m6b_core();
+	test_m9_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

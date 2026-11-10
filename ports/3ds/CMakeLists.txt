@@ -367,6 +367,7 @@ if(A1_RENDER_C3D)
     "${_a1_c3d_dir}/core/overlay_bands.cpp"
     "${_a1_c3d_dir}/core/direct_state.cpp"
     "${_a1_c3d_dir}/core/fade_fit.cpp"
+    "${_a1_c3d_dir}/core/stereo.cpp"
     "${_a1_c3d_dir}/back/context.cpp"
     "${_a1_c3d_dir}/back/present.cpp"
     "${_a1_c3d_dir}/back/view.cpp"
@@ -374,6 +375,7 @@ if(A1_RENDER_C3D)
     "${_a1_c3d_dir}/back/texcache.cpp"
     "${_a1_c3d_dir}/back/shade.cpp"
     "${_a1_c3d_dir}/back/overlay.cpp"
+    "${_a1_c3d_dir}/back/stereo.cpp"
     "${_a1_c3d_dir}/front/frame.cpp"
     "${_a1_c3d_dir}/front/filter.cpp"
     "${_a1_c3d_dir}/front/c3d_rasterizer.cpp")
