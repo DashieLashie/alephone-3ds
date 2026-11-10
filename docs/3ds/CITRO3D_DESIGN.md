@@ -1774,7 +1774,7 @@ All five stay open for the console ("B-b console runbook", `NEXT-SPRINT.md`).*
   zero-copy path selection (5.7.5), `zero_copy` (5.7.7); B-a's `two_frame` becomes the zero-copy
   present's structure (zero-copy presents are always two-frame).
 
-## 6. Stereoscopic 3D (M9, last; direct mode only)
+## 6. Stereoscopic 3D (M9, before M7; direct mode only)
 
 Two view targets, two linked screen targets (`GFX_LEFT`/`GFX_RIGHT`),
 `gfxSet3D(true)` (`gfx.h`:79; `particles/source/main.c`:175-183), slider
@@ -1797,7 +1797,9 @@ direct frames run is applied through the same ramp.
 **How we test without hardware:** Azahar 3D render mode (`render_3d`,
 `qt-config.ini`:290); slider 0 ⇒ eyes pixel-identical; non-stereo frames ⇒ eyes pixel-identical; after a non-stereo frame the
 parallax scale rises monotonically to the slider's value in exactly `stereo_ramp` frames (a logged per-frame scale, host-testable
-in `core/`: the ramp is pure state). Comfort and ghosting stay a console item (section 10 item 13).
+in `core/`: the ramp is pure state). Comfort and ghosting stay a console item (section 10 item 13). **M9's spec (section 7)
+rules over this list:** "non-stereo frames ⇒ eyes identical" holds by libctru's behaviour (its fact (e)) and is not compared in
+a test (the right framebuffer is not written on such frames); "exactly `stereo_ramp` frames" became a constant rate.
 
 ## 7. Milestones
 
@@ -4157,6 +4159,301 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   defines the state machine in `core/` (host-tested), the config key and its default, the slider-change rule and the
   tests above; the length is tuned on the console.
 - Accept: section 6 tests.
+- **M9 specification (revision 2 of 2026-11-09: critic rounds 1 and 2 applied, the user's decisions D1-D4 taken).** Where
+  the lines above, section 6, 2.1, 2.4, 9.1 and the code disagree, this block rules. Citations are the code as of
+  `9c1a58e63` (tag `port-stage10-M6b`). **No engine edit, no `PATCHES.md` entry.** Disassembly citations are
+  `arm-none-eabi-objdump -d -r` of `/opt/devkitpro/libctru/lib/libcitro3d.a` and `libctru.a` (citro3d 1.7.1, libctru
+  2.7.0; the sources are not installed), written `function+0xoffset`.
+  - *Checked against the code and the libraries (the facts the rest stands on).*
+    (a) **The vertex's `w` is the eye depth** in world units (1 024 = 1 WU) for walls (`core/geometry.cpp`:331, `r.w = x`)
+    and floors (:351, `|dz·wy/sy|`), clamped to `[16, 2^24]` (`clamp_wp`, `core/geometry.h`). It is the constant **1** for
+    rectangles (sprites, weapons, tinted, static rectangles: `front/c3d_rasterizer.cpp`:110) and landscapes
+    (`core/landscape.cpp`:200). A rectangle's real depth is `rectangle_definition::depth` (`scottish_textures.h`:128-130;
+    set to `DistanceRef`, `RenderPlaceObjs.cpp`:385; weapons in hand get 0, `render.cpp`:1094-1095); the port reads it
+    today only for the light level (`front/filter.cpp`:65).
+    (b) **Draws are streamed, not recorded.** `view_polygon` copies vertices into the ring half and `issue_pending` issues
+    one `C3D_DrawElements` per run of equal keys at once (`back/draw.cpp`:260-281, :680-750). Section 6's "each eye redraws
+    the same ring" therefore needs a per-frame draw list, new in M9 (below).
+    (c) **The texture cache never evicts a slot used in the current view frame** (`core/texcache.h`:28-32), so a `C3D_Tex*`
+    bound by a draw stays valid for a replay inside the same view frame.
+    (d) **citro3d swaps in stereo only when the right-linked target was drawn in that frame.** `C3D_FrameEnd` clears
+    `isTopStereo` (`C3D_FrameEnd+0xa0`), then for each linked target with `used` set calls `C3D_FrameBufTransfer`
+    (`+0xd4`) and, for the top screen, sets `needSwapTop` and, if the target's side is 1 = `GFX_RIGHT`, `isTopStereo`
+    (`+0xe8-0xf8`); `onQueueFinish` then calls `gfxScreenSwapBuffers(GFX_TOP, isTopStereo)` (`onQueueFinish+0xc0-0xcc`).
+    (e) **libctru shows the left image to both eyes when `hasStereo` is false**, also in 3D mode: `gfx.h`:154-161 says so,
+    and `gfxPresentFramebuffer` in mode 1 (3D) takes the second buffer `fb_a + gfxTopFramebufferMaxSize/2` only when
+    `hasStereo` (`+0x98-0xac`), else `fb_b = fb_a` (`+0x60`). `gfxSet3D` only stores the mode byte (`gfxSet3D+0x4`); it
+    takes effect at the next top swap. The port's CPU presents all pass `false` (`video_3ds.cpp`:140, :223). So with 3D
+    mode on, **every frame that does not draw the right target shows one image to both eyes at no cost**: section 6's
+    rule for non-stereo frames needs no code beyond not drawing the right eye.
+    (f) The right-eye framebuffers exist (SDL's `gfxInit(GSP_RGBA8_OES, GSP_RGBA8_OES, false)`, 0.2). The example order
+    is `gfxSet3D(true)`, then `C3D_Init`, then the two screen targets (`stereoscopic_2d/source/main.cpp`:27-37); the
+    slider is `osGet3DSliderState()` (`os.h`:313, 0.0-1.0).
+    (g) The engine clips every polygon to its portal window at **vertical** lines `window->x0 / x1` and **horizontal**
+    lines `y0 / y1` (`RenderRasterize.cpp`:391-396, :416-417, :433-434, :502-503, :566-567, :582-583) and draws nothing
+    outside them. A horizontally shifted eye therefore uncovers strips beside every vertical depth edge (a door jamb
+    against the room behind it) that no polygon covers: section 6's "side-eye gaps". Horizontal clip lines open no gap
+    (the shift is horizontal). Nodes are drawn far to near (`render.cpp`:459, the sorted tree), rectangles over walls.
+    (h) Measured sizes that bound M9: at most 4 888 command words per view frame of a 131 072-word buffer (M5, L01 film,
+    `PERF.md` "Stage 10 M5"); VRAM free at exit in `mode direct` 373 / 1 609 / 3 593 KiB on L0 / L6 / L20 (M6, `PERF.md`
+    "Stage 10 M6", G3-a paragraph): L0 fills the pool to its cap; console `gpu_ms view` 1.3-1.5 ms per view pass (M6 console
+    check). (i) picasso 2.7.2 assembles the shader below (tried on 2026-11-09 with the exact text).
+  - *The model.* Eye depth `w`, convergence depth `w0` (a point at `w0` has no parallax and sits on the screen), eye sign
+    `e` = −1 left, +1 right, strength `P` in pixels (0 = flat). A vertex moves horizontally by
+    **`shift = e · P · max(1 − w0/w, −near)`** pixels; `sy` and `w` are unchanged. Far points go to `e·P` (left image
+    left, right image right: behind the screen), points nearer than `w0` come out of the screen, limited to `−near·P`.
+    This is the exact picture of an eye moved sideways with an off-axis frustum (the shift is affine in `1/w`, which is
+    affine on screen for a plane), so the perspective-correct interpolation that already uses `w` (2.1) needs nothing
+    else. Only the `max` clamp bends a polygon that crosses it (close to the eye, accepted).
+  - *Vertex shader* (`shaders/world.v.pica`; the `stereo` uniform exists and is 0 today, `back/draw.cpp`:163, :675-676).
+    The body becomes, in this order (the lines not shown are unchanged):
+    ```
+    .fvec stereo             ; x = e*P (pixels), y = w0, z = -near, w unused
+    	rcp r2.x, v0.z           ; 1/w
+    	mul r2.x, stereo.y, r2.x ; w0/w
+    	add r2.x, k.y, -r2.x     ; 1 - w0/w            (k.y = 1.0)
+    	max r2.x, stereo.z, r2.x ; >= -near
+    	mul r2.x, stereo.x, r2.x ; pixels
+    	mov r0.xy, v0.xy
+    	add r0.x, r0.x, r2.x
+    ```
+    With `stereo.x = 0` the product is 0 for every finite `w ≥ 1`, so `r0.x = v0.x` exactly: a non-stereo frame is
+    unchanged (gate T5). A non-stereo frame sets `stereo` to `(0, 1, 0, 0)` (not all zeros: keep every term finite).
+    **UNVERIFIED on hardware:** `rcp`/`max` in float24 (the error bound used below is 2 ulp of 16 mantissa bits, under
+    0.02 pixel at 512), and that the PICA clips a primitive that leaves the target on the left (`x < 0`, by at most
+    `P·max(1, near)` pixels); both are checked by the calibration T1 and listed for the console.
+  - *What `w` a vertex carries on a stereo frame* (front end, `front/c3d_rasterizer.cpp`; **on a non-stereo frame nothing
+    changes**, so M1-M6b's gates see the same vertices). The rasteriser gets `set_stereo(bool on, float weapon_w)` next to
+    `set_options`. When on: a **rectangle** not in the foreground carries `w = clamp_wp(depth)` (`r.depth`, an `int32`;
+    values below 16 clamp to 16); a **foreground rectangle** (`foreground_`, weapons in hand) carries `w = weapon_w`
+    (below); a **landscape** vertex carries `w = kWPerspMax` (2^24: the far limit). All are constant over their primitive,
+    so the picture is the one `w = 1` gives (same NDC, affine interpolation) up to the float24 bound above. Walls,
+    floors and liquids keep their `w`. An **unmasked static polygon** carries `w = 1` today (`front/c3d_rasterizer.cpp`
+    :249-253, `TexAttr{1, 0, 0}`; critic round 1, major 2), which would put it at the largest out-of-screen shift: on a
+    stereo frame its `w` comes from `attrs()` like a wall's or floor's (s and t stay unused); if `attrs()` reports
+    `Degenerate` (which the constant path never could), every vertex takes the polygon's mean geometric `w` (`clamp_wp`
+    of the mean of the wall `x` / floor depth) and the polygon is still drawn. Its noise coordinates are then interpolated
+    with perspective, so on stereo frames the noise of an unmasked static polygon warps like a wall texture, as masked
+    static already does (accepted, listed). All of this goes through one
+    plain helper, `core/stereo.h` `stereo_w(kind, depth, foreground, weapon_w, geometric_w)` (kinds: wall/floor, static
+    polygon, rectangle, landscape), host-tested, and the rasteriser counts **`w_low`** = vertices issued on stereo frames
+    with `w < 16` (must stay 0: gate in T3; it catches any path that still sends `w = 1`, the landscape span path
+    included). The static's noise coordinates stay screen positions (the noise
+    pattern sits on the screen plane inside a shifted outline: accepted, listed).
+  - *Parameters and keys* (`core/config.h`, all integers so the parser needs nothing new; "console" = tuned there):
+    `stereo 0|1` (default 0 in a `debug-c3d` file; without a file the Renderer preference sets it, D1 and "The preference
+    and stereo" below); `stereo_k N` (0..512, default **96**: `K` = N/16
+    pixels per eye at slider 1, i.e. 6 pixels, 12 between the eyes at infinity; console); `stereo_w0 N` (64..32767,
+    default **1024**: 1 WU; console); `stereo_near N` (0..400, default **100**: `near` = N/100); `stereo_weapon N`
+    (**−100..100**, default **−50**: the weapon's parallax as a share `t` = N/100 of `P`; 0 = on the screen plane, negative
+    = in front of the screen (D3: the user chose in front; −50 is a first guess for the console); `weapon_w = w0 / (1 −
+    t)`, at least `w0/2` ≥ 32 so never under the clamp's 16, and for `t ≥ 0.99` `kWPerspMax`; the range stops at −100
+    because the `near` clamp limits the shift anyway: with the default `near` 1 a value under −100 would do nothing); `stereo_ramp N` (1..600, default **15** frames); `stereo_fill
+    0|1` (default **1**, below; D2); test only: `stereo_slider N` (−1 = the hardware slider, default; 0..100 = that
+    percentage instead), `stereo_force 0|1` (every direct frame takes the stereo path even at strength 0, with `P` = 0),
+    `stereo_cal 0|1`, `stereo_check N`, `stereo_gaps 0|1` (all below). Defaults of `K`, `w0`, `near`, the weapon and the
+    ramp are first guesses for the console.
+  - *The ramp* (`core/stereo.{h,cpp}`, plain, host-tested). State `p` in slider units, 0 at start.
+    `float stereo_step(StereoRamp&, bool capable, float slider, unsigned ramp_frames)`: if `!capable`, `p = 0`; else `T =
+    slider < 1/64 ? 0 : min(slider, 1)`; **if `T == 0`, `p = 0` at once** (the slider at rest switches the barrier off, so a
+    ramp down would show the left image sliding: critic round 1, minor 7; section 6's "going flat has no ramp"); else `p
+    += clamp(T − p, −1/N, +1/N)`; returns `p`. `void stereo_reset(StereoRamp&)`
+    sets `p = 0`. A frame is a **stereo frame** iff the returned `p > 0` (or `stereo_force`); its `P = p · K`. So: going
+    flat is immediate; the return and every slider change move at one constant rate, full range in `N` frames.
+    **This replaces section 6's "in exactly `stereo_ramp` frames"**: from 0 the slider's value `T` is reached in
+    `ceil(T·N)` frames, at most `N` (D4). Who calls it: `render_frame`, once per frame it decides **direct**, with
+    `capable` = `cfg.stereo` and the right-eye targets exist and not `calibrate` and not `g3a`; a frame that is then
+    discarded calls `stereo_reset`. Frames that never reach that point (map, terminal, SW, readback, menus) reset the
+    ramp at the next hook 3a: `render_frame` sets a flag `s_stereo_seen` after a successful stereo-capable direct frame;
+    `direct_policy` (called every frame, `front/frame.cpp`:1354) does `if (!s_stereo_seen) stereo_reset(...);
+    s_stereo_seen = false;` first. The slider is read by the back end (`back::stereo_slider()`: the key, else
+    `osGet3DSliderState()`); **UNVERIFIED**: that the hardware slider reads exactly 0 at rest (hence the 1/64 floor).
+  - *VRAM (redone, as section 6 and the M9 block above require).* Stereo adds a second linked screen target 240x400
+    (375 KiB) and a second 512x256 view texture (512 KiB): 887 KiB. 9.1's direct column without the pool is 375 + 512 +
+    512 + 512 + 320 = 2 231; with stereo 3 118; so the pool may have at most 3 026 KiB. **With `stereo 1` the default
+    `vram_cap` is 2 944 KiB** (total 6 062 of 6 144, 82 free for alignment; 3 584 − 640); a `vram_cap` line in the file
+    still wins. It applies from the start of the run, slider or not, because the right-eye objects are allocated at init
+    (a late 512 KiB block may not be contiguous once the pool has filled). **Where the cap is set (critic round 2, major
+    3):** the cache is created once, on first use, in `back/texcache.cpp`:85-98 and never recreated, and without a file the
+    parser never runs; so the rule is not in the parser. `Config` gains `bool vram_cap_set` (set by the parser when the
+    key is read); `core/stereo.h` gains the plain `bool stereo_allocated(bool has_file, bool file_stereo)` (= `!has_file
+    || file_stereo`) and `unsigned stereo_vram_cap(const Config&, bool allocated)` (= `vram_cap_set ? vram_cap :
+    allocated ? 2944 : 3584`); `texcache()` (:93) uses the latter and keeps the `g3a` minimum. Consequence, to be
+    measured (T6): L0's pool sat
+    at the 3 584 cap; Marathon 2's landscape part 0 is 2 048 KiB, which leaves 896 for everything else in VRAM; the rest
+    is sampled from the linear pool (M5's `promotions_blocked` path; G3-a ran with a 2 048 cap and 0 failures). **M7:**
+    its 1 024x512 view (2 048 KiB) cannot exist twice, so SSAA is off while a frame is stereo; M7's spec owns that.
+    9.1 gets a column "Direct + stereo (M9)" with these figures when the spec is approved.
+  - *Right-eye objects and 3D mode* (`back/present.cpp`, `back/view.cpp`). **When stereo is allocated** ("The preference
+    and stereo" below: not "when `cfg.stereo`", which is 0 at `present_init` without a file): `present_init` calls
+    `gfxSet3D(enabled)` **before** creating the targets (example order, (f)), then creates the right screen target exactly as
+    the left (`present.cpp`:1018-1024: same size, format, `kTargetTransferFlags`) with `C3D_RenderTargetSetOutput(…,
+    GFX_TOP, GFX_RIGHT, …)`; the view code creates a second 512x256 VRAM texture and target exactly as the first
+    (`view.cpp`:235-240) whenever it creates the first in `mode direct`. If either allocation fails (in `present_init` or in `view_ensure`): log once
+    `[c3d] stereo: off for the run (vram)`, free whichever was made, `gfxSet3D(false)`, `off=vram`, and stereo frames are
+    never decided (the rest of
+    `mode direct` is untouched). `present_detach` unlinks both targets and calls **`gfxSet3D(false)`** (so SDL's present,
+    the fatal screen and anything after citro3d see 2D mode); `view_free` deletes the second texture after `C3D_Fini`
+    like the first. Created and deleted out of frame, as M6's. The right target is drawn **only** on stereo frames; every
+    other present (P1, zero-copy, a mono composite, `present_close_frame`) is unchanged and shows one image ((d), (e)).
+  - *The gap fill (`stereo_fill 1`, the default; D2).* Each eye is drawn in two passes into its texture: first the whole
+    frame **unshifted** (`P = 0`), then the whole frame shifted. A pixel the shifted pass leaves uncovered ((g), and the
+    sub-pixel cracks between neighbours whose shifts differ by rounding) then shows the centre view's pixel: the near
+    edge looks a few pixels wider, with this frame's content, instead of whatever an old frame left there. Cost: 4 view
+    passes per stereo frame instead of 2. `stereo_fill 0` draws the shifted pass only and leaves gaps to M6's "no clear"
+    rule (the eye's previous frame); it is kept for the bench and the gap count, not recommended.
+  - *The draw list and the passes* (`back/draw.cpp`). New per-frame array `DrawRec { uint32_t first, count; void* tex;
+    unsigned blend, mode; }` (`uint32_t`: `ring_indices` may be 65 536, `core/config.cpp`:157), capacity
+    **`ring_indices / 3`** (a draw has at least 3 indices, so the list cannot fill before the ring: 1 365 at the default 4 096;
+    malloc at `rings_init`; full → `discard(DiscardReason::Ring)` all the same). The critic checked that the record is
+    sufficient: LUT, noise texture, TEV, unit 1 and the alpha test are per frame or rebuilt from `mode`; the ring half is not
+    rewritten before `C3D_FrameEnd`.
+    `issue_pending` appends the record of the draw it issues (the index range `pfirst/pcount`, the texture bound on unit
+    0 or null, `s_f.blend`, `s_f.mode`) **on every frame** (cheap; one code path). `ViewOptions` gains `stereo` (bool),
+    `P`, `w0`, `near`, `fill`. The passes of a stereo frame are, in order, with `fill 1`: **L centre, L shifted, R
+    centre, R shifted**; with `fill 0`: **L shifted, R shifted**. The **first** pass is the streamed one (today's code,
+    with its uniform set at `view_begin`: `(0,1,0,0)` or `(−P, w0, −near, 0)`), so with `fill 1` a stereo frame starts
+    byte-for-byte as an M6 direct frame. `view_end_direct`, after `issue_pending` and **before** `restore_state`, runs
+    each further pass: `C3D_FrameDrawOn(target of the eye)` (false → discard `Begin`), `C3D_FVUnifSet(stereo)`, then for
+    every record: `set_blend(rec.blend)`, `set_mode(rec.mode)` (false → discard `Tex`), bind `rec.tex` to unit 0 through
+    `__real_C3D_TexBind` if it is **not null** and differs from `s_f.bound_tex` (null = keep the current bind: unmasked
+    static and `textures 0` record null, and `C3D_TexBind(n, NULL)` dereferences it, `draw.cpp`:426-427), `reserve_left()` (false → discard `Cmdbuf`),
+    `C3D_DrawElements` with the record's range. Then `restore_state`, `flush_rings`, the end as today. The projection
+    uniform is the same for both eyes (same 512x256 size). A discard at any point is today's discarded direct frame (SW
+    redraws it, `tex_partial`); it also resets the ramp. No split and no extra GX entry: one command list with target
+    switches, as the stereo examples draw both eyes in one frame.
+  - *What the two textures hold.* The left texture follows M6's rules unchanged (`tex_view`, seed, sync; on a stereo
+    frame it holds the left eye's view, which is what a later sync or readback frame starts from: only uncovered pixels
+    could tell). The right texture is **cleared to opaque black** (`view_clear_target`'s form, one GX entry, with the
+    other grouped operations right after `frame_begin`) on a stereo frame when the previous world frame was not a stereo
+    frame, or the texture was just created; otherwise it keeps its last picture. It is never seeded, synced or read back
+    outside the tests.
+  - *The composite* (`back/present.cpp` `present_composite`, :777-940). When the view frame was stereo (a flag handed
+    over like the fade, cleared by `direct_policy`, consumed by the next composite): everything from **the state block (:881-884:
+    `set_present_draw(Plain)`, cull, stencil, alpha test off, blend ONE/ZERO)** through `C3D_FrameDrawOn` to the fade passes
+    (:881-905) moves into a helper `composite_eye(target, vtex, …)` called for (left target, left texture) and then (right
+    target, right texture). The helper must start from that full state, and restore unit 1 as the fold path expects,
+    because the left eye leaves the band blend, a fade's blend/TEV/alpha test or the fold's unit 1 behind (critic round 1,
+    major 1). Same VBO, same band quads at the same positions (**overlays at zero
+    parallax**, section 6), the same fade for both (`draw_fade_fold` already takes the view texture). `frame_end(2, …)`.
+    Not stereo: one call, `frame_end(1, …)`, exactly today's frame. GX entries of a stereo composite: ≤ 4 bands + end + 2
+    linked = 7 (the `Composite` warning bound of `frame_end` goes from 6 to 7); 2.4's worst case becomes 24 + 1 + 2 = 27
+    < 32. `direct_check` keeps checking the left eye against the left texture (valid on stereo frames too).
+  - *Counters and log lines.* `[c3d] stereo:` once a second and `stereo final`: `stereo=` / `mono=` direct frames, `p`
+    now and its maximum, `P` in pixels, `passes=` drawn, `recs_max=`, `replay_discards=` by reason, `r_clears=`,
+    `ramp_resets=`, `slider=` last read, `off=` reason or none. Every change between stereo and mono is logged once
+    (at most 20 lines, then counted), as M6's mode changes. Profiler: a zone `c3d_stereo` around the replayed passes,
+    nested in `c3d_draw`; `gpu_ms view` then covers all the passes.
+  - *Tests.* **Host** (`scripts/3ds/tests/c3d-host/`): the ramp (0 → T in `ceil(T·N)` steps, monotone; a non-capable
+    frame gives 0 at once; a slider drop falls at 1/N per frame; below 1/64 is 0; `N` = 1 jumps); a float reference
+    `stereo_shift(w, e, P, w0, near)` in `core/stereo.h` with the four calibration depths below giving exactly −P, 0,
+    P/2 and within 0.01 of P; `weapon_w` for `t` = 0, −1, 0.5, 1; the cap default (2 944 with `stereo 1`, 3 584
+    without, an explicit key wins either way); the GX accounting of a stereo composite (7) and of a stereo view frame
+    (seed + right clear + 8 promotions + LUT ≤ 24).
+    **T1, `stereo_cal 1`** (calibration, Azahar and console; `back/draw.cpp`, a sibling of `view_direct_calibrate`): on
+    each direct frame, instead of the world, with `P` = 8, `w0` from the config, `near` = 1, `fill 0`, both eye textures
+    cleared to opaque black: five 16x16 flat-colour quads through the **world program** (stage 0 = the vertex colour,
+    the `textures 0` branch of `view_begin`, `draw.cpp`:662-668) at rows 100-115, columns 100, 150, 200, 250 with `w` =
+    `w0/2`, `w0`, `2·w0`, `kWPerspMax`, and a fifth at column 2 with `w = w0/2`. Both textures are read back
+    (`view_queue_readback` gains an eye argument) and the first and last covered column of each quad compared with the
+    expectation: left eye columns 108, 150, 196, 242 and 10; right eye 92, 150, 204, 258 and, clipped at the edge,
+    0..9 covered; columns 400-511 of both hold no pixel of the fifth quad's colour (no wrap). After the composite the
+    same positions are checked in **both framebuffers** (`gfxGetFramebuffer(GFX_TOP, GFX_LEFT / GFX_RIGHT)`, as
+    `direct_check` reads the left one), which proves which target reaches which eye. One line per frame `[c3d]
+    stereo_cal: tex L 5/5 R 5/5 fb L 5/5 R 5/5`; gate: 30 of 30 frames complete on both Azahar backends.
+    **T2, identity** (`stereo_force 1`, `stereo_slider 0`, `stereo_check 30`, `direct_check 30`, both `stereo_fill`
+    values): the full stereo path with `P` = 0. Every check: right framebuffer equal to the left **pixel for pixel (0
+    differences)**, and `direct_check` as M6's gate (≥ 99.9 % within Δ 1, 0 over 32). This is the test of the draw list:
+    the right eye is made only of replayed draws. L0, L6, L20 and the L01 film, both backends, with `overlays 1` and
+    over the Fade Test plugin (fades per eye).
+    **T3, parallax runs** (`stereo_slider 100`, defaults): L0, L6, L20, the L01 film, scripts 20 (map), 14 (terminal):
+    0 replay discards, `usage_max` ≤ 0.25, GX high-water ≤ 24, `recs_max` < 2 048, the texture-cache audit ok; map and
+    terminal frames counted `mono` and the ramp restarting after each (the logged `p` rises by 1/15 per frame from 0);
+    left and right top-screen captures saved at the bench spots (`screen-perf-L<n>-top.png` and a new `-top-right.png`
+    from `framebuf1_vaddr` of the same capture info, `a1_3ds_platform.cpp` `dump_screen`) for the user to look at.
+    **T4, gaps** (`stereo_gaps 1`, test only, with `stereo_fill 0`): both eye textures are cleared to magenta on every
+    stereo frame and every 30th frame the left is read back; `gap_px` = magenta pixels in 400x240, average and maximum
+    per spot at slider 100. Reported, not gated: it is the evidence for D2.
+    **T5, regression**: M6's and M6b's gates on the final binary with `stereo 0`, and again with `stereo 1` at
+    `stereo_slider 0` (no stereo frame must be decided: `stereo=0`); `present_diff` 0; OFF builds `objdump -d` identical
+    to copies saved at the start, `nm` 0; four builds, 0 warnings.
+    **T6, VRAM**: `vramSpaceFree` at exit, the pool's high-water, evictions and `promotions_blocked` on L0 / L6 / L20
+    with the 2 944 cap, against M6's figures.
+    **Bench** (`perf-bench.sh`, HUD + Map, L0 / L6 / L20, @30 and @60, `quiet 1`): mono direct, stereo `fill 1`, stereo
+    `fill 0` at slider 100: `frame + overlay`, busy, `c3d_draw` with `c3d_stereo`, `c3d_wait`, `gpu_ms view`. Azahar —
+    non-authoritative; measured, not deciding (0.5).
+  - *Work split: three commits, each gated before the next.* **(1)** `core/stereo.*`, the keys, the cap rule (`vram_cap_set`,
+    `stereo_allocated`, `stereo_vram_cap`), host tests; the shader; the right-eye objects and 3D mode, with the
+    allocated / enabled split, `config_apply_preference` setting `cfg.stereo`, `gfxSet3D` following it and the `gfxIs3D()`
+    guard (D1's wiring is here, not in (3): the preference's bundle needs no new menu item); the kept view textures,
+    `stereo_size`, `stereo_fail`; the draw list and passes; the two-eye composite; `stereo_force` and `stereo_check`:
+    gate T2, T5 and T5b. **(2)** the front end's `w`, the ramp and the slider, `stereo_cal`, `stereo_gaps`,
+    the right-eye capture: gates T1, T3, T4. **(3)** T6, the bench, the records (`PERF.md`
+    "Stage 10 M9", this block's status, 9.1's column, `CLAUDE.md`, the memory entry) and the console runbook. Tag
+    `port-stage10-M9` on the last. If a gate cannot be met, stop and ask (the standing "within reason" rule).
+  - *The preference and stereo (critic round 1, major 4; D1).* Two things are kept apart. **Allocated** (fixed for the
+    run, decided once at `present_init`): the right screen target, the second view texture and the 2 944 cap. **Enabled**
+    (`cfg.stereo`, may change between frames). Without a `debug-c3d` file: allocated is always yes (a Software player's
+    VRAM is otherwise unused, so the 887 KiB cost nothing there), and `config_apply_preference(cfg, gpu)` sets `cfg.stereo
+    = gpu`; so turning GPU on mid-run has its objects and its cap from the start, and turning it off stops stereo frames
+    at once. With a file: allocated = enabled = the file's `stereo` key for the whole run, and the cap is 2 944 only if
+    allocated and the file has no `vram_cap`. **3D mode follows enabled:** `gfxSet3D(enabled)` is called
+    at `present_init` (before the targets; enabled is `cfg.stereo` as it is then: 0 without a file, so 2D on the menus
+    until the first hook 3a applies the preference) and again whenever `config_preference` changes `cfg.stereo` (a mode
+    byte only, (e)); once stereo is off for the run (vram, uniform) it stays false. So Software frames are shown in 2D
+    mode. The right target is created whatever the mode byte is then, and **a stereo frame is decided only if
+    `gfxIs3D()`** (in 2D mode `gfxGetFramebuffer(GFX_TOP, GFX_RIGHT)` is the left buffer, `gfxGetFramebuffer+0x28-0x34`,
+    so a right-target transfer would overwrite the left image; a violation is counted `not3d=` and the frame is mono).
+    `present_detach` sets it false. **The uniform** is looked up in `world_init` (the first view frame, `back/draw.cpp`
+    :146-163, long after `present_init`): if `s_uloc_stereo < 0`, stereo is turned off for the run there (`off=uniform`,
+    `gfxSet3D(false)`); the right-eye objects stay allocated and are never drawn. Allocation never depends on the uniform.
+  - *The view textures stay (critic round 1, major 5).* `view_ensure` today deletes and recreates the 512x256 texture
+    whenever the view's w x h changes (`back/view.cpp`:222-231), a late 512 KiB allocation, twice with stereo. Changed
+    (round 2, major 2): when the wanted target is again a texture target with the same `tw x th`, both textures and
+    targets are **kept**, `s_w / s_h` (the viewport) change, the right texture is cleared as "just created", and the
+    readback buffer `s_argb` (`malloc(w*h)`, `view.cpp`:257-259) is **allocated once for 512x256** on the texture path so
+    a larger view cannot overflow it. And **with stereo allocated a view that does not fit the texture target (Classic's
+    640x320) is drawn by SW** (new skip reason `stereo_size`, decided before `view_ensure` is asked) and never creates the
+    unlinked 800 KiB target: the textures are never deleted for a size change. That costs nothing measured (Classic @60:
+    GPU 52.89 against SW 52.90 fps, `PERF.md` "Stage 10 M8"; under the preference Classic is already `fallback_sw`).
+    `mode readback` with `stereo 1` in a file is likewise not stereo-allocated for the view (no texture target exists):
+    `off=mode`.
+    Test key **`stereo_fail 1`**: the second texture's allocation is treated as failed (T5b below).
+  - *Additions to the tests (critic round 1).* **T2** also requires, on every check, `gfxIs3D()` true and
+    `gfxGetFramebuffer(GFX_TOP, GFX_LEFT)` ≠ `(…, GFX_RIGHT)` (in 2D mode libctru returns the left buffer for both, so the
+    comparison would pass empty-handed; minor 10); a check that fails this is a failed check. **T3** gates `w_low` = 0
+    and adds two runs: the Renderer preference toggled mid-level by script (off → on → off; stereo frames after the
+    switch on, none after the switch off, 3D mode logged following it, cap 2 944 throughout), and the bottom-screen mode
+    switched mid-level (HUD + Map → Classic → HUD + Map: no `view:` deletion line, Classic frames counted SW
+    (`stereo_size` or `fallback_sw`), stereo resumes). The host tests add `stereo_allocated` and `stereo_vram_cap`: no file
+    → 2 944; file `stereo 0` → 3 584; file `stereo 1` → 2 944; an explicit `vram_cap` wins in all three. **T5b**:
+    `stereo_fail 1` gives the one log line, `off=vram`, 0 stereo frames, and M6's direct gates otherwise unchanged.
+    **Bench** gains the row "`stereo 1`, slider 0" against "`stereo 0`" (does 3D mode alone cost anything; Azahar cannot
+    say, the console row decides). A `seed_check` frame that turns into SW after a stereo decision (`front/frame.cpp`
+    :1115-1140, test only) calls `stereo_reset` and drops the handed-over stereo flag.
+  - *Console list (section 10; a runbook in `NEXT-SPRINT.md`, not run by the implementer).* Added by critic round 1:
+    single-frame mono flicker (the composite's stereo swap happens in the queue-finish callback, `onQueueFinish+0xc0`,
+    while the next view frame's `C3D_FrameEnd+0xa0` clears `isTopStereo`: correct only if the GSP event thread runs first);
+    barrier brightness on mono frames with 3D mode on; the cost of 3D mode at slider 0; the preference toggled while a
+    stereo swap is pending (expect one 2D frame, no corruption). T1 on hardware (the shader's
+    `rcp`/`max`, left-edge clipping, which framebuffer reaches which eye, the transfer orientation of the right target);
+    the slider's value at rest and at the top; 3D mode with identical eyes on menus (brightness, any flicker at the
+    mode switch); HOME, sleep and Close with the right target linked; `gpu_ms view` and fps @60 with 2 and 4 passes
+    (the first real figure for M7's fill); the look of the gap fill against `stereo_fill 0`; comfort tuning of `K`,
+    `w0`, `near`, the weapon and the ramp; ghosting (section 10 item 13); the crosshair at zero parallax over a deep
+    scene (D3).
+  - *Known limitations (recorded).* The gap fill widens near edges by up to the parallax difference, with the centre
+    view's content; in those gap pixels a tinted rectangle's tint is applied twice (over the centre pass's) and slivers of
+    the centre pass's sprite can remain. The weapon in front of the screen (D3) has more out-of-screen parallax than a
+    wall nearer than `weapon_w`, though it is drawn over it. A rectangle clipped by a window keeps its centre-view cut. The static's noise and every overlay sit
+    on the screen plane. Readback, SW and Classic frames are flat. Old 3DS: not measured.
+  - *Not in M9:* SSAA with stereo (M7), an engine edit to widen the clip windows, a crosshair with depth, Classic; the
+    right eye's centre pass as a `GX_TextureCopy` of the left's (critic round 1, minor 12: it needs a frame split; backlog,
+    to be judged on the console's 4-pass figure).
+  - **Decisions (user, 2026-11-09).** **D1** "GPU (experimental)" turns stereo on; the 3D slider is the control (the
+    640 KiB smaller pool is accepted). **D2** the gap fill is on by default (4 passes). **D3** **the weapon in front of the
+    screen** (`stereo_weapon` −50 as the first value, console-tuned), the crosshair and overlays at zero parallax. **D4**
+    the ramp at a constant rate (at most `N` frames); slider 0 is flat at once.
 
 ## 8. Verification without hardware
 
@@ -5532,3 +5829,39 @@ cache runs only the quick phase until the identity (host-tested); (4) static ove
 recorded in the implementation notes; (5) `fade_bad 0` on dodge/burn is against the intended form: `fade_quirk_px` per type in
 `PERF.md`; (6) the record and the remaining gates (films, regression, bench, software backend): done before the tag. The
 Fade Test was rerun on both backends on the fixed binary (`fade_bad 0`).
+
+### M9 specification drafted (coordinator, 2026-11-09; user request; not yet reviewed)
+
+Revision 0 is in section 7's M9 block. Verified before writing, each with its citation in the block: the vertex's `w` is
+the eye depth for walls and floors and the constant 1 for rectangles and landscapes; draws are streamed, so the eyes need a
+draw list; the texture cache keeps a frame's textures; citro3d swaps in stereo only when the right-linked target was drawn
+and libctru duplicates the left image otherwise (disassembly of both libraries), so non-stereo frames need no code; the
+engine clips polygons at vertical window lines, the source of the gaps; picasso assembles the new shader. New against
+section 6: a centre-view pass under each eye as the gap fill (4 passes), a near clamp, the rectangles' and landscapes' `w` on
+stereo frames, the weapon's depth as a key, the ramp as a constant rate, `vram_cap` 2 944 KiB with `stereo 1`. Open: the user's
+decisions D1-D4 (the end of the block), then the critic.
+
+### M9 specification: critic round 1 and the user's decisions (coordinator, 2026-11-09)
+
+The critic (Opus) verified facts (a)-(g) and (i), the parallax maths, every T1 column, the shader's encoding, the VRAM and GX
+arithmetic and that `{first, count, tex, blend, mode}` suffices for a replay; verdict **revise**, no blocker, 5 majors, all
+applied in revision 1: the composite helper takes the state block with it (:881-884); unmasked static polygons carried `w =
+1`; no test saw the front end's `w` (a host-tested `stereo_w` and the `w_low` gate); the M8 preference against "allocated at
+init" (allocated and enabled are now separate; without a file the right-eye objects and the 2 944 cap always exist); the view
+texture was recreated on a size change (kept now). Minors applied: null texture in a record, `uint32_t` and `ring_indices / 3`
+records, slider 0 flat at once, `stereo_weapon` −100..100, T2 checks 3D mode and distinct buffers, `stereo_fail`, the bench
+row for 3D mode at slider 0, two console items. Not taken: the right centre pass as a texture copy (backlog). **User
+decisions:** D1 GPU preference + slider; D2 fill on; **D3 weapon in front** (not the draft's screen plane; −50 as a first
+value); D4 constant rate.
+
+### M9 specification: critic round 2 (coordinator, 2026-11-09)
+
+Verdict **revise**, no blocker; round 1's fixes 1-3 and the minors confirmed, fixes 4 and 5 not implementable as written.
+Applied in revision 2, with the critic's proposed text: the uniform is checked in `world_init`, not at `present_init` (where
+it is always −1); the cap is computed where the cache is created, from `vram_cap_set` and a plain `stereo_allocated`, because
+without a file the parser never runs; Classic's 640x320 view is drawn by SW when stereo is allocated, so the textures are
+never deleted, and `s_argb` is sized once; "Right-eye objects" keyed on allocated, not on `cfg.stereo`; D1's wiring, the kept
+textures, `stereo_fail` and T5b belong to commit 1; `gfxSet3D(enabled)` before the targets and false on any failure; a stereo
+frame only if `gfxIs3D()`; the static polygon's noise and `Degenerate`; section 6's heading and test list. Two revise rounds
+are the workflow's limit: the spec is taken as **approved for implementation** with these applied; the code review of each
+commit is the next check.
