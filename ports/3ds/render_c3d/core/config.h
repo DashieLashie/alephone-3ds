@@ -167,8 +167,9 @@
 	  stereo_fill 0|1   default 1: each eye is drawn unshifted first, then shifted (4 view passes); 0 = shifted only
 	  test only: stereo_slider N (-1 = the hardware slider, default; 0..100 = that percentage), stereo_force 0|1 (every
 	  direct frame takes the stereo path even at strength 0), stereo_check N (every N-th stereo composite compares the
-	  right framebuffer with the left), stereo_fail 0|1 (the second view texture's allocation fails), stereo_cal 0|1 and
-	  stereo_gaps 0|1 (M9 part 2: parsed, no effect yet)
+	  right framebuffer with the left), stereo_fail 0|1 (the second view texture's allocation fails), stereo_cal 0|1 (T1: five
+	  calibration quads instead of the world, both eyes read back) and stereo_gaps 0|1 (T4: both eye textures cleared
+	  to magenta, uncovered pixels counted)
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by

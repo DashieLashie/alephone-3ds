@@ -4297,7 +4297,7 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     at the 3 584 cap; Marathon 2's landscape part 0 is 2 048 KiB, which leaves 896 for everything else in VRAM; the rest
     is sampled from the linear pool (M5's `promotions_blocked` path; G3-a ran with a 2 048 cap and 0 failures). **M7:**
     its 1 024x512 view (2 048 KiB) cannot exist twice, so SSAA is off while a frame is stereo; M7's spec owns that.
-    9.1 gets a column "Direct + stereo (M9)" with these figures when the spec is approved.
+    9.1 has the column "Direct + stereo (M9)" with these figures.
   - *Right-eye objects and 3D mode* (`back/present.cpp`, `back/view.cpp`). **When stereo is allocated** ("The preference
     and stereo" below: not "when `cfg.stereo`", which is 0 at `present_init` without a file): `present_init` calls
     `gfxSet3D(enabled)` **before** creating the targets (example order, (f)), then creates the right screen target exactly as
@@ -4564,7 +4564,10 @@ and a second view texture, 887 KiB, so the pool's default cap is 2 944 KiB whene
 Renderer preference without a file: always; with a file only `stereo 1`); 82 KiB are left for alignment. Free VRAM at exit,
 stereo 0 against stereo allocated, on L0 / L6 / L20: 373 / 1 609 / 3 593 against **116 / 2 770 / 2 706** KiB; L0 and L6 sample
 their 2 048 KiB landscape part from linear memory (a blocked promotion), L20 is unchanged. M7's 1 024x512 view (2 048 KiB)
-cannot exist twice: SSAA is off while a frame is stereo.
+cannot exist twice: SSAA is off while a frame is stereo. **For M7's spec:** under the preference (no `debug-c3d` file) the
+right-eye objects (887 KiB) are **always** allocated, so the M7 column's pool of 2 048 KiB holds only with stereo not
+allocated. With both, 750 (two screen targets) + 512 (right view) + 2 048 (SSAA view) + 512 + 512 + 320 = 4 654 KiB, which
+leaves a pool of at most about 1 490 KiB, unless M7 frees or reuses the right-eye view texture while SSAA is on.
 
 **M5 (critic, M5 code review major 1):** a Marathon 2 landscape's part 0 is **2 048 KiB** (1 024 × 512 RGBA8; part 1
 128 KiB), inside the pool's cap but not always one contiguous `vramAlloc` block. A promotion allocates first and
@@ -5971,3 +5974,14 @@ from linear memory), and the bench (3D mode at slider 0 costs nothing in Azahar;
 every stereo row holds 59.6-59.7 fps @60; Azahar cannot say what the console's fill costs). Section 9.1 has the column "Direct +
 stereo (M9)", section 10 item 13 the console list, `NEXT-SPRINT.md` the runbook "M9 console check" (not run). **Next: M7
 (supersampling), last; its spec must decide SSAA off while 3D is on.**
+
+### M9 commit 3: records review (coordinator, 2026-11-13)
+
+The critic (Opus) on `912919545`: the code is right (`init_right = !prev || seed`; `reseed` does nothing unless given), every
+bench cell and the gate figures it sampled match the logs, the runbook's keys are all accepted by the parser; **revise the
+records**, one major: `PERF.md` named one binary for runs made on three (`c2`, `c2r`, `c3`). Corrected with the list of which
+run used which code and why the older ones stand. Also corrected: the runbook's Azahar figure for fill 1 against fill 0, its
+time and launch count, its order (HOME / sleep / Close second, comfort tuning last), "L0" not "L1", the saved-game step made
+conditional, a mono `gpu_ms` baseline and a `reseed` run for the copy's cost added; 9.1's note for M7 (stereo's objects are
+always allocated under the preference); `config.h`'s comment on `stereo_cal` / `stereo_gaps`; four small wordings in
+`PERF.md`. No new run was needed. **M9 is done in Azahar; tag `port-stage10-M9`.** Console: `NEXT-SPRINT.md` "M9 console check".

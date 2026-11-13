@@ -1963,7 +1963,7 @@ passes' GPU time, and the static's look. Setup, driving and `$H/m1/run.sh` as in
 **End:** ftpd: delete `/3ds/alephone/debug-c3d`, `debug-perf` and the plugin. **Record** in `PERF.md` ("Stage 10 M6b —
 console") and the design's M6b status and Review log.
 
-## M9 console check (stereo 3D; ~45 min, 14 launches; when the user is at the console)
+## M9 console check (stereo 3D; ~60 min, 17 launches plus one per comfort value tried; when the user is at the console)
 
 **Not run yet** (written 2026-11-13 for `port-stage10-M9`; `PERF.md` "Stage 10 M9", design section 7 "M9", its Review log and
 section 10 item 13). Azahar passed every gate; it cannot say how the stereo looks, what the 3D slider reads, what the two passes
@@ -1974,6 +1974,9 @@ cost on the PICA, whether the right target reaches the right eye, or whether the
 The defaults being judged: `stereo_k 96` (6 px per eye at slider 1, 12 between the eyes at infinity), `stereo_w0 1024` (1 WU on
 the screen plane), `stereo_near 100`, `stereo_weapon -50` (weapon in front of the screen, user decision D3), `stereo_ramp 15`,
 `stereo_fill 1`.
+
+**Order of the session:** step 1, then **step 5 (HOME, sleep, Close: the hang risk, so it comes before the long steps)**, then
+2, 2b, 3 (look only), 3b, 4, 6, 7, and **the comfort tuning of step 3 last**, with whatever time is left.
 
 **1. T1 on the hardware** (1 launch, ~3 min). `debug-perf-L0` + `m9-t1.cfg` (`renderer c3d`, `mode direct`, `play 1`, `textures 1`,
 `lit 1`, `stereo 1`, `stereo_cal 1`, `stereo_fill 0`, `stereo_slider 100`). **Pass:** 30 lines `[c3d] stereo_cal: tex L 5/5 R 5/5 fb
@@ -1989,9 +1992,12 @@ L0, and `m9-bench-mono.cfg` and `m9-bench-f1.cfg` on L20: `debug-perf-L<N>` + th
 `$H/m1/run.sh build-3ds-c3d-prof m9c-<mono|s0|f1|f0>-L<N>`. **Record** the BENCH lines (`fps`, `busy`, `c3d_draw`, `c3d_stereo`, `c3d_wait`,
 `c3d_vblank`) and `direct final` (`direct=` must be >= 95 % of `frames=`) and `stereo final` (`stereo=` all frames on the f rows,
 0 on s0). **Reading it:** s0 against mono = the cost of 3D mode and the allocation (Azahar: nothing); f1 against f0 = the second pair
-of passes (Azahar: +1.0 ms busy @30, CPU only). **The question:** does f1 hold >= 55 fps @60 on L0/L20 (Azahar 59.6)? If `fps` drops
+of passes (Azahar: +1.6 / +1.6 / +0.5 ms busy @30 on L0 / L6 / L20, `c3d_stereo` 2.47 against 0.82 ms on L0, CPU only). **The question:** does f1 hold >= 55 fps @60 on L0/L20 (Azahar 59.6)? If `fps` drops
 under 55 with f1, note whether f0 holds it (D2 made fill 1 the default). The same numbers are M7's first fill-rate evidence.
-Then **2b** (2 launches, ~5 min): `m9-gms-f1.cfg` and `m9-gms-f0.cfg` (the bench cfgs without `quiet 1`) on L0 @60 for `gpu_ms
+Then **2b** (4 launches, ~10 min): `m9-gms-mono.cfg` (the 1-pass baseline of this session and this binary), `m9-gms-f1.cfg` and
+`m9-gms-f0.cfg` (the bench cfgs without `quiet 1`), and `m9-gms-f1.cfg` with the line `reseed 10` added (a right-eye copy every
+10th frame: the difference of its `view=` against plain f1, times 10, is the GPU time of one VRAM to VRAM copy; if it cannot be
+told from noise, record "not measurable"), all on L0 @60 for `gpu_ms
 draw=… view=…` (the view frames' GPU time, `C3D_GetDrawingTime`: M6's console figure for 1 pass was 1.3-1.5 ms; expect about 2x and
 4x the world part). **Record** the mean and max `view=` over the samples.
 
@@ -2005,7 +2011,7 @@ the slider through its range: the ramp should ease (no pop). **Record** the log'
 0.00**; if it is 0.01-0.02 the 1/64 floor is doing its work, record the value; if it never reaches 0 stereo never turns off) and at the
 top (expected 1.00), `P=`, `off=none`, `not3d=0`, `replay_discards` all 0. **Ghosting:** at full slider look for a ghost of the
 weapon and of bright edges (the barrier's crosstalk): record where it is worst and at which slider position it starts. **Comfort
-tuning** (edit the cfg between launches only if something is wrong; one value at a time, record the pick): `stereo_k` 64 / 96 / 128 (how
+tuning** (the last thing of the session; edit the cfg between launches only if something is wrong; one value at a time, record the pick): `stereo_k` 64 / 96 / 128 (how
 deep before it strains), `stereo_w0` 512 / 1024 / 2048 (where the screen plane sits), `stereo_near` 50 / 100 / 200 (how far things may
 come out), `stereo_weapon` -50 / 0 / -100 (the weapon's depth; D3), `stereo_ramp` 8 / 15 / 30 (how fast the depth returns after a map, a
 flash or a pause: it must not pop, it should not feel slow).
@@ -2015,15 +2021,16 @@ frame left there (a smear or, at the very first frames, black at the view's righ
 
 **4. Identity, re-entries and black specks** (1 launch, ~8 min). `m9-console-identity.cfg` (`stereo 1`, `stereo_force 1`, `stereo_slider
 0`, `stereo_check 5`, `stereo_fill 0`, `overlays 1`, `renderer c3d`, `mode direct`, `play 1`, `textures 1`, `lit 1`) and the Terminal Test plugin
-(`scripts/3ds/tests/plugins/Terminal Test` into the card's `Marathon2/Plugins/`; it opens terminal 0 three seconds in): play L1: wait for
+(`scripts/3ds/tests/plugins/Terminal Test` into the card's `Marathon2/Plugins/`; it opens terminal 0 three seconds in): play L0 (BEGIN NEW GAME): wait for
 the terminal, leave it, open the **map** (SELECT) and close it, take damage (a flash), then **quit to the menu (START, A) and begin a new game**,
-then **load a saved game** (save one first) and open the map again. **Pass:** every `[c3d] stereo_check:` line `differ=0 ... is3d=1
+then, **only if a saved game exists on the card** (Marathon 2 saves at pattern buffers only; else skip this part and say so),
+**load it** and open the map again. **Pass:** every `[c3d] stereo_check:` line `differ=0 ... is3d=1
 distinct=1` (a BAD line prints up to 8 pixels), `stereo final` `r_copies` rising by 1 at each of the re-entries (`stereo again after a
 frame that was not`, `collections changed ... start again`), `replay_discards` 0. **Look:** no black specks or old picture fragments in
 either eye right after the terminal, the map, the new game and the saved game (the earlier black clear left some; the copy should not).
 This also answers whether the VRAM to VRAM `GX_TextureCopy` (`GX_TRANSFER_RAW_COPY(1)`, 512 KiB, queued after the seed) copies the right
 data: a wrong copy shows as a garbled or stale right eye right after a re-entry. **Record** `stereo_check` count and any BAD.
-**The ramp after a level change and a saved-game load:** with `m9-console.cfg` instead (hardware slider up), walk to the level's exit or
+**The ramp after a level change and a saved-game load** (one more launch): with `m9-console.cfg` instead (hardware slider up), walk to the level's exit or
 load a save and watch the first second: the depth should ease in from flat (the ramp restarts at every level load; intended): record
 whether it feels right or too slow.
 

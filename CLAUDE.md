@@ -49,7 +49,15 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   `3ds-port` too, user 2026-11-08); **M6b done** (2026-11-08, tag `port-stage10-M6b`, `PERF.md` "Stage 10 M6b", Azahar only, no engine edit: every fade,
   flash and tint direct via curve classification (affine quad, MIN/MAX fold passes, GPU noise static); dodge/burn drawn in the
   intended form because `fades.cpp`'s int32 overflow distorts SW's, user decision; Fade Test @60 59.7 fps vs 39.7 with
-  `fades 0`); **next: M9** (stereo; its spec must redo the VRAM budget first); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  `fades 0`); **M9 done** (2026-11-13, tag `port-stage10-M9`, `PERF.md` "Stage 10 M9", Azahar only, no engine edit: stereo 3D on direct
+  frames; per-vertex shift in the world shader from the eye depth `w`, a per-frame draw list replayed per eye, gap fill = a centre
+  pass under each shifted pass (4 passes, `stereo_fill 1`), two 512x256 eye textures and a right-linked screen target, the right
+  texture copied from the left on every entry into stereo, depth eased in by a ramp (`stereo_ramp 15`) after any flat frame and
+  at every level load; user decisions 2026-11-09: "GPU (experimental)" turns stereo on with the 3D slider as the control, fill on,
+  **weapon in front of the screen** (`stereo_weapon -50`), constant-rate ramp; under the preference the right-eye objects are
+  always allocated and the VRAM pool cap is 2 944 KiB (L0/L6's 2 MiB landscape part is then sampled from linear memory); Azahar
+  @60 59.6-59.7 fps on every stereo row, which says little about fill: **the console check is not run**, `NEXT-SPRINT.md` "M9
+  console check"); **next: M7** (2x2 supersampling, last; its spec must settle VRAM against stereo: design 9.1's note); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.

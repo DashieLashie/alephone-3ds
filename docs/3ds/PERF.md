@@ -2214,8 +2214,14 @@ ramp, calibration, gap count, right-eye capture), `f81a41962` (review fix: the r
 cleared) and the records commit (the seeded-frame rule, T6, the bench, this section); tag `port-stage10-M9` on the last.
 Design `CITRO3D_DESIGN.md` section 7 "M9 specification" (revision 2) and the Review log "M9 commit 1: code review", "M9
 commit 2: code review", "M9 done". **No engine edit, no `PATCHES.md` entry.** Everything below ran in Azahar (host GPU =
-"hw", Azahar's software backend with `gxq_budget 3` = "sw"); **nothing was run on the console**. Binary of this section's
-runs: `build-3ds-c3d-prof` (md5 `f8d3cf57…`, the records commit's code). Logs `build/m9/`, `build/m9/c2/`, `build/m9/c2r/`,
+"hw", Azahar's software backend with `gxq_budget 3` = "sw"); **nothing was run on the console**. **Three binaries, by log
+directory:** `c2` = `f77ef9af7`'s code, the right eye still cleared (the T4 gap row at slider 100; the M1-M5 and M6b regressions);
+`c2r` = `f81a41962`'s code (T3 in all its rows, T4 at P = 0, T5b, T1 sw, both Fade Test rows, film runs 1-3 of fill 0 and the
+fill 1 film); `c3` = the records commit's code, `build-3ds-c3d-prof` md5 `f8d3cf57…` (T1 hw, T2 levels hw, the fourth fill 0 film
+run, T5 direct, T6, the bench, `reseed`; the negative control is its own build of `f77ef9af7`). The older runs were not
+repeated because nothing they exercise changed afterwards: the generation reset touches only the stereo state, `init_right`
+differs only on a seeded stereo frame (every bench and film run has `seeds=1`), `reseed` is 0 unless the key is given, and T5
+direct was rerun on `c3` (41 / 41 / 44 checks, 0 bad). Logs `build/m9/`, `build/m9/c2/`, `build/m9/c2r/`,
 `build/m9/c3/`, bench `build/perf/m9c3-*` (not in git).
 
 **What was built.** `core/stereo.{h,cpp}` (the ramp `stereo_step` at 1/N per frame, `stereo_shift`, `stereo_w`, the weapon's
@@ -2234,13 +2240,13 @@ keys `stereo_force`, `stereo_check`, `stereo_cal`, `stereo_gaps`, `stereo_fail`,
 | **T1** `stereo_cal` (5 quads at depths w0/2, w0, 2·w0, far and one at the left edge, P = 8) | **30 of 30** frames `tex L 5/5 R 5/5 fb L 5/5 R 5/5` on both backends (every quad's first and last column as the model: left 108 / 150 / 196 / 242 / 10, right 92 / 150 / 204 / 258 / 0..9; no wrap at columns 400-511). Overlays off: the test overlay's text covers quads 0 and 4 |
 | **T2** identity (`stereo_force 1`, slider 0, `stereo_check 30`): L0 / L6 / L20, fill 1 and 0, hw and sw | 36 / 36 / 42 (fill 1) and 39 / 39 / 43 (fill 0) checks, **0 differing pixels** in every one, 3D mode on, buffers distinct; `direct_check` 100 % within 1 (max Δ 0 hw, 1 sw), `over_32` 0 |
 | **T2** Fade Test, fill 1 / 0 (hw) | 519 and 546 checks, 0 bad; the fade checks 0 bad |
-| **T2** L01 film, `stereo_check 5` (hw), final code | fill 0: 3 568 / 3 717 / 3 715 / 3 722 checks (four runs), **0 bad**; fill 1: 3 610 checks, 0 bad. 12-21 right-eye copies per run; 27-44 checks fell within 12 world frames of a copy (a lower bound: the log prints at most 20 change lines) |
+| **T2** L01 film, `stereo_check 5` (hw; fill 0 runs 1-3 and fill 1 on `c2r`, fill 0 run 4 on `c3`) | fill 0: 3 568 / 3 717 / 3 715 / 3 722 checks (four runs), **0 bad**; fill 1: 3 610 checks, 0 bad. 11-21 right-eye copies per run; 27-44 checks fell within 12 world frames of a copy (a lower bound: the log prints at most 20 change lines) |
 | **T3** parallax runs (slider 100, hw): L0 / L6 / L20 | 1 382 / 1 381 / 1 538 stereo frames, 0 replay discards, `w_low` 0 of 530 254 / 517 871 / 261 436 vertices, `recs_max` 80 / 75 / 25 of 1 365, `usage_max` 0.116 / 0.101 / 0.037, GX high-water 10 / 9 / 10, audit ok, `direct_check` 0 bad. sw (commit 2): 1 370 / 1 382 / 1 536, GX high-water 4 |
 | **T3** map (script 20), terminal (script 14), L01 film | 0 discards, `w_low` 0, GX 10; each flat stretch restarts the ramp at p = 0.0667 and adds 1/15 per frame to 1.0 (`ramp_resets` 1, 1, 10; terminal `flat=1 013`); film 18 749 stereo frames, `w_low` 0 of 4.79 M, `recs_max` 104, `usage_max` 0.145 |
 | **T3** Renderer preference, script 28 (Software → GPU → Software → GPU, no file, hardware slider path via Azahar's `factor_3d 100`) | "3D mode on / off / on (Renderer preference)", 1 725 stereo frames, none in game 3, the ramp from 0.0667 again in game 4, `r_copies` 2, cap 2 944 throughout, 0 discards |
 | **T3** bottom screen HUD + Map → Classic → HUD + Map twice (script 29) | under the preference: 2 532 stereo frames, `fallback_sw` 1 248, no `view:` line for Classic; with a file (`mode direct`, `fallback readback`, `stereo 1`): "400x240 -> 480x240, the texture targets are kept" and back twice, never "target deleted", 2 527 stereo frames; both `r_copies` 3, `ramp_resets` 2. Classic with the HUD hidden: `stereo_size` skip on every frame, no deletion line |
 | **T4** gap pixels, `stereo_gaps`, fill 0, slider 100 (hw), reported not gated | L0 avg 1 019.5 / max 1 025 (54 away from the 8 outer columns each side); L6 366.0 / 366 (126); L20 1 061.4 / 1 084 (6). Most are the strip the shifted eye has no content for at the view's own edge |
-| **T4** at P = 0 (`stereo_force`, slider 0, fill 0), final code | L0 avg 1.0 / max 1; L6 0 / 0; L20 0 / 0: the pixels no draw covers (cracks, tie pixels) are about one per frame at most |
+| **T4** at P = 0 (`stereo_force`, slider 0, fill 0; `c2r`) | L0 avg 1.0 / max 1; L6 0 / 0; L20 0 / 0: the pixels no draw covers (cracks, tie pixels) are about one per frame at most |
 | **T5** `direct_check` L0 / L6 / L20, `stereo 0` and `stereo 1` + slider 0 (hw) | 41 / 41 / 44 checks each, 100.000 %, max Δ 0, 0 bad; `stereo=0` in every `stereo 1` run. M6, M6b and the M1-M5 readback gates ran on the commit-2 binary (v0 and v1: sync, `readback_cal`, scripts 07 / 13 / 14 / 20 / 22, Fade, Liquid, both films, diffs, play, `vram_cap 512`, `fail_every`, `present_diff` 49 checks 0 differences; software backend: direct L0 only) |
 | **T5b** `stereo_fail 1` | one "off for the run (vram)" line, 0 stereo frames, `direct_check` 0 bad, both backends |
 | Builds / OFF builds | four builds, 0 warnings (also a clean rebuild of all four at commit 2); `build-3ds` and `build-3ds-prof` disassemble identically to the baselines, `nm` count 0; the right-eye capture is compiled only under `A1_RENDER_C3D` |
@@ -2276,7 +2282,7 @@ restart (`stereo=1 452 flat=1 ramp_resets=0`, one ramp log block at game 1's sta
 After the generation trigger (hooks 2a/2b; `boundaries=2`): "frame 640, collections changed (generation 3): the ramp and the
 right eye start again", "frame 641 stereo again", p = 0.0667 … 1.0000 over frames 641-655, `r_copies=2`.
 
-### T6: VRAM (stereo 0 with the 3 584 KiB pool against stereo allocated, 2 944 KiB; hw, `m6-direct.cfg`, final line of `tex:`)
+### T6: VRAM (stereo 0 with the 3 584 KiB pool against stereo allocated, 2 944 KiB; hw, `m6-direct.cfg` for `stereo 0`, the `t5-v1` runs (`stereo 1`, slider 0) for stereo allocated; final line of `tex:`)
 
 | Level | | free VRAM at exit | pool VRAM / linear used (KiB) | conversions (KiB) | promotions done / blocked (landscape blocked) | evictions | alloc-fail |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -2297,7 +2303,7 @@ sampling the landscape from FCRAM costs anything is a console question (design s
 
 ### The bench (`perf-bench.sh`, `RUNS=1`, HUD + Map, profile build, `quiet 1`, `fps_target` 30 or 60; Azahar — non-authoritative)
 
-Every row: every world frame direct (`direct final`), 0 discards; stereo rows `stereo` = all frames, `w_low` 0. `gaps` 0 everywhere.
+Every row: every world frame direct (`direct final`), 0 discards; slider 100 rows `stereo` = all frames (the slider 0 row `stereo=0`), `w_low` 0. `gaps` 0 everywhere.
 `c3d_draw` is exclusive of `c3d_stereo` (the zones nest and the profiler subtracts; "The profiler"), so a stereo frame's
 view work is `c3d_draw + c3d_stereo`. `frame + overlay` and busy as in "How to read these numbers" (busy = frame − idle).
 
@@ -2343,7 +2349,7 @@ Reading it. **3D mode and the allocation cost nothing measurable** (slider 0 aga
 +0.08 / +0.04 / −0.03 @60, within the noise of one run). **Fill 1's second and third passes cost CPU** (`c3d_stereo` 2.47 /
 2.46 / 0.81 ms: the replay re-issues every recorded draw once per extra pass, three extra passes with fill 1; the frames record at most 80 / 75 / 25 draws on L0 / L6 / L20), **busy +1.97 / +2.57 / +0.88 ms @30**; fill 0 (one replayed pass) +0.40 / +1.02 /
 +0.35. The 30 fps cap hides it, and **@60 every stereo row holds 59.6-59.7 fps** (the VBlank wait shrinks by what the
-passes take: `c3d_vblank` 4.4 → 2.2 ms on L0 with fill 1). `c3d_wait` stays 0.01 and `gpu_ms … view` 0.08-0.10 ms on every row
+passes take: `c3d_vblank` 4.4 → 2.2 ms on L0 with fill 1). `c3d_wait` stays 0.01 and `gpu_ms … view` 0.08-0.10 ms as the mean on every row (single samples up to 0.15)
 (`m9c3-gms-*`, 28 samples each): **Azahar runs the GPU work inside `C3D_FrameEnd` and charges instruction cost, not fill or
 cache misses, so these figures say almost nothing about the console's cost of 2 or 4 passes** (4-pass against 2-pass here
 is a CPU-side difference of the replay loop only). The console's `gpu_ms view` and fps @60 with 2 and 4 passes are the first
