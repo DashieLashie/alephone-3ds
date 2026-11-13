@@ -61,8 +61,8 @@ struct ViewBegin
 // M9 (design 7, "M9 specification"; direct frames only): `stereo` = a frame for two eyes. P is the parallax strength in
 // pixels (0 allowed), w0 the convergence depth, near the pop-out limit; `fill` = each eye is drawn unshifted first, then
 // shifted (4 passes), else shifted only (2). The first pass is the streamed one (the left eye); the others replay the draw
-// list in view_end_direct. `clear_right`: the right texture is cleared to opaque black first (the previous world frame
-// was not a stereo frame); a just-created one is cleared whatever this says. View_begin turns `stereo` off when the
+// list in view_end_direct. `init_right`: the right texture is first copied from the left (the previous world frame
+// was not a stereo frame); a just-created one is copied whatever this says (design 7, "What the two textures hold"). View_begin turns `stereo` off when the
 // right-eye objects do not exist (ViewBegin::stereo says what it did).
 struct ViewOptions
 {
@@ -72,7 +72,7 @@ struct ViewOptions
 	bool stereo = false;
 	float P = 0.0f, w0 = 1024.0f, near = 1.0f;
 	bool fill = true;
-	bool clear_right = false;
+	bool init_right = false;
 	// M9 part 2, test only. flat: the lit/textured TEV is not built, stage 0 is the vertex colour (stereo_cal's quads).
 	// gaps (stereo_gaps): on a stereo frame both eye textures are cleared to opaque magenta before the first draw (the
 	// right one on every frame, the left whatever `clear` says), so a pixel no draw covered is recognisable.
@@ -130,8 +130,8 @@ ViewEnd view_end_play_full(uint8_t* const* rows, unsigned* sentinel_count, unsig
 ViewEnd view_end_direct();
 // M9 part 2, stereo_cal (T1; design 7, "M9 specification", "Tests"): a stereo frame without the world: both eye textures cleared to
 // opaque black, then the five calibration quads (core/stereo.h) drawn through the world program with stage 0 = the vertex
-// colour, P = opt.P, w0 = opt.w0, near = opt.near, no fill; closed as view_end_direct. `opt` must have stereo, flat and
-// clear_right set and fill false (the front end does). Returns view_begin's result; *ve is the end (valid when Ok).
+// colour, P = opt.P, w0 = opt.w0, near = opt.near, no fill; closed as view_end_direct. `opt` must have stereo and flat
+// set and fill false (the front end does; the flat frame clears both textures to black). Returns view_begin's result; *ve is the end (valid when Ok).
 ViewBegin view_stereo_calibrate(int w, int h, const ViewOptions& opt, ViewEnd* ve);
 // M6 sync (M6 specification): the texture target read back into `rows` (every pixel) without drawing: its own C3D frame,
 // the readback and the retirement pair. !ok: not done (citro3d down, the gate, no texture target, or the GX budget).
@@ -145,7 +145,7 @@ void draw_free();
 
 // For the "[c3d] cmdbuf ..." line (context.cpp): the counters of this file as text.
 int draw_stats_text(char* buf, size_t size);
-// M9: this file's share of the "[c3d] stereo:" lines (passes, recs_max, replay_discards, r_clears).
+// M9: this file's share of the "[c3d] stereo:" lines (passes, recs_max, replay_discards, r_clears = test clears of the right texture, r_copies = copies from the left).
 int draw_stereo_text(char* buf, size_t size);
 
 } // namespace back

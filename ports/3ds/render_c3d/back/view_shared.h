@@ -45,6 +45,9 @@ C3D_Tex* view_texture_right();
 bool view_right_take_fresh();
 // gx_op: clears the right target to `rgba` (0xRRGGBBAA), like view_clear_target (same rule: right after frame_begin).
 bool view_clear_target_right(uint32_t rgba);
+// M9: gx_op: copies the left view texture into the right one (one raw texture copy, the entry the clear used to take); valid
+// only right after frame_begin() (and after the seed, which it follows in the queue). False: the GX budget refused.
+bool view_copy_left_to_right();
 // False once a texture target could not be made (logged once): direct frames are off for the run.
 bool view_direct_ok();
 // The projection's extent in pixels: the whole target for a texture target (512x256; g3a draws at 2x into its

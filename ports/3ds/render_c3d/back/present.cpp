@@ -840,13 +840,21 @@ void stereo_check_compare(const u32* fl, const u32* fr, bool is3d)
 	GSPGPU_InvalidateDataCache(fr, kFbPixels * sizeof(u32));
 	unsigned differ = 0, alpha_only = 0;
 	const bool distinct = fl != fr;
+	// The first 8 differing pixels (RGB), kept for the BAD line: screen x, y (the framebuffer is column-major, the bottom pixel
+	// first: index = x * 240 + (239 - y)) and both framebuffer words (0xRRGGBBAA).
+	struct Px { int x, y; u32 a, b; } first[8];
+	unsigned nfirst = 0;
 	for (size_t i = 0; i < kFbPixels; ++i)
 	{
 		const u32 a = fl[i], b = fr[i];
 		if (a == b)
 			continue;
 		if ((a ^ b) & 0xFFFFFF00u)
+		{
+			if (nfirst < 8)
+				first[nfirst++] = Px{static_cast<int>(i / kScreenH), kScreenH - 1 - static_cast<int>(i % kScreenH), a, b};
 			++differ;
+		}
 		else
 			++alpha_only;
 	}
@@ -857,6 +865,9 @@ void stereo_check_compare(const u32* fl, const u32* fr, bool is3d)
 	s_cn.stereo_check_bad += bad;
 	printf("[c3d] stereo_check: present %u: differ=%u alpha_only=%u is3d=%d distinct=%d%s\n", s_present, differ, alpha_only,
 	       is3d ? 1 : 0, distinct ? 1 : 0, bad ? " BAD" : "");
+	for (unsigned k = 0; bad && k < nfirst; ++k)
+		printf("[c3d] stereo_check:   differing pixel %u of %u: x=%d y=%d left=%08x right=%08x\n", k + 1, differ, first[k].x,
+		       first[k].y, static_cast<unsigned>(first[k].a), static_cast<unsigned>(first[k].b));
 }
 
 // Test only (stereo_cal, stereo_gaps): one eye's view texture read back in test frames of their own, after the composite
@@ -1136,7 +1147,7 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		if (t)
 		{
 			// gap = the magenta pixels of the view; edge = those in the outer margin columns (the view's own left and right
-			// edges, where a shifted eye has nothing to show whatever the content: K + 1 columns each side), interior = the rest
+			// edges, where a shifted eye has nothing to show whatever the content: stereo_k / 16 + 2 columns each side), interior = the rest
 			// (the strips beside vertical depth edges, design 7, M9 "The gap fill").
 			unsigned gap = 0, edge = 0;
 			const int vw = view_width(), vh = view_height();

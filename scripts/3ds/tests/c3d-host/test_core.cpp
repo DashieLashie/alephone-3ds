@@ -5530,10 +5530,15 @@ static void test_m9_cal()
 			CHECK(stereo_cal_rgb(a) != stereo_cal_rgb(b));
 }
 
-// The order of the GX entries of a stereo view frame as back/draw.cpp view_begin takes them (after the code review of
-// commit 1): the seed (view_seed_transfer), the right-eye clear (view_clear_target_right), the shade LUT, then the
-// texture cache's promotions (texcache_frame_start); the left clear (opt.clear) only in the gaps test. Every one is a
-// gx_op taken with the command buffer empty (cost 1), a promotion at worst 2.
+// The GX entries of a stereo view frame, in the order back/draw.cpp view_begin takes them (this is a model of that function, not
+// a call of it: keep the two in step). view_begin, after frame_begin with the command buffer still empty: (1) the seed, when
+// the texture lost the view (view_seed_transfer, a gx_op); (2) on a stereo frame whose right texture is fresh or re-entered,
+// the right eye's init (view_copy_left_to_right, a C3D_SyncTextureCopy in a gx_op, which replaced the black clear after the
+// code review of commit 2; stereo_gaps / stereo_cal instead clear it with view_clear_target_right, the same one entry); (3)
+// the shade LUT (shade_frame_start); (4) the texture cache's promotions (texcache_frame_start, at worst 2 each); (5) the left
+// clear (opt.clear / stereo_gaps only). Every one is taken with the command buffer empty (cost 1) except a promotion at worst 2.
+// The right init comes before the LUT and the promotions so that a tight budget refuses a promotion (retried next frame)
+// and never the init (which would discard the frame).
 static void test_m9_gx_accounting()
 {
 	// a stereo composite: <= 4 band uploads (1 each, command buffer empty) + end + 2 linked = 7 of 32
@@ -5548,32 +5553,32 @@ static void test_m9_gx_accounting()
 			CHECK(q.take(false));
 		CHECK(q.end_frame(1) == 6);   // the mono composite
 	}
-	// the full budget: seed + right clear + LUT + 8 promotions (2 each at worst) + end <= 24
+	// the full budget: seed + right init (copy) + LUT + 8 promotions (2 each at worst) + end <= 24
 	{
 		GxQueue q;
 		q.begin_frame();
 		CHECK(q.take(false));   // seed
-		CHECK(q.take(false));   // the right clear
+		CHECK(q.take(false));   // the right init (copy from the left)
 		CHECK(q.take(false));   // the shade LUT
 		for (int i = 0; i < 8; ++i)
 			CHECK(q.take(true));
 		CHECK(q.used() == 3 + 16);
 		CHECK(q.end_frame(0) <= 24);
 	}
-	// the software backend's gxq_budget 3, the first stereo frame after a map or terminal (seeded, right texture cleared):
-	// in the real order the three operations fit and a promotion is the one refused (it is retried next frame) ...
+	// the software backend's gxq_budget 3, the first stereo frame after a map or terminal (seeded, right texture initialised from the left):
+	// in the real order the three operations (seed, right init, LUT) fit and a promotion is the one refused (retried next frame) ...
 	{
 		GxQueue q;
 		q.set_budget(3);
 		q.begin_frame();
 		CHECK(q.take(false));    // seed
-		CHECK(q.take(false));    // right clear
+		CHECK(q.take(false));    // right init
 		CHECK(q.take(false));    // LUT
 		CHECK(!q.take(false));   // a promotion: refused, not fatal
 		CHECK(q.refused() == 1 && q.used() == 3);
 	}
-	// ... and in the order of commit 1 (clear after the promotions) a single promotion before it made the clear the
-	// refused one: the frame was discarded (DiscardReason::Gx). This is why the clear comes first.
+	// ... and in the order of commit 1 (init after the promotions) a single promotion before it made the init the
+	// refused one: the frame was discarded (DiscardReason::Gx). This is why the init comes first.
 	{
 		GxQueue q;
 		q.set_budget(3);
@@ -5581,9 +5586,9 @@ static void test_m9_gx_accounting()
 		CHECK(q.take(false));    // seed
 		CHECK(q.take(false));    // LUT
 		CHECK(q.take(false));    // a promotion
-		CHECK(!q.take(false));   // the right clear: refused
+		CHECK(!q.take(false));   // the right init: refused
 	}
-	// the gaps test (stereo_gaps): the right clear and the left clear are both taken before the first draw
+	// the gaps test (stereo_gaps): the right clear (instead of the copy) and the left clear are both taken before the first draw
 	{
 		GxQueue q;
 		q.begin_frame();

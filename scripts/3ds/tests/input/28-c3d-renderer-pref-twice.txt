@@ -1,5 +1,5 @@
-# Stage 10 M9 part 2, T3 (docs/3ds/CITRO3D_DESIGN.md, M9 "Additions to the tests"): the Renderer preference flipped twice in one run:
-# Software -> GPU -> Software. A preference can only be changed in Preferences, which the engine reaches from the main menu
+# Stage 10 M9 part 2, T3 (docs/3ds/CITRO3D_DESIGN.md, M9 "Additions to the tests"): the Renderer preference flipped three times in one run:
+# Software -> GPU -> Software -> GPU (four games). A preference can only be changed in Preferences, which the engine reaches from the main menu
 # only (shell.cpp / interface.cpp: iPreferences; START in a game is the quit dialog), so "mid-level" is between two games of
 # one run: the texture targets, the right screen target and 3D mode live on across them. Taps: bottom-screen coordinates =
 # top-screen ones minus 40 in x; the Renderer value is the row at y 127 of Graphics (script 27).
@@ -7,7 +7,8 @@
 # with one), the slider raised in Azahar (factor_3d 100: the hardware slider path). Run with the 3dsx of
 # -DA1_RENDER_C3D=ON -DA1_PROFILE=ON.
 # Expect: game 1 Software (no stereo frames, "3D mode" off), game 2 GPU ("[c3d] stereo: 3D mode on (Renderer preference)", stereo
-# frames, slider 1.00), game 3 Software ("3D mode off (Renderer preference)", no stereo frames); the right-eye objects allocated once, cap 2944 throughout.
+# frames, slider 1.00), game 3 Software ("3D mode off (Renderer preference)", no stereo frames), game 4 GPU again ("3D mode on",
+# stereo frames come back: the right eye copied from the left, `r_copies` +1, the ramp from p = 0.0667); the right-eye objects allocated once, cap 2944 throughout.
 wait 1000
 log --- game 1 (Software) ---
 tap A                  # BEGIN NEW GAME
@@ -87,6 +88,40 @@ wait 3000
 circle 0 0
 wait 500
 screens pt-game3
+log --- quit, Renderer -> GPU ---
+tap START
+wait 1000
+tap A                  # quit to the main menu
+wait 4000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+tap DOWN
+wait 300
+tap A                  # GRAPHICS
+wait 2000
+touch 175 127
+wait 150
+untouch
+wait 800
+screens pt-flip3
+touch 136 195          # ACCEPT
+wait 150
+untouch
+wait 2000
+tap B                  # out of Preferences
+wait 2000
+log --- game 4 (GPU again) ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 4000
+circle 0 0
+wait 500
+screens pt-game4
 log --- HOME > Close ---
 quit
 wait 5000

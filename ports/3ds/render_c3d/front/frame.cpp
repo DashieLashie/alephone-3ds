@@ -595,6 +595,8 @@ struct StereoFront
 	bool seen = false;               // a stereo-capable direct frame ran since the last hook 3a (s_stereo_seen)
 	bool prev = false, cur = false;  // the previous / this frame (hook 3a to hook 3a) ran as a stereo frame: the right clear
 	unsigned stereo = 0, mono = 0, not3d = 0, ramp_resets = 0, discards = 0;
+	uint32_t gen = 0;                // the texture cache's generation at the last hook 3a: a change = a level load or unload (hooks 2a/2b)
+	unsigned boundaries = 0;
 	unsigned flat = 0;               // frames (hook 3a to hook 3a, stereo enabled) with no stereo-capable direct frame: map, terminal, SW, readback...
 	float p_now = 0.0f, p_max = 0.0f, P_now = 0.0f, slider = 0.0f;
 	int last = -1;                   // 1 stereo, 0 mono, for the change lines
@@ -628,8 +630,8 @@ void stereo_abort()
 int stereo_counts_text(char* buf, size_t size)
 {
 	const int n = snprintf(buf, size,
-	                       "stereo=%u mono=%u flat=%u p=%.3f pmax=%.3f P=%.2f slider=%.2f not3d=%u ramp_resets=%u off=%s fill=%d ",
-	                       s_s.stereo, s_s.mono, s_s.flat, static_cast<double>(s_s.p_now), static_cast<double>(s_s.p_max),
+	                       "stereo=%u mono=%u flat=%u boundaries=%u p=%.3f pmax=%.3f P=%.2f slider=%.2f not3d=%u ramp_resets=%u off=%s fill=%d ",
+	                       s_s.stereo, s_s.mono, s_s.flat, s_s.boundaries, static_cast<double>(s_s.p_now), static_cast<double>(s_s.p_max),
 	                       static_cast<double>(s_s.P_now), static_cast<double>(s_s.slider), s_s.not3d, s_s.ramp_resets,
 	                       back::stereo_off_name(back::stereo_off_reason()), back::config().stereo_fill ? 1 : 0);
 	if (n > 0 && n < static_cast<int>(size))
@@ -1124,7 +1126,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			opt.w0 = static_cast<float>(cfg.stereo_w0);
 			opt.near = static_cast<float>(cfg.stereo_near) / 100.0f;
 			opt.fill = cfg.stereo_fill;
-			opt.clear_right = !s_s.prev;
+			opt.init_right = !s_s.prev;
 			opt.gaps = cfg.stereo_gaps;
 		}
 		if (direct && cfg.calibrate)
@@ -1143,7 +1145,6 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			back::ViewOptions co = opt;
 			co.seed_rows = nullptr;
 			co.clear = true;
-			co.clear_right = true;
 			co.flat = true;
 			co.gaps = false;
 			co.fill = false;
@@ -1539,6 +1540,24 @@ void direct_policy(unsigned blocks)
 	const Config& cfg = frame_config();
 	// M9: frames that never reached a stereo-capable direct frame (map, terminal, SW, readback, menus, a discard) restart
 	// the ramp; the stereo flag handed to the composite belongs to one frame; the right-clear rule's "previous frame" is set.
+	// A level load or unload (hooks 2a/2b bump the texture cache's generation: a game ended, a new one began, a level changed)
+	// is a boundary: hook 3a does not run in the menus, so without this the last frame of the old game would still count as
+	// "a stereo frame ran since the last hook 3a" and the new game would start at full parallax with the right texture as
+	// it was (the ramp must restart from 0 and the right eye must be initialised again).
+	const uint32_t gen = back::texcache().generation();
+	if (gen != s_s.gen)
+	{
+		s_s.gen = gen;
+		s_s.seen = false;
+		s_s.cur = false;
+		++s_s.boundaries;
+		if (cfg.stereo && s_s.lines < 20)
+		{
+			++s_s.lines;
+			printf("[c3d] stereo: frame %u, collections changed (generation %u): the ramp and the right eye start again\n",
+			       s_frame, static_cast<unsigned>(gen));
+		}
+	}
 	if (!s_s.seen)
 	{
 		if (s_s.ramp.p > 0.0f)

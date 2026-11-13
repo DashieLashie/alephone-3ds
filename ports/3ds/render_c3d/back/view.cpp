@@ -485,6 +485,32 @@ bool view_clear_target_right(uint32_t rgba)
 	return false;
 }
 
+// M9 (design 7, "What the two textures hold", changed after the code review of commit 2): the right eye's texture starts a
+// stereo run from the left's picture, so both eyes hold the same pixel wherever no draw covers one. The form is the port's
+// own texture copy (back/texcache.cpp texcache_frame_start promotions, back/shade.cpp): citro3d's C3D_SyncTextureCopy
+// (renderqueue.h:78) with GX_TRANSFER_RAW_COPY(1) (gx.h:55), size in bytes, in and out dims 0 (a plain byte copy, gx.h:9-10
+// "linesize / gap for GX_TextureCopy"). Inside a frame it is queued behind a split when the command buffer is not empty and
+// does not wait (renderqueue.o C3D_SyncTextureCopy+0x2c-0x64, as noted at the promotions), so it runs in queue order: called
+// right after the seed, it copies the seeded picture. One GX entry (gx_op), exactly like the clear it replaces. Both
+// textures are 512x256 RGBA8 render-target textures in VRAM (the target's colour buffer is the texture's data), so one raw
+// copy of the level-0 data is the whole picture; the left texture has no draw in flight (its last frame retired in frame_begin).
+bool view_copy_left_to_right()
+{
+	if (!s_target_r || !s_vtex_ready || !s_vtex_r_ready)
+		return false;
+	if (gx_op([&] {
+		    C3D_SyncTextureCopy(static_cast<u32*>(s_vtex.data), 0, static_cast<u32*>(s_vtex_r.data), 0, s_vtex.size,
+		                        GX_TRANSFER_RAW_COPY(1));
+	    }))
+		return true;
+	if (!s_logged_gx)
+	{
+		s_logged_gx = true;
+		printf("[c3d] GX budget: right-eye copy refused\n");
+	}
+	return false;
+}
+
 Readback view_readback(bool keep_alpha)
 {
 	// The readback transfer, INSIDE the frame: C3D_SyncDisplayTransfer in a frame splits the command

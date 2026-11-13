@@ -127,7 +127,7 @@ struct Counters
 	unsigned direct_frames = 0, seeds = 0, syncs = 0, seed_checks = 0;   // M6
 	// M9: view frames begun for two eyes, passes drawn (all, the streamed one included), replayed draws, the draw list's
 	// high-water mark, replay discards by reason, right-texture clears
-	unsigned stereo_frames = 0, passes = 0, replay_draws = 0, recs_max = 0, recs_cap = 0, r_clears = 0;
+	unsigned stereo_frames = 0, passes = 0, replay_draws = 0, recs_max = 0, recs_cap = 0, r_clears = 0, r_copies = 0;
 	unsigned replay_discards[static_cast<int>(DiscardReason::kCount)] = {};
 } s_n;
 
@@ -630,25 +630,34 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 		++s_n.seeds;
 	}
 
-	// M9 "What the two textures hold": the right texture is cleared to opaque black on a stereo frame when the previous
-	// world frame was not one, or it was just created / the view changed size; else it keeps its last picture. One GX
-	// entry, with the other grouped operations right after frame_begin (the command buffer is still empty). It comes
-	// BEFORE the shade LUT and the texture promotions (code review of commit 1): under a tight budget (the software
-	// backend's gxq_budget 3) a refused promotion is retried next frame, a refused clear would discard the first stereo
-	// frame after a map or terminal. stereo_gaps (test only): cleared to magenta on every stereo frame instead.
+	// M9 "What the two textures hold" (changed after the code review of commit 2): on a stereo frame whose right texture is
+	// fresh (just created, the view changed size) or re-entered (the previous world frame was not a stereo frame) it is
+	// COPIED from the left texture, not cleared: mode direct never clears the left, so a pixel no draw covers kept the old
+	// view in the left eye and black in the right. One GX entry, with the other grouped operations right after frame_begin
+	// (the command buffer is still empty), after the seed so the copy follows it in the queue. It comes BEFORE the shade LUT
+	// and the texture promotions: under a tight budget (the software backend's gxq_budget 3) a refused promotion is retried
+	// next frame, a refused copy would discard the first stereo frame after a map or terminal (code review of commit 1).
+	// A refused copy discards the frame, as the clear did. The tests that need known contents clear instead: stereo_gaps to
+	// opaque magenta on every stereo frame, stereo_cal (flat) to opaque black.
 	if (s_f.stereo)
 	{
 		const bool fresh = view_right_take_fresh();
-		if (opt.gaps || opt.clear_right || fresh)
+		const bool clears = opt.gaps || opt.flat;
+		if (clears || opt.init_right || fresh)
 		{
-			if (!view_clear_target_right(opt.gaps ? 0xFF00FFFFu : 0x000000FFu))
+			const bool ok = clears ? view_clear_target_right(opt.gaps ? 0xFF00FFFFu : 0x000000FFu)
+			                       : view_copy_left_to_right();
+			if (!ok)
 			{
 				frame_end(0, false, FrameKind::View);
 				note_view_frame();
 				s_f.open = false;
 				return discarded_at_begin(DiscardReason::Gx);
 			}
-			++s_n.r_clears;
+			if (clears)
+				++s_n.r_clears;
+			else
+				++s_n.r_copies;
 		}
 	}
 
@@ -1064,7 +1073,7 @@ ViewEnd view_end_direct()
 
 // M9 part 2, stereo_cal (design 7, "M9 specification", "Tests", T1): the calibration quads through the whole stereo path (the
 // streamed pass, the replayed passes, the composite). The left texture is cleared to opaque black by view_begin (opt.clear
-// with the clear colour), the right by opt.clear_right.
+// with the clear colour), the right by its own clear (opt.flat).
 ViewBegin view_stereo_calibrate(int w, int h, const ViewOptions& opt, ViewEnd* ve)
 {
 	ViewBegin vb = view_begin(w, h, 0x000000FFu, opt);
@@ -1175,10 +1184,10 @@ void draw_free()
 int draw_stereo_text(char* buf, size_t size)
 {
 	const Counters& n = s_n;
-	return snprintf(buf, size, "views=%u passes=%u replay_draws=%u recs_max=%u/%u replay_discards=%u/%u/%u/%u/%u/%u r_clears=%u",
+	return snprintf(buf, size, "views=%u passes=%u replay_draws=%u recs_max=%u/%u replay_discards=%u/%u/%u/%u/%u/%u r_clears=%u r_copies=%u",
 	                n.stereo_frames, n.passes, n.replay_draws, n.recs_max, n.recs_cap, n.replay_discards[0],
 	                n.replay_discards[1], n.replay_discards[2], n.replay_discards[3], n.replay_discards[4],
-	                n.replay_discards[5], n.r_clears);
+	                n.replay_discards[5], n.r_clears, n.r_copies);
 }
 
 int draw_stats_text(char* buf, size_t size)
