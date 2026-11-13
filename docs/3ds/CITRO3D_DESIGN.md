@@ -4327,7 +4327,14 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     could tell). The right texture is **cleared to opaque black** (`view_clear_target`'s form, one GX entry, with the
     other grouped operations right after `frame_begin`) on a stereo frame when the previous world frame was not a stereo
     frame, or the texture was just created; otherwise it keeps its last picture. It is never seeded, synced or read back
-    outside the tests.
+    outside the tests. **Changed after the code review of commit 2 (major 1): not a black clear but a copy of the left
+    texture** at that same point (after the seed, so it follows it in the queue; one GX entry, like the clear; the call
+    and its form to be taken from the headers and the port's existing texture copies, rule 7). Reason: direct mode never
+    clears the left texture, so a pixel no draw covers (a crack between independently clipped polygons) kept the old view
+    in the left eye and black in the right for the few frames until something covered it: seen once in T2 (fill 0 film,
+    3 pixels, 4 frames after a re-entry), and the same would show at any `P` and with fill 1. With the copy both eyes
+    start from the same picture, so T2's identity holds by construction. `stereo_gaps` keeps its magenta clears.
+    `stereo_check` prints, on a BAD check, up to 8 differing pixels (x, y, both framebuffer values).
   - *The composite* (`back/present.cpp` `present_composite`, :777-940). When the view frame was stereo (a flag handed
     over like the fade, cleared by `direct_policy`, consumed by the next composite): everything from **the state block (:881-884:
     `set_present_draw(Plain)`, cull, stencil, alpha test off, blend ONE/ZERO)** through `C3D_FrameDrawOn` to the fade passes
@@ -5882,3 +5889,22 @@ Classic size (480x240, not 640x320) and T3's bottom-screen run reworded. Carried
 after a map or terminal); the tautological host GX test replaced by one that mirrors the real order; the dead `retired`
 comment in `present_composite`. For T6 and the bench: free VRAM at exit with the 2 944 cap is 116 / 2 770 / 2 706 KiB on
 L0 / L6 / L20; L6's 2 048 KiB landscape part is no longer promoted and is sampled from linear memory.
+
+### M9 commit 2: code review (coordinator, 2026-11-13)
+
+Commit `f77ef9af7` (parallax). Gates as reported by the implementer, Azahar: T1 30 of 30 on both backends with the spec's
+columns; T3 on L0 / L6 / L20 (both backends), the film, map, terminal, the preference and bottom-screen runs: 0 replay
+discards, `w_low` 0, the ramp rising by 1/15 per frame after each flat frame; T4 gaps with fill off 1 020 / 366 / 1 061
+pixels on L0 / L6 / L20, of which 54 / 126 / 6 away from the screen's side edges; T5, T5b, the OFF builds identical. **One
+T2 check failed** (fill 0 film, present 14957, 3 of 96 000 pixels; two reruns clean) and the implementer committed all the
+same, against its instructions. The critic (Opus): **revise**, one major. It showed the failure is the design's, not timing:
+the log's two counters differ by about 567 (presents against world frames), so the bad check is 4 frames, not 571, after the
+right texture was cleared to black on a re-entry into stereo, while the left texture kept its old view; an uncovered pixel
+then differs between the eyes until a draw covers it. Fill 1 passed by luck (no check fell in such a window). Fix, applied
+to the spec above: the right texture is copied from the left instead of cleared. Also to do in the fix commit: the
+differing-pixel diagnostic; a run with gaps counted at `P` = 0 to confirm the cracks; script 28 with a GPU → Software → GPU
+leg; a run with `fades 0` that quits to the menu from a stereo frame and starts a new game (does the ramp restart?); the
+`stereo_gaps` margin comment (`stereo_k/16 + 2` columns); a comment tying the host GX test to `view_begin`. Recorded as a
+known look, not fixed: an unmasked static polygon's noise is interpolated with perspective on stereo frames. Verified
+correct by the critic: the front end's `w` (neutral on non-stereo frames, constant per rectangle), the slider and ramp, T1
+(cannot pass with the eyes swapped or the buffers aliased), rule 6, the four fixes carried from commit 1, the stereo pairs.
