@@ -555,24 +555,30 @@ Readback view_readback(bool keep_alpha)
 	return Readback::Ok;
 }
 
-bool view_queue_readback()
+bool view_queue_readback(bool right)
 {
 	// M6 direct_check: the readback transfer of the texture target queued behind the composite's draws (the flushing
-	// split first, 0.3); confirmed by the next frame_begin.
+	// split first, 0.3); confirmed by the next frame_begin. M9: `right` reads the right eye's texture target (stereo_cal,
+	// stereo_gaps; the same size and format as the left's).
+	C3D_RenderTarget* const target = right ? s_target_r : s_target;
+	if (!target)
+		return false;
 	return gx_split([] { C3D_FrameSplit(GX_CMDLIST_FLUSH); }) && gx_op([&] {
-		C3D_SyncDisplayTransfer(static_cast<u32*>(s_target->frameBuf.colorBuf), GX_BUFFER_DIM(s_tw, s_th), s_staging,
+		C3D_SyncDisplayTransfer(static_cast<u32*>(target->frameBuf.colorBuf), GX_BUFFER_DIM(s_tw, s_th), s_staging,
 		                        GX_BUFFER_DIM(s_sw, s_sh), s_tw != s_sw ? kReadbackHalfFlags : kReadbackFlags);
 	});
 }
 
-const uint32_t* view_convert_readback()
+const uint32_t* view_convert_readback(bool full)
 {
 	GSPGPU_InvalidateDataCache(s_staging, static_cast<u32>(static_cast<size_t>(s_sw) * s_sh * sizeof(u32)));
-	for (int y = 0; y < s_h; ++y)
+	// full (M9 stereo_cal): the whole staging (512x256 for a texture target), pitch s_sw: the columns beyond the view too
+	const int cw = full ? s_sw : s_w, ch = full ? s_sh : s_h;
+	for (int y = 0; y < ch; ++y)
 	{
 		const u32* in = s_staging + static_cast<size_t>(y) * s_sw;
-		uint32_t* out = s_argb + static_cast<size_t>(y) * s_w;
-		for (int x = 0; x < s_w; ++x)
+		uint32_t* out = s_argb + static_cast<size_t>(y) * cw;
+		for (int x = 0; x < cw; ++x)
 			out[x] = rgba_to_argb(in[x]);
 	}
 	return s_argb;

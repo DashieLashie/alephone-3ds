@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "../core/geometry.h"
+#include "../core/stereo.h"
 
 namespace a1_c3d {
 
@@ -46,6 +47,20 @@ public:
 		lit_ = lit;
 		rect_bias_ = rect_bias;
 	}
+
+	// M9 (design 7, "M9 specification", "What w a vertex carries on a stereo frame"): on a stereo frame the vertices carry
+	// the w of core/stereo.h stereo_w (rectangles their depth, the weapon `weapon_w`, landscapes kWPerspMax, unmasked static
+	// polygons their surface's depth); on any other frame nothing changes (w = 1 where it was 1). Persists across set_target;
+	// the frame sets it every frame, after set_target.
+	void set_stereo(bool on, float weapon_w)
+	{
+		stereo_ = on;
+		weapon_w_ = weapon_w;
+	}
+	// Vertices issued on stereo frames with w < 16 (kWMin: the smallest a wall or floor carries): must stay 0, it catches any
+	// path that still sends w = 1 (the landscape span path included). Not reset by set_target.
+	unsigned w_low() const { return w_low_; }
+	unsigned stereo_vertices() const { return stereo_vertices_; }
 
 	void SetView(view_data& View) override { view_ = &View; }
 	void Begin() override { foreground_ = false; }
@@ -122,6 +137,21 @@ private:
 	}
 	// The attributes of n points of the polygon (wall or floor row of 2.2) into `at`.
 	TexResult attrs(bool horizontal, const polygon_definition& p, const Point2* pts, int n, TexAttr* at) const;
+	TexView tex_view(bool horizontal) const;
+	// M9: the w of an unmasked static polygon on a stereo frame: its surface's depth at each point (attrs()), else the mean
+	// of the finite depths, else kWPerspMax (a floor at eye height lies on the horizon).
+	void static_w(bool horizontal, const polygon_definition& p, const Point2* pts, int n, TexAttr* out) const;
+	void note_w(float w)
+	{
+		if (stereo_)
+		{
+			++stereo_vertices_;
+			w_low_ += w < kWMin;
+		}
+	}
+	bool stereo_ = false;
+	float weapon_w_ = 1024.0f;
+	unsigned w_low_ = 0, stereo_vertices_ = 0;
 
 	bool foreground_ = false;
 	bool textures_ = false;

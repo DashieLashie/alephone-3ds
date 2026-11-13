@@ -10,6 +10,8 @@
 
 #include "geometry.h"
 
+#include <cmath>
+
 namespace a1_c3d {
 
 float stereo_step(StereoRamp& r, bool capable, float slider, unsigned ramp_frames)
@@ -74,6 +76,64 @@ float stereo_w(StereoWKind kind, int32_t depth, bool foreground, float weapon_w,
 			return kWPerspMax;
 	}
 	return geometric_w;
+}
+
+namespace {
+const int kCalCol[kStereoCalQuads] = {100, 150, 200, 250, 2};
+const uint32_t kCalRgb[kStereoCalQuads] = {0xFF0000u, 0x00FF00u, 0x0000FFu, 0xFFFF00u, 0xFF00FFu};
+} // namespace
+
+int stereo_cal_col(int q)
+{
+	return kCalCol[q];
+}
+
+float stereo_cal_w(int q, float w0)
+{
+	switch (q)
+	{
+		case 0:
+		case 4:
+			return w0 * 0.5f;
+		case 1:
+			return w0;
+		case 2:
+			return w0 * 2.0f;
+		default:
+			return kWPerspMax;
+	}
+}
+
+uint32_t stereo_cal_rgb(int q)
+{
+	return kCalRgb[q];
+}
+
+void stereo_cal_expect(int q, int e, float w0, int& first, int& last)
+{
+	const double sh = static_cast<double>(stereo_shift(stereo_cal_w(q, w0), e, kStereoCalP, w0, kStereoCalNear));
+	const double x0 = kCalCol[q] + sh, x1 = kCalCol[q] + kStereoCalSize + sh;
+	// the first pixel whose centre k + 0.5 lies right of x0, the last whose centre lies left of x1
+	first = static_cast<int>(std::ceil(x0 - 0.5));
+	last = static_cast<int>(std::ceil(x1 - 0.5)) - 1;
+	if (first < 0)
+		first = 0;
+}
+
+int stereo_cal_check(StereoCalPixel px, const void* ctx, int e, float w0, int width)
+{
+	int ok = 0;
+	for (int q = 0; q < kStereoCalQuads; ++q)
+	{
+		int first, last;
+		stereo_cal_expect(q, e, w0, first, last);
+		bool good = true;
+		for (int y = kStereoCalRow; good && y < kStereoCalRow + kStereoCalSize; ++y)
+			for (int x = 0; good && x < width; ++x)
+				good = (px(ctx, x, y) == kCalRgb[q]) == (x >= first && x <= last);
+		ok += good;
+	}
+	return ok;
 }
 
 } // namespace a1_c3d

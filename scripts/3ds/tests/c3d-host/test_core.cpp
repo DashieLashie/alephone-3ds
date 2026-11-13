@@ -5465,6 +5465,75 @@ static void test_m9_cap_and_keys()
 	}
 }
 
+// A picture of the five calibration quads as the model puts them in eye e: the test's stand-in for the texture or the
+// framebuffer (width 512, the colour 0xRRGGBB, black elsewhere).
+struct CalPic
+{
+	int e;
+	float w0;
+	int width;
+	int wrong_col;     // a column to paint wrongly (-1: none), for the failing case
+};
+static uint32_t cal_pic_px(const void* ctx, int x, int y)
+{
+	const CalPic& p = *static_cast<const CalPic*>(ctx);
+	for (int q = 0; q < kStereoCalQuads; ++q)
+	{
+		int first, last;
+		stereo_cal_expect(q, p.e, p.w0, first, last);
+		if (y >= kStereoCalRow && y < kStereoCalRow + kStereoCalSize && x >= first && x <= last)
+			return stereo_cal_rgb(q);
+	}
+	if (x == p.wrong_col && y == kStereoCalRow + 3)
+		return stereo_cal_rgb(1);
+	return 0;
+}
+
+static void test_m9_cal()
+{
+	const float w0 = 1024.0f;
+	// the spec's expected columns: left 108, 150, 196, 242 and 10; right 92, 150, 204, 258 and 0..9
+	const int lf[5] = {108, 150, 196, 242, 10}, rf[5] = {92, 150, 204, 258, 0};
+	const int rl[5] = {107, 165, 219, 273, 9};
+	for (int q = 0; q < 5; ++q)
+	{
+		int f, l;
+		stereo_cal_expect(q, -1, w0, f, l);
+		CHECK(f == lf[q]);
+		CHECK(l == lf[q] + 15);
+		stereo_cal_expect(q, +1, w0, f, l);
+		CHECK(f == rf[q]);
+		CHECK(l == rl[q]);
+	}
+	// another w0: the model follows it (quad 1 stays on the screen plane, quad 0 at w0/2 still pops out by P)
+	{
+		int f, l;
+		stereo_cal_expect(1, -1, 2048.0f, f, l);
+		CHECK(f == 150 && l == 165);
+	}
+	CalPic pic{-1, w0, 512, -1};
+	CHECK(stereo_cal_check(cal_pic_px, &pic, -1, w0, 512) == 5);
+	pic.e = +1;
+	CHECK(stereo_cal_check(cal_pic_px, &pic, +1, w0, 512) == 5);
+	// the right eye's picture is not the left's: against the wrong eye no quad but the screen-plane one (quad 1) matches
+	CHECK(stereo_cal_check(cal_pic_px, &pic, -1, w0, 512) == 1);
+	// a stray pixel of a quad's colour anywhere (a wrap at columns 400-511, one pixel off) fails that quad
+	pic.wrong_col = 450;
+	CHECK(stereo_cal_check(cal_pic_px, &pic, +1, w0, 512) == 4);
+	pic.wrong_col = 300;
+	CHECK(stereo_cal_check(cal_pic_px, &pic, +1, w0, 512) == 4);
+	// quad depths and colours
+	CHECK(stereo_cal_w(0, w0) == 512.0f && stereo_cal_w(1, w0) == 1024.0f && stereo_cal_w(2, w0) == 2048.0f);
+	CHECK(stereo_cal_w(3, w0) == kWPerspMax && stereo_cal_w(4, w0) == 512.0f);
+	for (int a = 0; a < 5; ++a)
+		for (int b = a + 1; b < 5; ++b)
+			CHECK(stereo_cal_rgb(a) != stereo_cal_rgb(b));
+}
+
+// The order of the GX entries of a stereo view frame as back/draw.cpp view_begin takes them (after the code review of
+// commit 1): the seed (view_seed_transfer), the right-eye clear (view_clear_target_right), the shade LUT, then the
+// texture cache's promotions (texcache_frame_start); the left clear (opt.clear) only in the gaps test. Every one is a
+// gx_op taken with the command buffer empty (cost 1), a promotion at worst 2.
 static void test_m9_gx_accounting()
 {
 	// a stereo composite: <= 4 band uploads (1 each, command buffer empty) + end + 2 linked = 7 of 32
@@ -5479,16 +5548,50 @@ static void test_m9_gx_accounting()
 			CHECK(q.take(false));
 		CHECK(q.end_frame(1) == 6);   // the mono composite
 	}
-	// a stereo view frame: seed + right clear + shade LUT + 8 promotions (cost 2 each at worst) + end <= 24
+	// the full budget: seed + right clear + LUT + 8 promotions (2 each at worst) + end <= 24
 	{
 		GxQueue q;
 		q.begin_frame();
-		CHECK(q.take(false));   // seed (the frame's first operation)
+		CHECK(q.take(false));   // seed
 		CHECK(q.take(false));   // the right clear
 		CHECK(q.take(false));   // the shade LUT
 		for (int i = 0; i < 8; ++i)
 			CHECK(q.take(true));
 		CHECK(q.used() == 3 + 16);
+		CHECK(q.end_frame(0) <= 24);
+	}
+	// the software backend's gxq_budget 3, the first stereo frame after a map or terminal (seeded, right texture cleared):
+	// in the real order the three operations fit and a promotion is the one refused (it is retried next frame) ...
+	{
+		GxQueue q;
+		q.set_budget(3);
+		q.begin_frame();
+		CHECK(q.take(false));    // seed
+		CHECK(q.take(false));    // right clear
+		CHECK(q.take(false));    // LUT
+		CHECK(!q.take(false));   // a promotion: refused, not fatal
+		CHECK(q.refused() == 1 && q.used() == 3);
+	}
+	// ... and in the order of commit 1 (clear after the promotions) a single promotion before it made the clear the
+	// refused one: the frame was discarded (DiscardReason::Gx). This is why the clear comes first.
+	{
+		GxQueue q;
+		q.set_budget(3);
+		q.begin_frame();
+		CHECK(q.take(false));    // seed
+		CHECK(q.take(false));    // LUT
+		CHECK(q.take(false));    // a promotion
+		CHECK(!q.take(false));   // the right clear: refused
+	}
+	// the gaps test (stereo_gaps): the right clear and the left clear are both taken before the first draw
+	{
+		GxQueue q;
+		q.begin_frame();
+		CHECK(q.take(false));   // right clear
+		CHECK(q.take(false));   // left clear
+		CHECK(q.take(false));   // LUT
+		for (int i = 0; i < 8; ++i)
+			CHECK(q.take(true));
 		CHECK(q.end_frame(0) <= 24);
 	}
 }
@@ -5499,6 +5602,7 @@ static void test_m9_core()
 	test_m9_shift();
 	test_m9_weapon_and_w();
 	test_m9_cap_and_keys();
+	test_m9_cal();
 	test_m9_gx_accounting();
 }
 

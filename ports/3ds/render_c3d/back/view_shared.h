@@ -58,8 +58,10 @@ bool view_seed_transfer();
 // M6 direct_check: the texture target's readback transfer queued inside the current frame behind its draws (gx_split +
 // gx_op; false: refused), and, after a frame_begin has confirmed it, the conversion of the view (w x h ARGB, alpha forced,
 // pitch w; valid until the next readback).
-bool view_queue_readback();
-const uint32_t* view_convert_readback();
+// M9: right = the right eye's texture target (stereo_cal / stereo_gaps); full = the whole staging (512x256 on a texture
+// target, pitch 512) instead of the view (w x h, pitch w).
+bool view_queue_readback(bool right = false);
+const uint32_t* view_convert_readback(bool full = false);
 // Fills the staging of the current size with `rgba` (0xRRGGBBAA) and flushes it (out of frame, before
 // frame_begin()), so a pixel the transfer never wrote is recognisable and no dirty cache line is
 // written back over the GPU's output.

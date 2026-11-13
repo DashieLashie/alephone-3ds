@@ -584,18 +584,22 @@ struct DirectFront
 } s_d;
 FadeCache s_fade_cache;
 
-// M9 (design 7, "M9 specification", "The ramp", "Counters and log lines"). In this commit the slider is not read (part 2 wires
-// it): the strength stays 0, so a stereo frame (stereo_force) is the full path at zero parallax, which is T2.
-constexpr bool kStereoSliderWired = false;
+C3dRasterizer s_play_rast;   // its own counters: the DIFF summary's stay the diff checks'
+
+// M9 (design 7, "M9 specification", "The ramp", "Counters and log lines"). The slider (back::stereo_slider: the stereo_slider
+// key, else osGet3DSliderState) drives the ramp on every frame decided direct; with stereo_slider 0 and stereo_force a
+// stereo frame is the full path at zero parallax (T2).
 struct StereoFront
 {
 	StereoRamp ramp;
 	bool seen = false;               // a stereo-capable direct frame ran since the last hook 3a (s_stereo_seen)
 	bool prev = false, cur = false;  // the previous / this frame (hook 3a to hook 3a) ran as a stereo frame: the right clear
 	unsigned stereo = 0, mono = 0, not3d = 0, ramp_resets = 0, discards = 0;
+	unsigned flat = 0;               // frames (hook 3a to hook 3a, stereo enabled) with no stereo-capable direct frame: map, terminal, SW, readback...
 	float p_now = 0.0f, p_max = 0.0f, P_now = 0.0f, slider = 0.0f;
 	int last = -1;                   // 1 stereo, 0 mono, for the change lines
 	unsigned lines = 0, changes = 0;
+	unsigned ramp_log = 0, ramp_lines = 0;   // the per-frame p of the first stereo frames after a change (T3: 1/N per frame)
 } s_s;
 
 // Every change between stereo and mono direct frames, once (at most 20 lines, then counted), as the mode changes.
@@ -624,12 +628,16 @@ void stereo_abort()
 int stereo_counts_text(char* buf, size_t size)
 {
 	const int n = snprintf(buf, size,
-	                       "stereo=%u mono=%u p=%.3f pmax=%.3f P=%.2f slider=%.2f not3d=%u ramp_resets=%u off=%s fill=%d ",
-	                       s_s.stereo, s_s.mono, static_cast<double>(s_s.p_now), static_cast<double>(s_s.p_max),
+	                       "stereo=%u mono=%u flat=%u p=%.3f pmax=%.3f P=%.2f slider=%.2f not3d=%u ramp_resets=%u off=%s fill=%d ",
+	                       s_s.stereo, s_s.mono, s_s.flat, static_cast<double>(s_s.p_now), static_cast<double>(s_s.p_max),
 	                       static_cast<double>(s_s.P_now), static_cast<double>(s_s.slider), s_s.not3d, s_s.ramp_resets,
 	                       back::stereo_off_name(back::stereo_off_reason()), back::config().stereo_fill ? 1 : 0);
 	if (n > 0 && n < static_cast<int>(size))
-		back::draw_stereo_text(buf + n, size - n);
+	{
+		const int m = back::draw_stereo_text(buf + n, size - n);
+		if (m > 0 && n + m < static_cast<int>(size))
+			snprintf(buf + n + m, size - n - m, " w_low=%u/%u", s_play_rast.w_low(), s_play_rast.stereo_vertices());
+	}
 	return n;
 }
 
@@ -865,7 +873,6 @@ void overlays_tick(const Config& cfg)
 		screen_printf("c3d overlay test");
 	}
 }
-C3dRasterizer s_play_rast;   // its own counters: the DIFF summary's stay the diff checks'
 std::vector<uint8_t> s_play_mask;   // M5: the play check's exclusion (SW's static coverage)
 
 bool resource_discard(back::DiscardReason r)
@@ -1016,9 +1023,10 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 	if (direct)
 	{
 		stereo_capable = cfg.stereo && back::stereo_usable() && back::present_right_ready() && !cfg.calibrate && !cfg.g3a;
-		s_s.slider = kStereoSliderWired && stereo_capable ? back::stereo_slider(cfg) : 0.0f;
+		s_s.slider = stereo_capable ? back::stereo_slider(cfg) : 0.0f;
 		stereo_p = stereo_step(s_s.ramp, stereo_capable, s_s.slider, cfg.stereo_ramp);
-		stereo_frame = stereo_capable && (stereo_p > 0.0f || cfg.stereo_force);
+		// stereo_cal (test only): every direct frame is the calibration, at its own fixed P, whatever the slider says
+		stereo_frame = stereo_capable && (stereo_p > 0.0f || cfg.stereo_force || cfg.stereo_cal);
 		if (stereo_frame && !back::stereo_is_3d())
 		{
 			// In 2D mode the right framebuffer is the left one: a right-target transfer would overwrite the left image.
@@ -1117,6 +1125,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			opt.near = static_cast<float>(cfg.stereo_near) / 100.0f;
 			opt.fill = cfg.stereo_fill;
 			opt.clear_right = !s_s.prev;
+			opt.gaps = cfg.stereo_gaps;
 		}
 		if (direct && cfg.calibrate)
 		{
@@ -1127,6 +1136,28 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				vb.kind = back::ViewBegin::Kind::Ok;
 				ve.ok = true;
 			}
+		}
+		else if (direct && cfg.stereo_cal && stereo_frame)
+		{
+			// stereo_cal (T1): no world, the calibration quads through the whole stereo path (check in the composite).
+			back::ViewOptions co = opt;
+			co.seed_rows = nullptr;
+			co.clear = true;
+			co.clear_right = true;
+			co.flat = true;
+			co.gaps = false;
+			co.fill = false;
+			co.P = kStereoCalP;
+			co.near = kStereoCalNear;
+			seeded = false;
+			vb = back::view_stereo_calibrate(w, h, co, &ve);
+			if (vb.kind == back::ViewBegin::Kind::Ok && !vb.stereo)
+			{
+				stereo_frame = false;
+				stereo_abort();
+			}
+			if (vb.kind == back::ViewBegin::Kind::Ok)
+				++s_d.cal;
 		}
 		else
 		{
@@ -1141,6 +1172,9 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			{
 				s_play_rast.set_target(w, h);
 				s_play_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit, cfg.rect_bias);
+				// M9: the w a vertex carries (every frame, so a flat frame after a stereo one is exactly M6's)
+				s_play_rast.set_stereo(stereo_frame, stereo_weapon_w(static_cast<float>(cfg.stereo_w0),
+				                                                       static_cast<float>(cfg.stereo_weapon) / 100.0f));
 				s_recorder.replay(&s_play_rast);
 				uint8_t* const* rows = reinterpret_cast<uint8_t* const*>(dest->row_addresses);
 				if (direct)
@@ -1201,7 +1235,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			// M9: the ramp's bookkeeping for a direct frame that was drawn; the composite draws two eyes iff stereo.
 			s_s.seen = s_s.seen || stereo_capable;
 			s_s.p_now = stereo_frame ? stereo_p : 0.0f;
-			s_s.P_now = stereo_frame ? stereo_pixels(stereo_p, cfg.stereo_k) : 0.0f;
+			s_s.P_now = stereo_frame ? (cfg.stereo_cal ? kStereoCalP : stereo_pixels(stereo_p, cfg.stereo_k)) : 0.0f;
 			if (s_s.p_now > s_s.p_max)
 				s_s.p_max = s_s.p_now;
 			if (stereo_frame)
@@ -1212,8 +1246,29 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			}
 			else
 				++s_s.mono;
+			if (stereo_frame && !s_s.prev)
+			{
+				// a stereo frame after a frame that was not one (the first, or after a map, a terminal, SW, a fade...):
+				// the ramp starts again from 0, its first frames are logged one by one
+				s_s.ramp_log = 24;
+				if (s_s.last == 1 && s_s.lines < 20)
+				{
+					++s_s.lines;
+					printf("[c3d] stereo: frame %u stereo again after a frame that was not (p %.3f)\n", s_frame,
+					       static_cast<double>(s_s.p_now));
+				}
+			}
 			note_stereo(stereo_frame);
-			if (cfg.calibrate)
+			if (stereo_frame && s_s.ramp_log && s_s.ramp_lines < 400)
+			{
+				--s_s.ramp_log;
+				++s_s.ramp_lines;
+				printf("[c3d] stereo: ramp frame %u p=%.4f P=%.3f\n", s_frame, static_cast<double>(s_s.p_now),
+				       static_cast<double>(s_s.P_now));
+				if (s_s.p_now >= (s_s.slider > 1.0f ? 1.0f : s_s.slider))
+					s_s.ramp_log = 0;   // arrived: the rest of the episode is not logged
+			}
+			if (cfg.calibrate || cfg.stereo_cal)
 				direct_forget_texture(s_d.st);   // it holds the calibration picture, not the view (critic, M6 code minor 5)
 		}
 		else
@@ -1489,6 +1544,7 @@ void direct_policy(unsigned blocks)
 		if (s_s.ramp.p > 0.0f)
 			++s_s.ramp_resets;
 		stereo_reset(s_s.ramp);
+		s_s.flat += cfg.stereo;
 	}
 	s_s.seen = false;
 	s_s.prev = s_s.cur;

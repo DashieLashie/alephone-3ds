@@ -577,6 +577,12 @@ void put_le(std::vector<unsigned char>& v, size_t at, u32 value, int bytes)
 		v[at + i] = (value >> (8 * i)) & 0xff;
 }
 
+#ifdef A1_RENDER_C3D
+// M9: dump_screen reads the top screen's right-eye framebuffer (framebuf1) instead of the left's (framebuf0) while set;
+// only save_screens sets it. Compiled only into the citro3d builds, so the others stay byte-identical.
+bool s_dump_right_eye = false;
+#endif
+
 // Saves the framebuffer the display is showing (GSPGPU capture info, as
 // screenshot tools do) as a 24-bit BMP. 3DS framebuffers are stored rotated:
 // each memory row is one screen column, bottom pixel first.
@@ -587,6 +593,10 @@ void dump_screen(int screen, const char* name, bool raw_log = false)
 		return;
 	const GSPGPU_CaptureInfoEntry& e = info.screencapture[screen];
 	const u8* fb = reinterpret_cast<const u8*>(e.framebuf0_vaddr);
+#ifdef A1_RENDER_C3D
+	if (s_dump_right_eye)
+		fb = reinterpret_cast<const u8*>(e.framebuf1_vaddr);
+#endif
 	const int width = screen == 0 ? 400 : 320;   // screen columns = memory rows
 	const int height = 240;
 	const u32 format = e.format & 7;
@@ -793,6 +803,13 @@ void save_screens(const std::string& tag)
 {
 	dump_screen(0, ("screen-" + tag + "-top.bmp").c_str());
 	dump_screen(1, ("screen-" + tag + "-bottom.bmp").c_str());
+#ifdef A1_RENDER_C3D
+	// M9: the top screen's right eye (framebuf1_vaddr of the same capture info; equal to the left's in 2D mode or after a
+	// frame that drew one image), for the stereo checks of docs/3ds/CITRO3D_DESIGN.md (T3).
+	s_dump_right_eye = true;
+	dump_screen(0, ("screen-" + tag + "-top-right.bmp").c_str());
+	s_dump_right_eye = false;
+#endif
 }
 
 // --- entropy -------------------------------------------------------------------

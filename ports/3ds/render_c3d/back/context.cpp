@@ -216,6 +216,7 @@ void abandon(const char* where, uint32_t waited_ms, const char* why)
 	s_off = true;
 	s_surrendered = true;
 	s_abandoned = true;
+	stereo_end();   // M9: 3D mode off (a mode byte, no citro3d call): the surrendered top screen is not left in 3D mode
 	log_final_stats();
 	fflush(stdout);
 	s_up = false;

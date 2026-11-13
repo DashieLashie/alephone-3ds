@@ -151,6 +151,10 @@ struct CompositeCounters
 	// one buffer for both eyes), RGB-different pixels over all checks, alpha-only differences, checks not made
 	unsigned stereo_composites = 0, stereo_checks = 0, stereo_check_bad = 0, stereo_check_skipped = 0;
 	unsigned long long stereo_diff_px = 0, stereo_alpha_px = 0;
+	// M9 part 2: stereo_cal frames checked and complete (all 20 positions right), stereo_gaps samples, their sum and maximum
+	unsigned cal_frames = 0, cal_ok = 0, gap_samples = 0, gap_max = 0;
+	unsigned long long gap_sum = 0, gap_edge_sum = 0;
+	unsigned gap_int_max = 0;
 } s_cn;
 // M9: this frame's view was drawn for two eyes (stereo_frame_set), consumed by the composite.
 bool s_stereo_set = false;
@@ -855,6 +859,42 @@ void stereo_check_compare(const u32* fl, const u32* fr, bool is3d)
 	       is3d ? 1 : 0, distinct ? 1 : 0, bad ? " BAD" : "");
 }
 
+// Test only (stereo_cal, stereo_gaps): one eye's view texture read back in test frames of their own, after the composite
+// (the texture is unchanged until the next view frame). The first frame_begin retires the composite (`retired`). nullptr:
+// not done (the gate, a refused frame or queue entry). `full`: the whole 512x256 staging (pitch 512), else the view.
+const uint32_t* test_readback(const Config& cfg, bool right, bool full, bool& retired)
+{
+	if (cfg.suspend_gate && gate_closed())
+		return nullptr;
+	if (frame_begin(FrameZone::Wait) != FrameStart::Ok)
+		return nullptr;
+	retired = true;
+	const bool queued = view_queue_readback(right);
+	frame_end(0, false, FrameKind::View);
+	note_view_frame();
+	if (!queued || frame_begin(FrameZone::Wait) != FrameStart::Ok)
+		return nullptr;
+	frame_end(0, false, FrameKind::View);
+	return view_convert_readback(full);
+}
+
+// stereo_cal's pixel accessors: the converted texture readback (ARGB, pitch 512) and a top-screen framebuffer (RGBA8 words,
+// 240 per column, the bottom pixel first: libctru's layout, as dump_screen reads it).
+struct CalTex
+{
+	const uint32_t* px;
+	int pitch;
+};
+uint32_t cal_tex_px(const void* ctx, int x, int y)
+{
+	const CalTex& t = *static_cast<const CalTex*>(ctx);
+	return t.px[static_cast<size_t>(y) * t.pitch + x] & 0xFFFFFFu;
+}
+uint32_t cal_fb_px(const void* ctx, int x, int y)
+{
+	return static_cast<const u32*>(ctx)[static_cast<size_t>(x) * kScreenH + (kScreenH - 1 - y)] >> 8;
+}
+
 // M6 (design 7, M6 specification "The composite frame"): a direct frame's present. One C3D frame: the band uploads, the
 // view quad (view texture, ONE/ZERO), one quad per band (overlay texture, ONE/ONE_MINUS_SRC_ALPHA), the restore, the
 // VBlank guard, C3D_FrameEnd. No staging fill, no upload of main_surface.
@@ -998,10 +1038,13 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 	// stereo_check (test only): both eyes' framebuffers, taken like the left one's above, before C3D_FrameEnd (the
 	// transfers' destinations; the swap comes after).
 	const bool scheck = stereo && cfg.stereo_check && (s_cn.stereo_composites + 1) % cfg.stereo_check == 0;
+	// stereo_cal (T1): the first 30 stereo composites are checked, in both textures and both framebuffers
+	constexpr unsigned kCalFrames = 30;
+	const bool scal = stereo && cfg.stereo_cal && s_cn.cal_frames < kCalFrames;
 	const u32* scheck_l = nullptr;
 	const u32* scheck_r = nullptr;
 	bool scheck_3d = false;
-	if (scheck)
+	if (scheck || scal)
 	{
 		u16 lw = 0, lh = 0, rw = 0, rh = 0;
 		scheck_3d = stereo_is_3d();
@@ -1023,6 +1066,7 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		// The gate can close between frames (as between a two-frame present's U and D, 5.7.6): no test frame then.
 		if (!(cfg.suspend_gate && gate_closed()) && frame_begin(FrameZone::Wait) == FrameStart::Ok)
 		{
+			retired = true;   // frame_begin returned Ok: every earlier frame, the composite included, has retired
 			const bool queued = view_queue_readback();
 			frame_end(0, false, FrameKind::View);
 			note_view_frame();
@@ -1039,19 +1083,83 @@ bool present_composite(const Config& cfg, unsigned n, bool trace)
 		if (!done)
 			++s_cn.check_skipped;
 	}
-	if (scheck)
-	{
-		// Test only: an empty frame retires the composite (unless direct_check's frames above did), then the compare.
+	// An empty test frame retires the composite (unless an earlier test frame did).
+	auto retire = [&]() {
 		if (!retired && !(cfg.suspend_gate && gate_closed()) && frame_begin(FrameZone::Wait) == FrameStart::Ok)
 		{
 			frame_end(0, false, FrameKind::View);
 			note_view_frame();
 			retired = true;
 		}
-		if (retired && scheck_l && scheck_r)
+		return retired;
+	};
+	if (scheck)
+	{
+		// Test only: the compare of the framebuffers, once the composite has retired.
+		if (retire() && scheck_l && scheck_r)
 			stereo_check_compare(scheck_l, scheck_r, scheck_3d);
 		else
 			++s_cn.stereo_check_skipped;
+	}
+	if (scal)
+	{
+		// stereo_cal: the five quads where the model puts them, in each eye's texture (read back, the whole 512 columns) and
+		// in each eye's framebuffer (width 400). The right framebuffer only counts in 3D mode with distinct buffers.
+		const float w0 = static_cast<float>(cfg.stereo_w0);
+		unsigned tex[2] = {0, 0}, fbq[2] = {0, 0};
+		for (int eye = 0; eye < 2; ++eye)
+		{
+			const uint32_t* t = test_readback(cfg, eye == 1, true, retired);
+			if (t)
+			{
+				const CalTex c{t, 512};
+				tex[eye] = stereo_cal_check(cal_tex_px, &c, eye == 0 ? -1 : +1, w0, 512);
+			}
+		}
+		if (retire() && scheck_l && scheck_r && scheck_l != scheck_r && scheck_3d)
+		{
+			GSPGPU_InvalidateDataCache(scheck_l, kFbPixels * sizeof(u32));
+			GSPGPU_InvalidateDataCache(scheck_r, kFbPixels * sizeof(u32));
+			fbq[0] = stereo_cal_check(cal_fb_px, scheck_l, -1, w0, kScreenW);
+			fbq[1] = stereo_cal_check(cal_fb_px, scheck_r, +1, w0, kScreenW);
+		}
+		const bool complete = tex[0] == 5 && tex[1] == 5 && fbq[0] == 5 && fbq[1] == 5;
+		++s_cn.cal_frames;
+		s_cn.cal_ok += complete;
+		printf("[c3d] stereo_cal: tex L %u/5 R %u/5 fb L %u/5 R %u/5%s (frame %u of %u)\n", tex[0], tex[1], fbq[0], fbq[1],
+		       complete ? "" : " INCOMPLETE", s_cn.cal_frames, kCalFrames);
+	}
+	if (stereo && cfg.stereo_gaps && s_cn.stereo_composites % 30 == 0)
+	{
+		// stereo_gaps: the left view's magenta pixels (nothing covered them: both textures were cleared to magenta first)
+		const uint32_t* t = test_readback(cfg, false, false, retired);
+		if (t)
+		{
+			// gap = the magenta pixels of the view; edge = those in the outer margin columns (the view's own left and right
+			// edges, where a shifted eye has nothing to show whatever the content: K + 1 columns each side), interior = the rest
+			// (the strips beside vertical depth edges, design 7, M9 "The gap fill").
+			unsigned gap = 0, edge = 0;
+			const int vw = view_width(), vh = view_height();
+			const int margin = static_cast<int>(cfg.stereo_k / 16) + 2;
+			for (int y = 0; y < vh; ++y)
+				for (int x = 0; x < vw; ++x)
+				{
+					const bool m = (t[static_cast<size_t>(y) * vw + x] & 0xFFFFFFu) == 0xFF00FFu;
+					gap += m;
+					edge += m && (x < margin || x >= vw - margin);
+				}
+			++s_cn.gap_samples;
+			s_cn.gap_sum += gap;
+			s_cn.gap_edge_sum += edge;
+			if (gap > s_cn.gap_max)
+				s_cn.gap_max = gap;
+			if (gap - edge > s_cn.gap_int_max)
+				s_cn.gap_int_max = gap - edge;
+			printf("[c3d] stereo_gaps: present %u: gap_px=%u (edge columns %u, interior %u) of %dx%d (so far avg %.1f max %u, "
+			       "interior avg %.1f max %u, over %u samples)\n", s_present, gap, edge, gap - edge, vw, vh,
+			       static_cast<double>(s_cn.gap_sum) / s_cn.gap_samples, s_cn.gap_max,
+			       static_cast<double>(s_cn.gap_sum - s_cn.gap_edge_sum) / s_cn.gap_samples, s_cn.gap_int_max, s_cn.gap_samples);
+		}
 	}
 	bool burst = false;
 	for (unsigned first : {120u, 600u, 1200u, 1800u})
@@ -1239,6 +1347,7 @@ void present_free()
 		       "vram_free_kib=%lu fade_quads=%u fade_passes=%u fade_noise=%u fade_restores=%u fade_checks=%u fade_bad=%u "
 		       "fade_min_within_2=%.3f%% fade_max=%u fade_unchecked=%u fade_quirk_px=%llu stereo_composites=%u "
 		       "stereo_checks=%u stereo_check_bad=%u stereo_check_skipped=%u stereo_diff_px=%llu stereo_alpha_px=%llu "
+		       "cal_frames=%u cal_complete=%u gap_samples=%u gap_avg=%.1f gap_max=%u gap_interior_avg=%.1f gap_interior_max=%u "
 		       "(at exit, before the release)\n",
 		       s_cn.composites, s_cn.band_quads, s_cn.not_checkable, s_cn.audits, s_cn.leaks, s_cn.checks, s_cn.check_bad,
 		       s_cn.check_big, s_cn.check_skipped, s_cn.check_min_within, s_cn.check_max[0], s_cn.check_max[1],
@@ -1246,7 +1355,10 @@ void present_free()
 		       s_cn.fade_quads, s_cn.fade_passes, s_cn.fade_noise, s_cn.fade_restores, s_cn.fade_checks, s_cn.fade_bad,
 		       s_cn.fade_min_within2, s_cn.fade_max, s_cn.fade_unchecked, s_cn.fade_quirk_px, s_cn.stereo_composites,
 		       s_cn.stereo_checks, s_cn.stereo_check_bad, s_cn.stereo_check_skipped, s_cn.stereo_diff_px,
-		       s_cn.stereo_alpha_px);
+		       s_cn.stereo_alpha_px, s_cn.cal_frames, s_cn.cal_ok, s_cn.gap_samples,
+		       s_cn.gap_samples ? static_cast<double>(s_cn.gap_sum) / s_cn.gap_samples : 0.0, s_cn.gap_max,
+		       s_cn.gap_samples ? static_cast<double>(s_cn.gap_sum - s_cn.gap_edge_sum) / s_cn.gap_samples : 0.0,
+		       s_cn.gap_int_max);
 	free(s_check_ref);
 	s_check_ref = nullptr;
 	if (s_staging)

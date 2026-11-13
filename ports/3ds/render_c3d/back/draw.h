@@ -73,6 +73,11 @@ struct ViewOptions
 	float P = 0.0f, w0 = 1024.0f, near = 1.0f;
 	bool fill = true;
 	bool clear_right = false;
+	// M9 part 2, test only. flat: the lit/textured TEV is not built, stage 0 is the vertex colour (stereo_cal's quads).
+	// gaps (stereo_gaps): on a stereo frame both eye textures are cleared to opaque magenta before the first draw (the
+	// right one on every frame, the left whatever `clear` says), so a pixel no draw covered is recognisable.
+	bool flat = false;
+	bool gaps = false;
 };
 ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0, const ViewOptions& opt = ViewOptions());
 // The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
@@ -123,6 +128,11 @@ ViewEnd view_end_play_full(uint8_t* const* rows, unsigned* sentinel_count, unsig
 // M6 direct frames: the pending draw, the restore, the ranged flushes, C3D_FrameEnd: no readback, no retirement wait
 // (the composite frame's frame_begin waits for it). A discarded frame ends the same way and returns !ok.
 ViewEnd view_end_direct();
+// M9 part 2, stereo_cal (T1; design 7, "M9 specification", "Tests"): a stereo frame without the world: both eye textures cleared to
+// opaque black, then the five calibration quads (core/stereo.h) drawn through the world program with stage 0 = the vertex
+// colour, P = opt.P, w0 = opt.w0, near = opt.near, no fill; closed as view_end_direct. `opt` must have stereo, flat and
+// clear_right set and fill false (the front end does). Returns view_begin's result; *ve is the end (valid when Ok).
+ViewBegin view_stereo_calibrate(int w, int h, const ViewOptions& opt, ViewEnd* ve);
 // M6 sync (M6 specification): the texture target read back into `rows` (every pixel) without drawing: its own C3D frame,
 // the readback and the retirement pair. !ok: not done (citro3d down, the gate, no texture target, or the GX budget).
 ViewEnd view_sync(uint8_t* const* rows);

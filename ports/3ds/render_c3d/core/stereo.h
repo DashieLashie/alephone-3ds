@@ -61,6 +61,31 @@ enum class StereoWKind : uint8_t { Wall, Static, Rectangle, Landscape };
 // Landscape: kWPerspMax.
 float stereo_w(StereoWKind kind, int32_t depth, bool foreground, float weapon_w, float geometric_w);
 
+// --- the calibration (stereo_cal 1, test T1; design 7, "M9 specification", "Tests") ---
+
+// Five 16x16 flat-colour quads at rows 100-115 of the view, drawn on every direct frame instead of the world with P = 8,
+// near = 1, no fill. Quads 0-3 sit at columns 100, 150, 200, 250 with w = w0/2, w0, 2*w0, kWPerspMax; quad 4 at column 2
+// with w = w0/2 (its right-eye image leaves the left edge: columns 0..9 only). Both eye textures start opaque black.
+constexpr int kStereoCalQuads = 5;
+constexpr int kStereoCalSize = 16;
+constexpr int kStereoCalRow = 100;
+constexpr float kStereoCalP = 8.0f;
+constexpr float kStereoCalNear = 1.0f;
+// The quad's left column, depth (of w0: 0.5, 1, 2; kWPerspMax for 3) and colour 0xRRGGBB.
+int stereo_cal_col(int q);
+float stereo_cal_w(int q, float w0);
+uint32_t stereo_cal_rgb(int q);
+// The first and last covered pixel column of quad q in eye e (-1 left, +1 right) by the model (stereo_shift) with the pixel
+// centres rule (a pixel is covered when its centre is inside); first is clipped to 0 (the target's left edge). A model value,
+// not what the shader does: that is what T1 compares it with.
+void stereo_cal_expect(int q, int e, float w0, int& first, int& last);
+// The pixel at (x, y) as 0xRRGGBB.
+typedef uint32_t (*StereoCalPixel)(const void* ctx, int x, int y);
+// Checks one eye's picture against the model: for every quad and every row 100-115, the pixels of the quad's colour are
+// exactly the columns [first, last] of x in [0, width) (so a wrapped copy at the right edge, or a stray column, fails).
+// Returns how many of the 5 quads match.
+int stereo_cal_check(StereoCalPixel px, const void* ctx, int e, float w0, int width);
+
 // --- VRAM ---
 
 // The right-eye objects (right screen target, second view texture, the smaller pool cap) exist for the run: without a

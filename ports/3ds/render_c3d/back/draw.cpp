@@ -28,8 +28,10 @@
 #include "stereo.h"
 #include "view_shared.h"
 #include "../core/calibrate.h"
+#include "../core/classify.h"
 #include "../core/noise.h"
 #include "../core/ring.h"
+#include "../core/stereo.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -628,11 +630,33 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 		++s_n.seeds;
 	}
 
+	// M9 "What the two textures hold": the right texture is cleared to opaque black on a stereo frame when the previous
+	// world frame was not one, or it was just created / the view changed size; else it keeps its last picture. One GX
+	// entry, with the other grouped operations right after frame_begin (the command buffer is still empty). It comes
+	// BEFORE the shade LUT and the texture promotions (code review of commit 1): under a tight budget (the software
+	// backend's gxq_budget 3) a refused promotion is retried next frame, a refused clear would discard the first stereo
+	// frame after a map or terminal. stereo_gaps (test only): cleared to magenta on every stereo frame instead.
+	if (s_f.stereo)
+	{
+		const bool fresh = view_right_take_fresh();
+		if (opt.gaps || opt.clear_right || fresh)
+		{
+			if (!view_clear_target_right(opt.gaps ? 0xFF00FFFFu : 0x000000FFu))
+			{
+				frame_end(0, false, FrameKind::View);
+				note_view_frame();
+				s_f.open = false;
+				return discarded_at_begin(DiscardReason::Gx);
+			}
+			++s_n.r_clears;
+		}
+	}
+
 	// M3: the shade LUT first (built once; its one promotion, before the cache's, with the command buffer
 	// still empty), then the texture cache's frame: what retired frames left is freed now (frame_begin
 	// returned), then this frame's VRAM promotions, before the clear (both cost 1 GX entry with an empty
 	// command buffer, 2.4).
-	const bool lit = config().textures && config().lit;
+	const bool lit = config().textures && config().lit && !opt.flat;
 	if (lit)
 	{
 		s_f.lut = shade_frame_start();
@@ -648,29 +672,11 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 		noise_frame_start();
 	texcache_frame_start(s_k);
 
-	// M9 "What the two textures hold": the right texture is cleared to opaque black on a stereo frame when the previous
-	// world frame was not one, or it was just created / the view changed size; else it keeps its last picture. One GX
-	// entry, with the other grouped operations right after frame_begin (the command buffer is still empty).
-	if (s_f.stereo)
-	{
-		const bool fresh = view_right_take_fresh();
-		if (opt.clear_right || fresh)
-		{
-			if (!view_clear_target_right(0x000000FFu))
-			{
-				frame_end(0, false, FrameKind::View);
-				note_view_frame();
-				s_f.open = false;
-				return discarded_at_begin(DiscardReason::Gx);
-			}
-			++s_n.r_clears;
-		}
-	}
-
 	// The clear, only before the first draw (C3D_FrameBufClear is a GX_MemoryFill without a split, so
 	// after draws it would run before them), to 0x00000000: alpha 0 is "not covered" (M4: the tinted check's grey,
 	// 8.1).
-	if (opt.clear && !view_clear_target(clear_rgba))
+	const bool gaps_left = s_f.stereo && opt.gaps;
+	if ((opt.clear || gaps_left) && !view_clear_target(gaps_left ? 0xFF00FFFFu : clear_rgba))
 	{
 		frame_end(0, false, FrameKind::View);
 		note_view_frame();
@@ -723,7 +729,7 @@ ViewBegin view_begin(int w, int h, uint32_t clear_rgba, const ViewOptions& opt)
 	}
 	else
 	{
-		const GPU_TEVSRC src = config().textures ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR;
+		const GPU_TEVSRC src = config().textures && !opt.flat ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR;
 		C3D_TexEnvInit(env);
 		C3D_TexEnvSrc(env, C3D_Both, src, src, src);
 		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
@@ -1054,6 +1060,33 @@ ViewEnd view_end_direct()
 	s_f.open = false;
 	++s_n.direct_frames;
 	return ViewEnd{true, DiscardReason::Unsupported};
+}
+
+// M9 part 2, stereo_cal (design 7, "M9 specification", "Tests", T1): the calibration quads through the whole stereo path (the
+// streamed pass, the replayed passes, the composite). The left texture is cleared to opaque black by view_begin (opt.clear
+// with the clear colour), the right by opt.clear_right.
+ViewBegin view_stereo_calibrate(int w, int h, const ViewOptions& opt, ViewEnd* ve)
+{
+	ViewBegin vb = view_begin(w, h, 0x000000FFu, opt);
+	if (vb.kind != ViewBegin::Kind::Ok)
+		return vb;
+	const DrawKey key{classify(Entry::Vertical, Transfer::Textured, false), nullptr, nullptr, 0, 0, 0};
+	for (int q = 0; q < kStereoCalQuads && vb.stereo; ++q)
+	{
+		const float x0 = static_cast<float>(stereo_cal_col(q)), x1 = x0 + static_cast<float>(kStereoCalSize);
+		const float y0 = static_cast<float>(kStereoCalRow), y1 = y0 + static_cast<float>(kStereoCalSize);
+		const float qw = stereo_cal_w(q, opt.w0);
+		const uint32_t rgb = stereo_cal_rgb(q);
+		const float xs[4] = {x0, x1, x1, x0}, ys[4] = {y0, y0, y1, y1};
+		Vertex v[4];
+		for (int i = 0; i < 4; ++i)
+			v[i] = Vertex{xs[i], ys[i], qw, 0.0f, 0.0f, 0.0f, 0.0f, static_cast<uint8_t>(rgb >> 16),
+			              static_cast<uint8_t>(rgb >> 8), static_cast<uint8_t>(rgb), 0xFF};
+		if (!view_polygon(v, 4, key, nullptr))
+			break;
+	}
+	*ve = view_end_direct();
+	return vb;
 }
 
 ViewEnd view_sync(uint8_t* const* rows)
