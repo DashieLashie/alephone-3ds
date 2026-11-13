@@ -2206,3 +2206,164 @@ The passes add ~0.03 ms of CPU to the composite on average (about half the frame
 0.5 ms on average per change of the curves, ≤ 2.2 ms for a fade's steps, 51 ms once for a curve no part classifies (since the
 review, only the quick phase runs after such a miss, until the identity). Azahar overstates CPU cost; `gpu_ms` is not
 measurable here. **The console decides** (`NEXT-SPRINT.md` "M6b console check").
+
+## Stage 10 M9: stereoscopic 3D (Azahar — non-authoritative)
+
+Recorded 2026-11-13 on `stage10-c3d`: commits `8de3697da` (the stereo path at parallax 0), `f77ef9af7` (parallax: `w`, slider and
+ramp, calibration, gap count, right-eye capture), `f81a41962` (review fix: the right eye is copied from the left, not
+cleared) and the records commit (the seeded-frame rule, T6, the bench, this section); tag `port-stage10-M9` on the last.
+Design `CITRO3D_DESIGN.md` section 7 "M9 specification" (revision 2) and the Review log "M9 commit 1: code review", "M9
+commit 2: code review", "M9 done". **No engine edit, no `PATCHES.md` entry.** Everything below ran in Azahar (host GPU =
+"hw", Azahar's software backend with `gxq_budget 3` = "sw"); **nothing was run on the console**. Binary of this section's
+runs: `build-3ds-c3d-prof` (md5 `f8d3cf57…`, the records commit's code). Logs `build/m9/`, `build/m9/c2/`, `build/m9/c2r/`,
+`build/m9/c3/`, bench `build/perf/m9c3-*` (not in git).
+
+**What was built.** `core/stereo.{h,cpp}` (the ramp `stereo_step` at 1/N per frame, `stereo_shift`, `stereo_w`, the weapon's
+depth, the VRAM cap rule, the calibration model), the vertex shader's shift `e·P·max(1 − w0/w, −near)`, the right screen
+target (`GFX_RIGHT`) and a second 512x256 view texture (allocated at `present_init`, `gfxSet3D` following the preference),
+the per-frame draw list and its replay (L centre, L shifted, R centre, R shifted; fill 0: shifted only), the two-eye
+composite (overlays at zero parallax, the fade for both eyes), the front end's `w` on stereo frames (rectangles their depth,
+the weapon `weapon_w`, landscapes `kWPerspMax`, unmasked static polygons their surface's depth), the slider, and the test
+keys `stereo_force`, `stereo_check`, `stereo_cal`, `stereo_gaps`, `stereo_fail`, `reseed`.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| Host tests (`c3d-host/build.sh`) | 2 658 015 checks, 0 failures (the ramp, `stereo_shift` at the four calibration depths, `weapon_w`, the cap rule, the calibration model with a failing case, the GX accounting incl. the order that discards a frame) |
+| **T1** `stereo_cal` (5 quads at depths w0/2, w0, 2·w0, far and one at the left edge, P = 8) | **30 of 30** frames `tex L 5/5 R 5/5 fb L 5/5 R 5/5` on both backends (every quad's first and last column as the model: left 108 / 150 / 196 / 242 / 10, right 92 / 150 / 204 / 258 / 0..9; no wrap at columns 400-511). Overlays off: the test overlay's text covers quads 0 and 4 |
+| **T2** identity (`stereo_force 1`, slider 0, `stereo_check 30`): L0 / L6 / L20, fill 1 and 0, hw and sw | 36 / 36 / 42 (fill 1) and 39 / 39 / 43 (fill 0) checks, **0 differing pixels** in every one, 3D mode on, buffers distinct; `direct_check` 100 % within 1 (max Δ 0 hw, 1 sw), `over_32` 0 |
+| **T2** Fade Test, fill 1 / 0 (hw) | 519 and 546 checks, 0 bad; the fade checks 0 bad |
+| **T2** L01 film, `stereo_check 5` (hw), final code | fill 0: 3 568 / 3 717 / 3 715 / 3 722 checks (four runs), **0 bad**; fill 1: 3 610 checks, 0 bad. 12-21 right-eye copies per run; 27-44 checks fell within 12 world frames of a copy (a lower bound: the log prints at most 20 change lines) |
+| **T3** parallax runs (slider 100, hw): L0 / L6 / L20 | 1 382 / 1 381 / 1 538 stereo frames, 0 replay discards, `w_low` 0 of 530 254 / 517 871 / 261 436 vertices, `recs_max` 80 / 75 / 25 of 1 365, `usage_max` 0.116 / 0.101 / 0.037, GX high-water 10 / 9 / 10, audit ok, `direct_check` 0 bad. sw (commit 2): 1 370 / 1 382 / 1 536, GX high-water 4 |
+| **T3** map (script 20), terminal (script 14), L01 film | 0 discards, `w_low` 0, GX 10; each flat stretch restarts the ramp at p = 0.0667 and adds 1/15 per frame to 1.0 (`ramp_resets` 1, 1, 10; terminal `flat=1 013`); film 18 749 stereo frames, `w_low` 0 of 4.79 M, `recs_max` 104, `usage_max` 0.145 |
+| **T3** Renderer preference, script 28 (Software → GPU → Software → GPU, no file, hardware slider path via Azahar's `factor_3d 100`) | "3D mode on / off / on (Renderer preference)", 1 725 stereo frames, none in game 3, the ramp from 0.0667 again in game 4, `r_copies` 2, cap 2 944 throughout, 0 discards |
+| **T3** bottom screen HUD + Map → Classic → HUD + Map twice (script 29) | under the preference: 2 532 stereo frames, `fallback_sw` 1 248, no `view:` line for Classic; with a file (`mode direct`, `fallback readback`, `stereo 1`): "400x240 -> 480x240, the texture targets are kept" and back twice, never "target deleted", 2 527 stereo frames; both `r_copies` 3, `ramp_resets` 2. Classic with the HUD hidden: `stereo_size` skip on every frame, no deletion line |
+| **T4** gap pixels, `stereo_gaps`, fill 0, slider 100 (hw), reported not gated | L0 avg 1 019.5 / max 1 025 (54 away from the 8 outer columns each side); L6 366.0 / 366 (126); L20 1 061.4 / 1 084 (6). Most are the strip the shifted eye has no content for at the view's own edge |
+| **T4** at P = 0 (`stereo_force`, slider 0, fill 0), final code | L0 avg 1.0 / max 1; L6 0 / 0; L20 0 / 0: the pixels no draw covers (cracks, tie pixels) are about one per frame at most |
+| **T5** `direct_check` L0 / L6 / L20, `stereo 0` and `stereo 1` + slider 0 (hw) | 41 / 41 / 44 checks each, 100.000 %, max Δ 0, 0 bad; `stereo=0` in every `stereo 1` run. M6, M6b and the M1-M5 readback gates ran on the commit-2 binary (v0 and v1: sync, `readback_cal`, scripts 07 / 13 / 14 / 20 / 22, Fade, Liquid, both films, diffs, play, `vram_cap 512`, `fail_every`, `present_diff` 49 checks 0 differences; software backend: direct L0 only) |
+| **T5b** `stereo_fail 1` | one "off for the run (vram)" line, 0 stereo frames, `direct_check` 0 bad, both backends |
+| Builds / OFF builds | four builds, 0 warnings (also a clean rebuild of all four at commit 2); `build-3ds` and `build-3ds-prof` disassemble identically to the baselines, `nm` count 0; the right-eye capture is compiled only under `A1_RENDER_C3D` |
+
+**The T2 failure and its cause (commit 2, fixed in `f81a41962`).** One of three fill 0 film runs showed one failed `stereo_check`
+(3 of 96 000 pixels), and the implementer committed anyway. Cause (code review): mode direct never clears the left texture,
+so a pixel no draw covers (a crack between independently clipped polygons) keeps its old picture there; on a re-entry into
+stereo the right texture was cleared to black, so that pixel differed between the eyes until some draw covered it. The bad
+check was 4 frames after a re-entry (the log's two counters, world frames and presents, are about 567 apart; the first
+reading mixed them). It affects fill 1 and real stereo frames equally. Fix: the right texture is copied from the left,
+`C3D_SyncTextureCopy(left.data, 0, right.data, 0, size, GX_TRANSFER_RAW_COPY(1))`, the pool promotions' form. In a frame it
+is one queue entry and does not wait (disassembly of `libcitro3d.a` `renderqueue.o`: `C3D_SyncTextureCopy+0x2c-0x40` splits
+the frame, `+0x64` tail-calls `GX_TextureCopy`; the waiting path `+0x68-0xc0` is the out-of-frame one); issued after the
+seed and before the LUT and the promotions, so the same GX budget as the clear holds (software backend: seed, copy, LUT fit
+in `gxq_budget 3`). With the fix four film runs with `stereo_check 5` (about 3 700 checks each) showed no difference.
+
+**Negative control** (task item A2): commit `f77ef9af7` built separately (`-DA1_RENDER_C3D=ON -DA1_PROFILE=ON`, a scratch
+`git worktree`, removed afterwards) and run twice on the fill 0 L01 film with `stereo_check 5`
+(`m9-t2-fill0-film-sc5.cfg`): run 1 **3 795 checks, 0 bad**; run 2 **3 797 checks, 1 BAD, 5 differing pixels**, at present
+17 261 = about world frame 16 491, 5 frames after the right-eye clear at frame 16 486 (inside the window; that binary has no pixel
+diagnostic). So the dense check does catch the unfixed defect, but only in one run of two: it is a rare event (29 and 31 checks
+fell in the 12-frame windows), and 0 differences on the fixed code in four runs says little by itself; the strongest evidence
+is the mechanism (the copy makes both eyes start from one picture) and the `reseed` test below.
+
+**The seeded-frame rule** (re-review of commit 2, minor): the right texture is also copied when the left was just seeded with
+no flat frame before it (`opt.init_right = !prev || plan.seed`). Test key `reseed N` (every N-th direct frame the view texture
+is forgotten as after a new dest of the same size), `m9-t2-reseed.cfg` (`stereo_check 5`, fill 0, `reseed 10`, L0): before the
+rule `seeds=114`, `r_copies=1`; after it `seeds=113`, `r_copies=113`, 227 checks, 0 bad. The checks show 0 bad on both
+because a crack is rare; the counters show the rule works.
+
+**The ramp across the menu** (`fades 0`, script 26: game, quit to the menu from a stereo frame, second game). Before: no
+restart (`stereo=1 452 flat=1 ramp_resets=0`, one ramp log block at game 1's start; the second game began at full parallax).
+After the generation trigger (hooks 2a/2b; `boundaries=2`): "frame 640, collections changed (generation 3): the ramp and the
+right eye start again", "frame 641 stereo again", p = 0.0667 … 1.0000 over frames 641-655, `r_copies=2`.
+
+### T6: VRAM (stereo 0 with the 3 584 KiB pool against stereo allocated, 2 944 KiB; hw, `m6-direct.cfg`, final line of `tex:`)
+
+| Level | | free VRAM at exit | pool VRAM / linear used (KiB) | conversions (KiB) | promotions done / blocked (landscape blocked) | evictions | alloc-fail |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| L0 | `stereo 0` | 373 | 3 540 / 256 | 269 (20 319) | 267 / 2 (0) | 239 | 2 |
+| L0 | stereo allocated | **116** | 2 909 / 3 904 | 131 (10 327) | 105 / 26 (1) | 58 | 26 |
+| L6 | `stereo 0` | 1 609 | 2 560 / 0 | 9 (2 560) | 9 / 0 (0) | 0 | 0 |
+| L6 | stereo allocated | **2 770** | 512 / 2 048 | 9 (2 560) | 8 / 1 (1) | 0 | 1 |
+| L20 | `stereo 0` | 3 593 | 576 / 0 | 9 (576) | 9 / 0 (0) | 0 | 0 |
+| L20 | stereo allocated | **2 706** | 576 / 0 | 9 (576) | 9 / 0 (0) | 0 | 0 |
+
+`stereo 0` reproduces M6's 373 / 1 609 / 3 593 KiB exactly. With stereo allocated: **L0** the pool is full at its cap (82 KiB of
+alignment room) and the 2 048 KiB landscape part 0 no longer fits next to the other textures, so it is sampled from linear
+memory (3 904 KiB linear in use); 26 other promotions were blocked and stay linear too, yet there are 4x fewer evictions and half the
+conversions (the churn at the old cap came from the landscape against the pool). **L6** the same landscape part (2 048 KiB, the
+level's biggest) stays in linear memory; everything else is promoted. **L20** nothing moves: 576 KiB of textures fit either
+way, the 887 KiB of the right eye is simply taken from the free space. All frames direct, 0 discards, every level. Whether
+sampling the landscape from FCRAM costs anything is a console question (design section 10).
+
+### The bench (`perf-bench.sh`, `RUNS=1`, HUD + Map, profile build, `quiet 1`, `fps_target` 30 or 60; Azahar — non-authoritative)
+
+Every row: every world frame direct (`direct final`), 0 discards; stereo rows `stereo` = all frames, `w_low` 0. `gaps` 0 everywhere.
+`c3d_draw` is exclusive of `c3d_stereo` (the zones nest and the profiler subtracts; "The profiler"), so a stereo frame's
+view work is `c3d_draw + c3d_stereo`. `frame + overlay` and busy as in "How to read these numbers" (busy = frame − idle).
+
+@30 (ms per frame; fps 30.31-30.36 on every cell):
+
+| Row | L | frame + overlay | busy | `c3d_draw` | `c3d_stereo` | `c3d_wait` | `c3d_composite` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SW | 0 / 6 / 20 | 32.98 / 33.00 / 32.95 | 16.48 / 14.22 / 14.39 | — | — | — | — |
+| mono direct (`stereo 0`) | 0 | 32.98 | 10.41 | 4.90 | 0 | 0.01 | 0.09 |
+| | 6 | 32.94 | 10.46 | 4.91 | 0 | 0.01 | 0.09 |
+| | 20 | 33.01 | 9.34 | 3.09 | 0 | 0.01 | 0.09 |
+| stereo 1, slider 0 | 0 | 32.96 | 10.37 | 4.90 | 0 | 0.01 | 0.09 |
+| | 6 | 32.99 | 10.53 | 4.91 | 0 | 0.01 | 0.09 |
+| | 20 | 33.00 | 9.32 | 3.09 | 0 | 0.01 | 0.09 |
+| slider 100, fill 1 (4 passes) | 0 | 32.94 | **12.38** | 4.94 | 2.47 | 0.01 | 0.11 |
+| | 6 | 32.95 | **13.03** | 4.94 | 2.46 | 0.01 | 0.11 |
+| | 20 | 33.00 | **10.22** | 3.11 | 0.81 | 0.01 | 0.11 |
+| slider 100, fill 0 (2 passes) | 0 | 32.96 | **10.81** | 4.94 | 0.82 | 0.01 | 0.11 |
+| | 6 | 32.99 | **11.48** | 4.94 | 0.82 | 0.01 | 0.12 |
+| | 20 | 33.00 | **9.69** | 3.11 | 0.27 | 0.01 | 0.11 |
+
+@60:
+
+| Row | L | fps | busy | `c3d_draw` | `c3d_stereo` | `c3d_wait` | `c3d_vblank` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SW | 0 | 54.38 | 17.44 | — | — | — | 0.02 |
+| | 6 | 59.63 | 15.34 | — | — | — | 0.36 |
+| | 20 | 59.66 | 15.17 | — | — | — | 0.12 |
+| mono direct (`stereo 0`) | 0 | 59.66 | 14.92 | 4.88 | 0 | 0.01 | 4.43 |
+| | 6 | 59.61 | 14.94 | 4.89 | 0 | 0.01 | 4.24 |
+| | 20 | 59.71 | 14.68 | 3.08 | 0 | 0.01 | 5.35 |
+| stereo 1, slider 0 | 0 | 59.61 | 15.00 | 4.88 | 0 | 0.01 | 4.50 |
+| | 6 | 59.61 | 14.98 | 4.89 | 0 | 0.01 | 4.29 |
+| | 20 | 59.71 | 14.65 | 3.08 | 0 | 0.01 | 5.32 |
+| slider 100, fill 1 (4 passes) | 0 | 59.61 | 15.35 | 4.92 | 2.46 | 0.01 | 2.16 |
+| | 6 | 59.66 | 15.25 | 4.93 | 2.45 | 0.01 | 1.87 |
+| | 20 | 59.66 | 14.90 | 3.10 | 0.81 | 0.01 | 4.64 |
+| slider 100, fill 0 (2 passes) | 0 | 59.71 | 14.97 | 4.92 | 0.82 | 0.01 | 3.45 |
+| | 6 | 59.71 | 15.05 | 4.93 | 0.82 | 0.01 | 3.37 |
+| | 20 | 59.61 | 14.86 | 3.10 | 0.27 | 0.01 | 5.13 |
+
+Reading it. **3D mode and the allocation cost nothing measurable** (slider 0 against mono: busy −0.04 / +0.07 / −0.02 ms @30,
++0.08 / +0.04 / −0.03 @60, within the noise of one run). **Fill 1's second and third passes cost CPU** (`c3d_stereo` 2.47 /
+2.46 / 0.81 ms: the replay re-issues every recorded draw once per extra pass, three extra passes with fill 1; the frames record at most 80 / 75 / 25 draws on L0 / L6 / L20), **busy +1.97 / +2.57 / +0.88 ms @30**; fill 0 (one replayed pass) +0.40 / +1.02 /
++0.35. The 30 fps cap hides it, and **@60 every stereo row holds 59.6-59.7 fps** (the VBlank wait shrinks by what the
+passes take: `c3d_vblank` 4.4 → 2.2 ms on L0 with fill 1). `c3d_wait` stays 0.01 and `gpu_ms … view` 0.08-0.10 ms on every row
+(`m9c3-gms-*`, 28 samples each): **Azahar runs the GPU work inside `C3D_FrameEnd` and charges instruction cost, not fill or
+cache misses, so these figures say almost nothing about the console's cost of 2 or 4 passes** (4-pass against 2-pass here
+is a CPU-side difference of the replay loop only). The console's `gpu_ms view` and fps @60 with 2 and 4 passes are the first
+real figure of M7's fill cost (`NEXT-SPRINT.md` "M9 console check").
+
+### Known limitations (recorded in the design)
+
+The gap fill widens a near edge by up to the parallax difference with the centre view's content (a tinted rectangle's tint
+twice there); the weapon in front of the screen has more parallax than a wall nearer than `weapon_w`; an unmasked static
+polygon's noise is interpolated with perspective on stereo frames and every overlay sits on the screen plane; a rectangle clipped
+by a window keeps its centre-view cut; readback, SW and Classic frames are flat; a level change (in-game ones included)
+restarts the ramp; SSAA (M7) must be off while a frame is stereo; Old 3DS not measured. The dense identity check (`stereo_check
+5`) catches the unfixed defect only occasionally (negative control above).
+
+### Left for the console
+
+`NEXT-SPRINT.md` "M9 console check" (not run): T1 on hardware, which framebuffer reaches which eye, the slider's value at rest
+and at the top, 3D mode in menus, HOME / sleep / Close with the right target linked, the preference toggled, a single-frame
+mono flicker, `gpu_ms view` and fps @60 with `stereo 0` / slider 0 / fill 1 / fill 0, the VRAM-to-VRAM raw copy and the
+identity across a map re-entry, a quit and a saved game, the FCRAM-sampled landscape's cost, comfort tuning of `stereo_k`,
+`stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`, ghosting. Partial or limited runs, stated plainly: the software
+backend ran T1, T2 (levels), T3 (levels) and T5 direct L0 only; the films, the Fade Test and the bench ran on the host GPU
+only; the M1-M5 and M6b regressions ran on the commit-2 binary; one run per bench cell.

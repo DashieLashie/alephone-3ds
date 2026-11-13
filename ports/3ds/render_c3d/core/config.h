@@ -134,6 +134,9 @@
 	  view_v_flip 0|1   default 1: the composite samples the view texture at v = 1 - y/256; 0 = y/256
 	  g3a 0|1           default 0; test only (G3-a's budget probe): the direct view target is 1024x512 and the pool's
 	                    VRAM cap 2048 KiB
+	  reseed N          0..100000, default 0 = off; test only (M9): every N-th direct play frame the view texture is forgotten as after a new
+	                    dest of the same size, so the next frame is seeded from dest with no flat frame in between (stereo: the right eye
+	                    must then be copied again, r_copies rises with seeds)
 	  sw_every N        0..100000, default 0 = off; test only: every N-th play frame is drawn by SW (counted forced_sw),
 	                    so the sync and the seed after it run
 
@@ -243,6 +246,7 @@ struct Config
 	bool band_from_end = true;
 	bool view_v_flip = true;
 	bool g3a = false;                       // test only
+	unsigned reseed = 0;                    // test only (M9)
 	unsigned sw_every = 0;                  // test only
 	// M8
 	bool fallback_sw = false;               // an ineligible frame in mode direct: SW (true) or readback (false)

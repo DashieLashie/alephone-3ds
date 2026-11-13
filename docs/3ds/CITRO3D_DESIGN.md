@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo, supersampling — **all to be built, in this order: M7 goes last** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
+| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo (**M9 done 2026-11-13**, tag `port-stage10-M9`), supersampling — **in this order: M7 goes last and is the next to build** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -4148,7 +4148,8 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   Classic and a non-default Brightness are then plain Software (every frame `fallback_sw`). Passed in Azahar; the console
   check is `NEXT-SPRINT.md` "M8 console check".
 
-### M9 — stereo 3D (to be built after M8, before M7; open question 9 answered yes 2026-10-19, user 2026-11-07)
+### M9 — stereo 3D (done 2026-11-13, tag `port-stage10-M9`, Azahar only; `PERF.md` "Stage 10 M9"; Review log "M9 commit 1: code review", "M9 commit 2: code review", "M9 done"; open question 9 answered yes 2026-10-19, user 2026-11-07)
+- **Status (2026-11-13): done.** Built in three commits and a fix (`8de3697da` the stereo path at parallax 0, `f77ef9af7` parallax, `f81a41962` the review fix, and the records commit), all gates passed in Azahar on both backends where the specification says so; **next: M7 (supersampling), last**. What is left is the console list below (`NEXT-SPRINT.md` "M9 console check", section 10 item 13). The text of the specification that follows is as approved; where the build differs it says so ("Changed after the code review", "As built").
 - **VRAM after M8:** a player who turns the preference off mid-run keeps the 512 KiB view texture and the overlay surface
   allocated (M8 frees nothing on the switch; critic, M8 code review minor 2). The budget below assumes them allocated anyway.
 - **VRAM (checked 2026-11-08 against 9.1's direct column, 5 815 of 6 144 KiB):** a second linked screen target (375 KiB) and a
@@ -4268,6 +4269,19 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     `direct_policy` (called every frame, `front/frame.cpp`:1354) does `if (!s_stereo_seen) stereo_reset(...);
     s_stereo_seen = false;` first. The slider is read by the back end (`back::stereo_slider()`: the key, else
     `osGet3DSliderState()`); **UNVERIFIED**: that the hardware slider reads exactly 0 at rest (hence the 1/64 floor).
+    **As built, two additions (code re-review of commit 2, recorded 2026-11-13).** (1) *A level load or unload is a
+    boundary.* Hook 3a does not run in the menus, so a game that ended on a stereo frame left `seen` set and the next game
+    began at full parallax with the right texture as it was (shown with `fades 0`, script 26: `ramp_resets=0`, no new ramp
+    lines). `direct_policy` now compares the texture cache's generation (bumped by hooks 2a/2b, `collections_changed()`) with
+    the one it last saw; a change clears `seen` and `cur`, so the ramp restarts from 0 and the right eye is copied again
+    (counter `boundaries=`, log line "collections changed ... the ramp and the right eye start again"). **Intended, and it
+    includes in-game level changes** (a new level is a new picture: it starts flat and eases in) and a game loaded from a
+    save. (2) *A seeded frame is a copy point.* `opt.init_right = !prev || plan.seed`: when the left texture is seeded from dest
+    while `prev` is true (a new dest of the same size, `direct_forget_texture` after a calibration frame), the right texture is
+    copied from the seeded left one, else it keeps an older picture and the crack mismatch of "What the two textures hold"
+    returns. Verified with the test key `reseed N` (every N-th direct frame the view texture is forgotten, no flat frame in
+    between; `m9-t2-reseed.cfg`): before the rule `seeds=114`, `r_copies=1`; after it `seeds=113`, `r_copies=113`, 227
+    `stereo_check`s with 0 differing pixels.
   - *VRAM (redone, as section 6 and the M9 block above require).* Stereo adds a second linked screen target 240x400
     (375 KiB) and a second 512x256 view texture (512 KiB): 887 KiB. 9.1's direct column without the pool is 375 + 512 +
     512 + 512 + 320 = 2 231; with stereo 3 118; so the pool may have at most 3 026 KiB. **With `stereo 1` the default
@@ -4335,6 +4349,14 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     3 pixels, 4 frames after a re-entry), and the same would show at any `P` and with fill 1. With the copy both eyes
     start from the same picture, so T2's identity holds by construction. `stereo_gaps` keeps its magenta clears.
     `stereo_check` prints, on a BAD check, up to 8 differing pixels (x, y, both framebuffer values).
+    **As built:** `view_copy_left_to_right()` (`back/view.cpp`) = `gx_op` around `C3D_SyncTextureCopy(left.data, 0, right.data, 0,
+    left.size, GX_TRANSFER_RAW_COPY(1))` (`renderqueue.h`:78, `gx.h`:55: the form of the pool's promotions). Disassembly of
+    `libcitro3d.a` `renderqueue.o` `C3D_SyncTextureCopy`: in a frame (`+0x0-0x2c` tests the in-frame flag) it calls
+    `C3Di_SplitFrame` (a split only when the command buffer holds work) and tail-calls `GX_TextureCopy` (`+0x64`): one queue
+    entry, no wait (the wait, `gxCmdQueueWait` ... `gspWaitForEvent`, is the out-of-frame path). Issued after the seed and
+    before the LUT and the promotions, on a fresh or re-entered right texture, on a seeded frame (the rule above), at a level
+    boundary. Counters: `r_copies=` (copies), `r_clears=` (the tests' clears only). On the console it is a VRAM to VRAM copy
+    with dims 0: section 10 item 13.
   - *The composite* (`back/present.cpp` `present_composite`, :777-940). When the view frame was stereo (a flag handed
     over like the fade, cleared by `direct_policy`, consumed by the next composite): everything from **the state block (:881-884:
     `set_present_draw(Plain)`, cull, stencil, alpha test off, blend ONE/ZERO)** through `C3D_FrameDrawOn` to the fade passes
@@ -4526,16 +4548,23 @@ KiB) are authoritative in Azahar; `C3D_GetDrawingTime/ProcessingTime`
 
 ### 9.1 VRAM (6 144 KiB)
 
-| Item | P1 | Readback (M0-M5) | Direct (M6) | Direct + SSAA (M7) |
-| --- | ---: | ---: | ---: | ---: |
-| screen target 240x400 (linked) | 375 | 375 | 375 | 375 |
-| present texture 512x256 (all surfaces, incl. 640x480 halved on the CPU and in-game dialogs) | 512 | 512 | 512 | 512 |
-| view target (400x240; Classic 480x240) | — | 375 / 450 | — | — |
-| view texture-target 512x256 / 1024x512 | — | — | 512 | 2 048 |
-| overlay texture 512x256 | — | — | 512 | 512 |
-| shade LUT + noise (M5: 64 + 256) | — | 320 | 320 | 320 |
-| texture cache VRAM pool (cap) | — | 3 584 | 3 584 | 2 048 |
-| **total** | 887 | ≤ 5 166 / 5 241 | 5 815 | 5 815 |
+| Item | P1 | Readback (M0-M5) | Direct (M6) | Direct + SSAA (M7) | Direct + stereo (M9) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| screen target 240x400 (linked) | 375 | 375 | 375 | 375 | 750 (two linked targets) |
+| present texture 512x256 (all surfaces, incl. 640x480 halved on the CPU and in-game dialogs) | 512 | 512 | 512 | 512 | 512 |
+| view target (400x240; Classic 480x240) | — | 375 / 450 | — | — | — |
+| view texture-target 512x256 / 1024x512 | — | — | 512 | 2 048 | 1 024 (two textures) |
+| overlay texture 512x256 | — | — | 512 | 512 | 512 |
+| shade LUT + noise (M5: 64 + 256) | — | 320 | 320 | 320 | 320 |
+| texture cache VRAM pool (cap) | — | 3 584 | 3 584 | 2 048 | 2 944 |
+| **total** | 887 | ≤ 5 166 / 5 241 | 5 815 | 5 815 | **6 062** |
+
+**M9 (2026-11-13; spec "VRAM (redone ...)", measured in `PERF.md` "Stage 10 M9", T6):** the right eye adds a second linked screen target
+and a second view texture, 887 KiB, so the pool's default cap is 2 944 KiB whenever the right-eye objects are allocated (the
+Renderer preference without a file: always; with a file only `stereo 1`); 82 KiB are left for alignment. Free VRAM at exit,
+stereo 0 against stereo allocated, on L0 / L6 / L20: 373 / 1 609 / 3 593 against **116 / 2 770 / 2 706** KiB; L0 and L6 sample
+their 2 048 KiB landscape part from linear memory (a blocked promotion), L20 is unchanged. M7's 1 024x512 view (2 048 KiB)
+cannot exist twice: SSAA is off while a frame is stereo.
 
 **M5 (critic, M5 code review major 1):** a Marathon 2 landscape's part 0 is **2 048 KiB** (1 024 × 512 RGBA8; part 1
 128 KiB), inside the pool's cap but not always one contiguous `vramAlloc` block. A promotion allocates first and
@@ -4690,6 +4719,22 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     the view frame's GPU time 1.3-1.5 ms. *Refuted* — none. *Not reached* — whether VRAM contents survive HOME for `tex_view`
     (right picture after each return, no pixel check) and contiguous 512 KiB / 2 MiB VRAM blocks after pool churn (step 3's
     `alloc-fail 5` is a lead, not examined).
+    **M9 (2026-11-13; `NEXT-SPRINT.md` "M9 console check", `PERF.md` "Stage 10 M9"):** *stereo comfort and ghosting* (the first
+    real look: `stereo_k` 96, `stereo_w0` 1024, `stereo_near` 100, `stereo_weapon` −50, `stereo_ramp` 15 are first guesses; user
+    decision D3, weapon in front of the screen); T1 on hardware (the shader's `rcp`/`max` in float24, a primitive leaving the
+    target on the left, which framebuffer reaches which eye, the right target's transfer orientation); the slider's value at rest
+    (the 1/64 floor) and at the top; 3D mode with identical eyes on the menus (brightness, a flicker at the mode switch);
+    HOME, sleep and Close with the right target linked; the preference toggled while a stereo swap is pending (one 2D frame, no
+    corruption); a single-frame mono flicker (the composite's stereo swap happens in the queue-finish callback while the next
+    view frame's `C3D_FrameEnd` clears `isTopStereo`); barrier brightness on mono frames; the cost of 3D mode at slider 0;
+    `gpu_ms view` and fps @60 with 2 and 4 passes (the first real figure for M7's fill); the look of the gap fill against
+    `stereo_fill 0`; the crosshair at zero parallax over a deep scene; **added by the re-review of commit 2:** the VRAM to
+    VRAM `GX_TextureCopy` (`GX_TRANSFER_RAW_COPY(1)`, dims 0, 512 KiB, issued after the seed in the queue) on hardware and its
+    GPU time (it is the same entry the black clear took; the order after the seed rests on queue order only); **T2's identity
+    across a map to play re-entry, a terminal, and a quit to the menu and a new game** (`m9-console-identity.cfg`: every
+    `stereo_check` 0 differing pixels, no black specks in the right eye after a map or terminal); **the ramp after an in-game
+    level change and after loading a saved game** (the texture-cache generation trigger restarts it at every level load:
+    intended, to be seen); the landscape part sampled from FCRAM at the 2 944 cap (L0, L6) against the VRAM pool.
 14. 5.6.1: d1 confirms the binary facts (main thread, rights 1 at ONSUSPEND and
     ONRESTORE, no hook after Close); the post-close frame never retires in 5 s
     (run 1); HOME > Close in a game ×3, HOME and back, sleep in a game with the gate,
@@ -5908,3 +5953,21 @@ leg; a run with `fades 0` that quits to the menu from a stereo frame and starts 
 known look, not fixed: an unmasked static polygon's noise is interpolated with perspective on stereo frames. Verified
 correct by the critic: the front end's `w` (neutral on non-stereo frames, constant per rectangle), the slider and ramp, T1
 (cannot pass with the eyes swapped or the buffers aliased), rule 6, the four fixes carried from commit 1, the stereo pairs.
+
+### M9 done (coordinator, 2026-11-13)
+
+Commits `8de3697da` (stereo path at P = 0), `f77ef9af7` (parallax), `f81a41962` (review fix), and the records commit; tag
+`port-stage10-M9`, Azahar only, no engine edit. The re-review of `f81a41962` (critic, Opus): **approve**, no blocker or major,
+three minors, all taken in the records commit: (1) a frame whose left texture is seeded while `prev` is true left the right eye
+on an older picture: `init_right = !prev || plan.seed`, verified with the new test key `reseed N` (`seeds=113`, `r_copies=113`
+against `seeds=114`, `r_copies=1` before; `core/config.{h,cpp}` gained that key, `front/frame.cpp` the forget and the rule);
+(2) the generation-change trigger (hooks 2a/2b: a level load or unload clears the stereo `seen`/`cur` state, so the ramp and the
+right-eye copy restart at every level change, in-game ones included) recorded in "The ramp" and "What the two textures hold";
+(3) a negative control for the dense identity check: commit `f77ef9af7` built in a scratch worktree and run twice on the fill 0
+L01 film with `stereo_check 5`: run 1 3 795 checks 0 bad, run 2 3 797 checks **1 bad (5 pixels, 5 frames after the right-eye
+clear)**: the dense check catches the defect, in one run of two. Also measured and recorded (`PERF.md` "Stage 10 M9"): T6, the
+VRAM table (free at exit 116 / 2 770 / 2 706 KiB against M6's 373 / 1 609 / 3 593; L0 and L6's 2 048 KiB landscape part sampled
+from linear memory), and the bench (3D mode at slider 0 costs nothing in Azahar; fill 1 adds 0.9-2.6 ms busy @30, fill 0 0.4-1.0;
+every stereo row holds 59.6-59.7 fps @60; Azahar cannot say what the console's fill costs). Section 9.1 has the column "Direct +
+stereo (M9)", section 10 item 13 the console list, `NEXT-SPRINT.md` the runbook "M9 console check" (not run). **Next: M7
+(supersampling), last; its spec must decide SSAA off while 3D is on.**

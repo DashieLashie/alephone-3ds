@@ -221,6 +221,8 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_flag(value, cfg.view_v_flip);
 	if (key == "g3a")
 		return parse_flag(value, cfg.g3a);
+	if (key == "reseed")
+		return parse_unsigned(value, 0, 100000, cfg.reseed);
 	if (key == "sw_every")
 		return parse_unsigned(value, 0, 100000, cfg.sw_every);
 	if (key == "fades")

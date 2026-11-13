@@ -577,6 +577,7 @@ struct DirectFront
 	// curve sets fitted, "[c3d] fade:" lines printed and dropped (after 200), and whether a fade is showing.
 	FadeKind fade_this = FadeKind::None;
 	unsigned fade_affine = 0, fade_fold = 0, fade_static = 0, fade_nofit = 0, fade_err = 0, fade_changes = 0;
+	unsigned reseeds = 0;   // test only (reseed N)
 	unsigned fade_lines = 0, fade_lines_dropped = 0, fade_nonoise = 0;
 	uint64_t fade_fit_ticks = 0, fade_fit_max = 0;   // A1_PROFILE: the fits' time (svcGetSystemTick)
 	bool fade_seen = false;
@@ -1113,6 +1114,14 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 		back::ViewOptions opt;
 		if (dmode)
 		{
+			if (cfg.reseed && direct && P.frames % cfg.reseed == 0)
+			{
+				// test only (reseed N): the texture forgets its view, as after a new dest of the same size (line ~942)
+				direct_forget_texture(s_d.st);
+				if (s_d.reseeds++ < 8)
+					printf("[c3d] reseed test: frame %u, the view texture is forgotten (seed with prev=%d)\n", s_frame,
+					       s_s.prev ? 1 : 0);
+			}
 			const DirectPlan plan = direct_plan(s_d.st, kind, C3dAvail::Ok);
 			opt.clear = false;
 			if (plan.seed)
@@ -1126,7 +1135,10 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 			opt.w0 = static_cast<float>(cfg.stereo_w0);
 			opt.near = static_cast<float>(cfg.stereo_near) / 100.0f;
 			opt.fill = cfg.stereo_fill;
-			opt.init_right = !s_s.prev;
+			// The right eye starts from the left's picture on a re-entry AND whenever the left was just seeded (the texture lost
+			// its view with no flat frame before: a new dest of the same size, a calibration frame's forget): else the right
+			// keeps an older picture and a pixel no draw covers differs between the eyes (code re-review of commit 2).
+			opt.init_right = !s_s.prev || plan.seed;
 			opt.gaps = cfg.stereo_gaps;
 		}
 		if (direct && cfg.calibrate)

@@ -1962,3 +1962,93 @@ passes' GPU time, and the static's look. Setup, driving and `$H/m1/run.sh` as in
 
 **End:** ftpd: delete `/3ds/alephone/debug-c3d`, `debug-perf` and the plugin. **Record** in `PERF.md` ("Stage 10 M6b —
 console") and the design's M6b status and Review log.
+
+## M9 console check (stereo 3D; ~45 min, 14 launches; when the user is at the console)
+
+**Not run yet** (written 2026-11-13 for `port-stage10-M9`; `PERF.md` "Stage 10 M9", design section 7 "M9", its Review log and
+section 10 item 13). Azahar passed every gate; it cannot say how the stereo looks, what the 3D slider reads, what the two passes
+cost on the PICA, whether the right target reaches the right eye, or whether the VRAM to VRAM copy is right. Setup, driving and
+`$H/m1/run.sh` as in "M1 console check, short version", with `cmake --build build-3ds-c3d-prof` at `port-stage10-M9`; the New 3DS,
+**3D slider used by hand** (up = on), HUD + Map, Framerate Target 60 unless a step says 30. **Press A at once at the menu.**
+`debug-c3d` contents are given per launch (files in `scripts/3ds/tests/c3d/`); `debug-perf-L0` = `$H/sprint8/debug-perf-L0`.
+The defaults being judged: `stereo_k 96` (6 px per eye at slider 1, 12 between the eyes at infinity), `stereo_w0 1024` (1 WU on
+the screen plane), `stereo_near 100`, `stereo_weapon -50` (weapon in front of the screen, user decision D3), `stereo_ramp 15`,
+`stereo_fill 1`.
+
+**1. T1 on the hardware** (1 launch, ~3 min). `debug-perf-L0` + `m9-t1.cfg` (`renderer c3d`, `mode direct`, `play 1`, `textures 1`,
+`lit 1`, `stereo 1`, `stereo_cal 1`, `stereo_fill 0`, `stereo_slider 100`). **Pass:** 30 lines `[c3d] stereo_cal: tex L 5/5 R 5/5 fb
+L 5/5 R 5/5`, `composite final` `cal_frames=30 cal_complete=30`. A `tex` 4/5 or worse = the shader's `rcp`/`max` in float24 or the
+left-edge clipping differ from Azahar (record which quad: the 4th is `kWPerspMax`, the 5th the left edge); an `fb R` short of 5/5
+with `tex R 5/5` = the right target's transfer or its eye. **Look** (slider up, while the 20 s run lasts): five squares, red,
+green, blue, yellow, magenta; green on the screen plane; red out of the screen, blue and yellow behind it. **Record which eye**
+sees red further left: close the left eye, then the right: the right eye's red is at column 92, the left's at 108 (16 px apart).
+
+**2. Bench @60, `quiet 1`** (6 launches, ~18 min; the first real figure of stereo's cost). For each of `m9-bench-mono.cfg` (stereo 0),
+`m9-bench-s0.cfg` (stereo 1, slider 0), `m9-bench-f1.cfg` (slider 100, fill 1, 4 passes), `m9-bench-f0.cfg` (fill 0, 2 passes) on
+L0, and `m9-bench-mono.cfg` and `m9-bench-f1.cfg` on L20: `debug-perf-L<N>` + the cfg (each already has `quiet 1`), Framerate Target 60,
+`$H/m1/run.sh build-3ds-c3d-prof m9c-<mono|s0|f1|f0>-L<N>`. **Record** the BENCH lines (`fps`, `busy`, `c3d_draw`, `c3d_stereo`, `c3d_wait`,
+`c3d_vblank`) and `direct final` (`direct=` must be >= 95 % of `frames=`) and `stereo final` (`stereo=` all frames on the f rows,
+0 on s0). **Reading it:** s0 against mono = the cost of 3D mode and the allocation (Azahar: nothing); f1 against f0 = the second pair
+of passes (Azahar: +1.0 ms busy @30, CPU only). **The question:** does f1 hold >= 55 fps @60 on L0/L20 (Azahar 59.6)? If `fps` drops
+under 55 with f1, note whether f0 holds it (D2 made fill 1 the default). The same numbers are M7's first fill-rate evidence.
+Then **2b** (2 launches, ~5 min): `m9-gms-f1.cfg` and `m9-gms-f0.cfg` (the bench cfgs without `quiet 1`) on L0 @60 for `gpu_ms
+draw=… view=…` (the view frames' GPU time, `C3D_GetDrawingTime`: M6's console figure for 1 pass was 1.3-1.5 ms; expect about 2x and
+4x the world part). **Record** the mean and max `view=` over the samples.
+
+**3. Hardware slider and the look** (1 launch, ~8 min, played by the user). `debug-perf` removed; `m9-console.cfg` as `debug-c3d`
+(`renderer c3d`, `mode direct`, `play 1`, `textures 1`, `lit 1`, `overlays 2`, `stereo 1`; no `stereo_slider`: the hardware slider).
+Play L0 (BEGIN NEW GAME) for a few minutes, slider at rest first, then up slowly, then down. **Look at:** depth on walls, floors,
+doors; the weapon (in front of the screen: does it hurt, does it double?); the crosshair (zero parallax, on the screen plane:
+over a deep corridor and over a near wall: does it fight the scene?); the position text; sprites (monsters, items) in depth; landscapes
+(the sky at the far plane); static; the near edge of a wall or doorway (the gap fill widens it by up to the parallax difference). Move
+the slider through its range: the ramp should ease (no pop). **Record** the log's `[c3d] stereo:` lines: `slider=` at rest (**expected
+0.00**; if it is 0.01-0.02 the 1/64 floor is doing its work, record the value; if it never reaches 0 stereo never turns off) and at the
+top (expected 1.00), `P=`, `off=none`, `not3d=0`, `replay_discards` all 0. **Ghosting:** at full slider look for a ghost of the
+weapon and of bright edges (the barrier's crosstalk): record where it is worst and at which slider position it starts. **Comfort
+tuning** (edit the cfg between launches only if something is wrong; one value at a time, record the pick): `stereo_k` 64 / 96 / 128 (how
+deep before it strains), `stereo_w0` 512 / 1024 / 2048 (where the screen plane sits), `stereo_near` 50 / 100 / 200 (how far things may
+come out), `stereo_weapon` -50 / 0 / -100 (the weapon's depth; D3), `stereo_ramp` 8 / 15 / 30 (how fast the depth returns after a map, a
+flash or a pause: it must not pop, it should not feel slow).
+**3b. Fill 0** (1 launch, ~3 min): `m9-console-fill0.cfg` (the same with `stereo_fill 0`), the same corridor and doorway: **the look of
+the gap fill against `stereo_fill 0`**: fill 1 should show a slightly wider near edge with real picture; fill 0 shows what the eye's last
+frame left there (a smear or, at the very first frames, black at the view's right/left edge). Record which is better.
+
+**4. Identity, re-entries and black specks** (1 launch, ~8 min). `m9-console-identity.cfg` (`stereo 1`, `stereo_force 1`, `stereo_slider
+0`, `stereo_check 5`, `stereo_fill 0`, `overlays 1`, `renderer c3d`, `mode direct`, `play 1`, `textures 1`, `lit 1`) and the Terminal Test plugin
+(`scripts/3ds/tests/plugins/Terminal Test` into the card's `Marathon2/Plugins/`; it opens terminal 0 three seconds in): play L1: wait for
+the terminal, leave it, open the **map** (SELECT) and close it, take damage (a flash), then **quit to the menu (START, A) and begin a new game**,
+then **load a saved game** (save one first) and open the map again. **Pass:** every `[c3d] stereo_check:` line `differ=0 ... is3d=1
+distinct=1` (a BAD line prints up to 8 pixels), `stereo final` `r_copies` rising by 1 at each of the re-entries (`stereo again after a
+frame that was not`, `collections changed ... start again`), `replay_discards` 0. **Look:** no black specks or old picture fragments in
+either eye right after the terminal, the map, the new game and the saved game (the earlier black clear left some; the copy should not).
+This also answers whether the VRAM to VRAM `GX_TextureCopy` (`GX_TRANSFER_RAW_COPY(1)`, 512 KiB, queued after the seed) copies the right
+data: a wrong copy shows as a garbled or stale right eye right after a re-entry. **Record** `stereo_check` count and any BAD.
+**The ramp after a level change and a saved-game load:** with `m9-console.cfg` instead (hardware slider up), walk to the level's exit or
+load a save and watch the first second: the depth should ease in from flat (the ramp restarts at every level load; intended): record
+whether it feels right or too slow.
+
+**5. HOME, sleep and Close with the right target linked** (1 launch, ~5 min). `m9-console.cfg` as `debug-c3d`; play: slider up, press
+**HOME** and come back (x2), **close the lid** and reopen, open the **map**, then **HOME > Close**. **Pass:** the picture after each
+return is the live view in both eyes (no frozen frame, no one eye black), the launcher comes back, no Luma screen; `log.txt` ends
+with `release done` and `[c3d] stereo: 3D mode off (citro3d released)`, no `release abandoned`. **Also look for the single-frame mono
+flicker** (a one-frame 2D flash while walking with the slider up: the composite's stereo swap against the next view frame's
+`isTopStereo` clear) and **barrier brightness** on the frames that are mono (map, terminal, a flash): a visible brightness or
+position jump.
+
+**6. Menus in 3D mode and the preference** (1 launch, ~6 min). **No `debug-c3d` file** (ftpd: delete it first; the preference decides),
+Preferences > Graphics > Renderer = Software at the start. Look at the **menus** with the 3D slider up and 3D mode on (it is off while the
+Renderer is Software: `gfxSet3D(false)`): then flip Renderer to **GPU (experimental)**, accept, go back to the menu and look again (3D
+mode is on, one image to both eyes: **brightness of the menu, any flicker at the switch, a ghost**), begin a game (stereo with the hardware
+slider), flip back to Software while at the menu, begin a game: no stereo, the picture 2D. **Record** the log's `[c3d] stereo: 3D mode
+on / off (Renderer preference)` lines and `stereo final` (`stereo=` > 0 only in the GPU games). If the toggle is done while a game's
+stereo swap may be pending (flip at the very moment of quitting a game) expect one 2D frame, no corruption.
+
+**7. VRAM** (no extra launch): in launches 3-6 read the last `tex:` line and `vram_free_kib` of the `composite final` line: Azahar
+at the 2 944 cap: free 116 / 2 770 / 2 706 KiB on L0 / L6 / L20, L0 and L6 sample the 2 048 KiB landscape part from linear memory
+(`promo …/(land 1)`, `alloc-fail` 26 / 1). **Record** the console's figures and whether L0's sky or L6's landscape shows any
+hitch (the FCRAM-sampled landscape's cost; `c3d_draw`/`c3d_wait` in the bench lines of launch 2 are the place to see it).
+
+**End:** ftpd: delete `/3ds/alephone/debug-c3d`, `/3ds/alephone/debug-perf`, the Terminal Test plugin and any `screen-c3d-*` files. **Record** in
+`PERF.md` ("Stage 10 M9 — console"): launches 1-7's results, the BENCH table (mono / s0 / f1 / f0 @60), the comfort picks (`stereo_k`,
+`stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`: new defaults if the user prefers others, a one-line change in
+`core/config.h`/`config.cpp` plus the host test of the defaults), then the design's M9 status, section 10 item 13 and the Review log.
