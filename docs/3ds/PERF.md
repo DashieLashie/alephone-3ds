@@ -2373,3 +2373,107 @@ identity across a map re-entry, a quit and a saved game, the FCRAM-sampled lands
 `stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`, ghosting. Partial or limited runs, stated plainly: the software
 backend ran T1, T2 (levels), T3 (levels) and T5 direct L0 only; the films, the Fade Test and the bench ran on the host GPU
 only; the M1-M5 and M6b regressions ran on the commit-2 binary; one run per bench cell.
+
+## Stage 10 M9 — console (New 3DS, 2026-11-13; partial: stopped early by the user)
+
+`NEXT-SPRINT.md` "M9 console check" on the real New 3DS, `build-3ds-c3d-prof` at `port-stage10-M9` (`63310e9b7`; `git diff --stat
+port-stage10-M9 HEAD -- ports Source_Files scripts` empty, 0 warnings; **no renderer code written in the session**). HUD + Map,
+Framerate Target 60, the 3D slider by hand where stated. **13 of the 17 planned launches were run** (A 1, B 1, C 6, D 4, E 1); the session ended at the
+user's request (tired) before blocks F-J. Raw transcripts: `build-3ds/hw/m1/m9c-*.txt`, card logs and the running notes in
+`build-3ds/hw/m9c/` (`B-log.txt`, `E-log.txt`, `notes.md`); never in git. Console results, authoritative; Azahar's references are in
+"Stage 10 M9" above. One launch (C1) was first started with a stale 3dslink from block B still running and was relaunched cleanly;
+C2 was relaunched once because the user pressed the wrong button; neither run's figures are mixed.
+
+**Result: the stereo path works on the hardware and is fast, with two defects found. Pass: T1 (30 of 30, eyes correct), HOME / sleep /
+Close with the right target linked (clean), the slider reads 0.00 at rest and 1.00 at the top, depth / weapon / crosshair / sprites /
+ghosting / ramp all judged fine by the user, and fill 1 holds the 60 fps cap on L0 and L20 (60.54 / 60.46, goal ≥ 55 met). Fail /
+open: (1) a sky bleed: wall and ceiling texture drags over the landscape when the camera moves, in both eyes, stereo only; (2) a
+slim edge strip: the left eye breaks at its right edge and the right eye at its left edge, where a texture change falls on that
+edge.** Neither defect is fixed or investigated in this session.
+
+### A. T1 on the hardware (launch 1): pass
+
+`m9-t1.cfg`, L0, `stereo_fill 0`, slider 100: **30 lines `stereo_cal: tex L 5/5 R 5/5 fb L 5/5 R 5/5`**, `composite final`
+`cal_frames=30 cal_complete=30`, `stereo=1545 mono=0` of 1545 direct frames, `replay_discards` 0, `w_low 0`. So the shader's `rcp` / `max`
+in float24 and the left-edge clipping (quads 4 and 5) match Azahar, and the right target reaches its own framebuffer. **Eyes (user):**
+the right eye sees the red square further left (column 92 against the left eye's 108): **correct, not swapped.** No `ignored` key.
+
+### B. HOME, sleep and Close with the right target linked (launch 2): pass
+
+`m9-console.cfg`, played by hand, slider up, the user: "every test worked well". Card log: sleeps of 18.1 s and 1.0 s, HOME round
+trips of 4.5 s and 3.2 s, each followed by a live stereo picture (`ramp_resets` 5, `r_copies` 7: the ramp and the copy ran at each
+re-entry); the closing HOME > Close: `release #1 ... gate closed (suspended 1)`, `queue retired after 0 ms`, `stereo: 3D mode off (citro3d
+released)`, `release done` (linear free 17 092 KiB, VRAM free 6 144 KiB), **no `release abandoned`**, `real gfxExit returned`. Totals:
+`stereo=7999 mono=39 flat=252`, `replay_discards` 0, `off=none`, `not3d=0`, `direct=8038` of 8164 (126 readback frames: `darken` and
+`map`, the policy's own). The Luma dumps on the card (`crash_dump_00000004-6`, year 2002) are old, not from this run. The single-frame mono
+flicker and the barrier's brightness on mono frames: **not reported by the user** (not asked about separately; treated as not seen).
+`fade_err=1` in `direct final` is `fit.err`, the largest fade-curve fit error (`front/frame.cpp:842`), not an error count.
+
+### C. The @60 bench, `quiet 1` (launches 3-8)
+
+| Row | Level | fps | busy | max | `c3d_draw` | `c3d_wait` | `c3d_vblank` | `c3d_stereo` | direct / frames | stereo frames |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| mono (stereo 0) | L0 | 60.53 | 13.37 | 22.06 | 2.73 | 0.72 | 5.43 | 0.00 | 1670 / 1670 | 0 |
+| s0 (slider 0) | L0 | 60.54 | 13.18 | 20.61 | 2.76 | 0.70 | 5.17 | 0.00 | 1671 / 1671 | 0 |
+| **f1** (fill 1, 4 passes) | L0 | **60.54** | 13.60 | 19.66 | 2.96 | 2.55 | 2.07 | 1.15 | 1661 / 1661 | 1661 |
+| f0 (fill 0, 2 passes) | L0 | 60.48 | 13.09 | 30.33 | 2.60 | 1.22 | 4.24 | 0.30 | 1664 / 1664 | 1664 |
+| mono | L20 | 60.51 | 13.13 | 28.73 | 1.58 | 0.60 | 6.21 | 0.00 | 1679 / 1679 | 0 |
+| **f1** | L20 | **60.46** | 13.09 | 34.06 | 1.69 | 2.24 | 3.73 | 0.39 | 1668 / 1668 | 1668 |
+
+(busy = frame − idle, ms; all `gaps=0`, `replay_discards` 0, `w_low` 0, `off=none`; passes per stereo frame 4 on f1, 2 on f0.)
+**Findings:** (1) **fill 1 holds the cap** on L0 and L20 (goal ≥ 55 fps @60; Azahar 59.6): the question of design D2 is answered yes
+with room. (2) **s0 = mono**: 3D mode, the right-eye allocation and the smaller VRAM pool (2 944 KiB) cost nothing measurable on L0
+(Azahar: nothing too). (3) The GPU cost of the extra passes shows as `c3d_vblank` turning into `c3d_wait` (L0 f1: vblank 5.43 → 2.07,
+wait 0.72 → 2.55), not as busy time; f1's busy is +0.23 ms over mono. (4) `c3d_stereo` (the CPU replay) is 1.15 ms on L0 f1 against
+Azahar's 2.47, 0.30 on f0 (Azahar 0.82). (5) Single long frames (`max` 28-34 ms) occur in mono and stereo rows alike, one per run.
+Fill 0 was run on L0 only (L20 f0 was not in the plan).
+
+### D. `gpu_ms view`, L0, stats on (launches 9-12; first two samples dropped as warm-up, n = 26 in-game samples each)
+
+| Row | Passes | mean `view=` | max | vs mono |
+| --- | --- | --- | --- | --- |
+| mono | 1 | 1.09 ms | 1.64 | 1.0x |
+| f0 | 2 | 2.43 ms | 2.85 | 2.2x |
+| f1 | 4 | 3.84 ms | 4.92 | 3.5x |
+| f1 + `reseed 10` | 4, a copy every 10th frame | 4.21 ms | 5.59 | — |
+
+**The first real fill figures for M7.** Mono is a little under M6's 1.3-1.5 ms; going from 1 to 2 passes adds 1.3 ms and from 2 to 4
+passes adds 1.4 ms (so about 0.7 ms per additional pass; a derived reading, not measured per pass). 4 passes use about a quarter of the 16.7 ms frame. **One
+right-eye `GX_TextureCopy` (512 KiB, VRAM to VRAM): about 3.7 ms of GPU time** from (4.21 − 3.84) × 10, one run per row so the
+noise is unknown, and it is a once-per-entry cost. `r_copies=154` over 1532 frames, `seeds=154`. **No hitch or flicker noticed** at
+`reseed 10` (user). The stats-on runs show `fps` 56.3-56.7 (the printing stutter, as before); the GPU figures are not affected.
+
+### E. The hardware slider and the look (launch 13, played by the user for about 10 min)
+
+Log (`m9c-look`, 58 168 frames): **`slider=` 0.00 at rest (106 samples, the 1/64 floor works: stereo turns fully off), 1.00 at the top**,
+intermediate values smooth; `P=6.00` at full; `stereo=52316 mono=5850`, `r_copies` 11, `replay_discards` 0, `off=none`, `not3d=0`,
+`direct=58166` of 58168 (2 `gamma:2` readback frames); the close was clean again. **The user's words:**
+- Depth, weapon, crosshair: "Everything looks fine to me" (walls, floors, doors; the weapon in front of the screen does not hurt or
+  double; the crosshair over a deep corridor and a near wall does not fight the scene).
+- Sprites "look fine"; **no ghosting** at full slider.
+- The slider ramp "eases in fine"; the sky distance "is good, could be even further back I think, if possible".
+- **Defect 1, the sky bleed:** "when I move around or turn the camera the texture of ceilings and walls was dragging or 'bleeding'
+  on the skybox"; "in both eyes but disappears when I turn 3d off"; present at every stereo bench run the user watched (L0 f1, f0,
+  D2 f1), **absent in the mono L0 run (D1)**; L20 has no sky, so untested there. **Fill 0 does not remove it** (seen on f0), so it
+  is not the centre pass.
+- **Defect 2, the edge strip:** a slim vertical strip (about 5 px) that "bugs out"; "it happens when texture changes are near the edge
+  of the screen"; slider 0 fixes it, raising it brings it back; while the slider ramps "the texture on the edge looks like it is
+  going out of phase with itself". **Final reading (user): the left eye fails at its right edge, the right eye at its left edge**,
+  each eye fine at the other edge; the user must align a texture change with the edge to see it. Seen with fill 1 and fill 0.
+  Not reported in mono. Leads for the fix (not examined): a per-eye shift of about P pixels uncovers a strip of that width at the
+  opposite edge; the sky bleed in both eyes with a landscape drawn at the far plane while the geometry in front moves.
+
+### F. VRAM (step 7, read from the logs)
+
+At the 2 944 KiB cap, L0: `vram_free_kib=158` (Azahar 116), `tex: ... promo 170/0/48(land 1) ... alloc-fail 48` (Azahar 26): the 2 MiB
+landscape part is sampled from linear memory as predicted. No sky hitch was reported as such (the user did report the bleed, defect 1);
+`c3d_draw` / `c3d_wait` in the bench rows show no landscape-specific cost beyond the stereo passes.
+
+### What was not run (the session stopped after block E)
+
+Block F (fill 0 against fill 1 by eye, staged on the card and removed), block G (`m9-console-identity.cfg` with the Terminal Test plugin:
+T2's identity, black specks after a terminal / map / new game / saved game; the ramp after a level change and a load), block H (menus in
+3D mode and the Renderer preference toggled, no `debug-c3d` file), block J (comfort tuning of `stereo_k`, `stereo_w0`, `stereo_near`,
+`stereo_weapon`, `stereo_ramp`: **all defaults kept, none tried**), L20 fill 0, the Old 3DS, the M8 and M6b console checks. The sky
+and edge defects were not isolated further (no low-slider or per-eye sky test, no screenshots, no `stereo_gaps` / `stereo_check`
+run on the hardware).

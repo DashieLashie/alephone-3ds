@@ -1965,7 +1965,7 @@ console") and the design's M6b status and Review log.
 
 ## M9 console check (stereo 3D; ~60 min, 17 launches plus one per comfort value tried; when the user is at the console)
 
-**Not run yet** (written 2026-11-13 for `port-stage10-M9`; `PERF.md` "Stage 10 M9", design section 7 "M9", its Review log and
+**Run on the console 2026-11-13, partly** (13 of 17 launches; blocks A-E: T1, HOME/sleep/Close, the @60 bench, `gpu_ms view`, the slider and the look; **not run: F, G, H, I's own launch, J comfort tuning**, the user stopped tired; record `PERF.md` "Stage 10 M9 — console"). Result: stereo works and fill 1 holds 60 fps; **two defects found, not fixed** (sky bleed in both eyes; an edge strip, left eye at its right edge and right eye at its left). **To finish the check:** run blocks F, G, H and J from the steps below after the fix, with `m9-console.cfg`; add the sky and edge tests (low slider, one eye at a time, `stereo_gaps`). Written 2026-11-13 for `port-stage10-M9`; `PERF.md` "Stage 10 M9", design section 7 "M9", its Review log and
 section 10 item 13). Azahar passed every gate; it cannot say how the stereo looks, what the 3D slider reads, what the two passes
 cost on the PICA, whether the right target reaches the right eye, or whether the VRAM to VRAM copy is right. Setup, driving and
 `$H/m1/run.sh` as in "M1 console check, short version", with `cmake --build build-3ds-c3d-prof` at `port-stage10-M9`; the New 3DS,

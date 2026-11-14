@@ -4149,6 +4149,7 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   check is `NEXT-SPRINT.md` "M8 console check".
 
 ### M9 — stereo 3D (done 2026-11-13, tag `port-stage10-M9`, Azahar only; `PERF.md` "Stage 10 M9"; Review log "M9 commit 1: code review", "M9 commit 2: code review", "M9 done"; open question 9 answered yes 2026-10-19, user 2026-11-07)
+- **Console (2026-11-13, partial, `PERF.md` "Stage 10 M9 — console"): the stereo path works on the hardware (T1 30/30, eyes right, HOME/sleep/Close clean, fill 1 holds 60.5 fps @60 on L0/L20, `gpu_ms view` 1.09 / 2.43 / 3.84 ms for 1 / 2 / 4 passes) but two defects are open: the sky bleed and the per-eye edge strip. Not run: fill 0 by eye, identity/re-entries, menus/preference, comfort tuning.**
 - **Status (2026-11-13): done.** Built in three commits and a fix (`8de3697da` the stereo path at parallax 0, `f77ef9af7` parallax, `f81a41962` the review fix, and the records commit), all gates passed in Azahar on both backends where the specification says so; **next: M7 (supersampling), last**. What is left is the console list below (`NEXT-SPRINT.md` "M9 console check", section 10 item 13). The text of the specification that follows is as approved; where the build differs it says so ("Changed after the code review", "As built").
 - **VRAM after M8:** a player who turns the preference off mid-run keeps the 512 KiB view texture and the overlay surface
   allocated (M8 frees nothing on the switch; critic, M8 code review minor 2). The budget below assumes them allocated anyway.
@@ -4738,6 +4739,7 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     `stereo_check` 0 differing pixels, no black specks in the right eye after a map or terminal); **the ramp after an in-game
     level change and after loading a saved game** (the texture-cache generation trigger restarts it at every level load:
     intended, to be seen); the landscape part sampled from FCRAM at the 2 944 cap (L0, L6) against the VRAM pool.
+    **Console 2026-11-13 (`PERF.md` "Stage 10 M9 — console", partial):** *verified* — T1 on hardware (30 of 30 `tex`/`fb` 5/5: float24 `rcp`/`max`, left-edge clipping, the right target's transfer), which framebuffer reaches which eye (right eye sees red at column 92: not swapped), the slider's value at rest (0.00, the 1/64 floor turns stereo off) and at the top (1.00), HOME / sleep / Close with the right target linked (`release done`, no `release abandoned`), the cost of 3D mode at slider 0 (none: s0 = mono), `gpu_ms view` and fps @60 with 2 and 4 passes (2.43 / 3.84 ms; 60.48 / 60.54 fps), the VRAM to VRAM copy's GPU time (about 3.7 ms, one run, no hitch seen) and the crosshair at zero parallax ("fine"); the user judged depth, weapon in front of the screen (D3), sprites, the ramp and the sky distance fine and saw no ghosting. *Refuted* — **two defects**: (1) wall and ceiling texture bleeds onto the landscape when the camera moves, in both eyes, stereo only, not removed by `stereo_fill 0`; (2) a slim edge strip, the left eye at its right edge and the right eye at its left edge where a texture change falls on it, not removed by `stereo_fill 0`. *Not reached* — the single-frame mono flicker and the mono-frame barrier brightness (not reported, not asked separately), the preference toggled with a swap pending and the menus in 3D mode (block H), T2's identity across re-entries, terminal and saved game on hardware (block G), the gap fill against fill 0 by eye (block F), the ramp after a level change, comfort tuning (all defaults kept), the landscape's FCRAM cost as a hitch (no hitch reported, no direct test), the user's wish that the sky sit further back.
 14. 5.6.1: d1 confirms the binary facts (main thread, rights 1 at ONSUSPEND and
     ONRESTORE, no hook after Close); the post-close frame never retires in 5 s
     (run 1); HOME > Close in a game ×3, HOME and back, sleep in a game with the gate,
@@ -5985,3 +5987,16 @@ time and launch count, its order (HOME / sleep / Close second, comfort tuning la
 conditional, a mono `gpu_ms` baseline and a `reseed` run for the copy's cost added; 9.1's note for M7 (stereo's objects are
 always allocated under the preference); `config.h`'s comment on `stereo_cal` / `stereo_gaps`; four small wordings in
 `PERF.md`. No new run was needed. **M9 is done in Azahar; tag `port-stage10-M9`.** Console: `NEXT-SPRINT.md` "M9 console check".
+
+### M9 console check, partial (coordinator, 2026-11-13)
+Run on the New 3DS at `port-stage10-M9`, no renderer code written. **13 of 17 launches** (A T1, B HOME/sleep/Close, C six @60 benches,
+D four `gpu_ms view` runs, E the slider and the look); the user stopped, tired. **Gates:** T1 30/30 and the eyes right; HOME/sleep/Close
+clean; fill 1 holds ≥ 55 fps @60 on L0 and L20 (60.54 / 60.46), so D2 stands on the console's evidence; `gpu_ms view` 1.09 / 2.43 / 3.84 ms
+for 1 / 2 / 4 passes (M7's first fill figures: about 0.7 ms per extra pass at 400x240); the right-eye copy about 3.7 ms. **Failed
+(user's observation, not instrumented):** the sky bleed (both eyes, stereo only, survives `stereo_fill 0`) and the edge strip (left eye
+at its right edge, right eye at its left edge, survives `stereo_fill 0`). Both were found by eye in a bench run or the hand-played run;
+neither was isolated further. **Leads, not conclusions:** the strip is about the width of the per-eye shift (P = 6 px at full
+slider) at the edge the shifted picture uncovers, and `r_clears=0` means the eye textures are not cleared between frames, so any pixel
+the view draw (and the fill pass) does not cover keeps the previous frame's content; the landscape is a far-plane quad whose shift
+saturates, drawn under walls whose shift differs. **Next:** decide a fix (an M9 follow-up, before M7) and finish blocks F, G, H and J
+afterwards. M7's kickoff must start from design 9.1's VRAM note and these fill figures.
