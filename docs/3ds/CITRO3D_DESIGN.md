@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo (**M9 done 2026-11-13**, tag `port-stage10-M9`), supersampling — **in this order: M7 goes last and is the next to build** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
+| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo (**M9 done 2026-11-13**, tag `port-stage10-M9`; **M9 fix 2026-11-15**: the edge strip and the sky bleed fixed, seen right on the console, the rest of its console check and the tag `port-stage10-M9b` still to come), supersampling — **in this order: M7 goes last and is the next to build** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -4798,6 +4798,10 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
     the view frame's GPU time 1.3-1.5 ms. *Refuted* — none. *Not reached* — whether VRAM contents survive HOME for `tex_view`
     (right picture after each return, no pixel check) and contiguous 512 KiB / 2 MiB VRAM blocks after pool churn (step 3's
     `alloc-fail 5` is a lead, not examined).
+    **M9 fix (2026-11-15, `PERF.md` "Stage 10 M9 fix — console"):** answered: the left-edge clipping of the edge strips (no strip
+    by eye) and why the sky bled (the PICA draws no polygon with every vertex at `w` = 2^24; fixed with 32 767). **UNVERIFIED:** the
+    PICA's real `w` limit between 32 767 and 2^24 (not searched for). Still open from M9's list: comfort tuning, ghosting, identity
+    across re-entries, menus in 3D mode (blocks F, G, H, J).
     **M9 (2026-11-13; `NEXT-SPRINT.md` "M9 console check", `PERF.md` "Stage 10 M9"):** *stereo comfort and ghosting* (the first
     real look: `stereo_k` 96, `stereo_w0` 1024, `stereo_near` 100, `stereo_weapon` −50, `stereo_ramp` 15 are first guesses; user
     decision D3, weapon in front of the screen); T1 on hardware (the shader's `rcp`/`max` in float24, a primitive leaving the
@@ -6075,3 +6079,23 @@ slider) at the edge the shifted picture uncovers, and `r_clears=0` means the eye
 the view draw (and the fill pass) does not cover keeps the previous frame's content; the landscape is a far-plane quad whose shift
 saturates, drawn under walls whose shift differs. **Next:** decide a fix (an M9 follow-up, before M7) and finish blocks F, G, H and J
 afterwards. M7's kickoff must start from design 9.1's VRAM note and these fill figures.
+
+### M9 fix: the edge strip (coordinator and `c3d-critic`, 2026-11-14/15)
+Kickoff `KICKOFF_M9_FIX.md`. Diagnosed in Azahar first (`stereo_gaps`, fill 0: 769.8 uncovered edge pixels per sample on the L01
+film; T4 had counted them, ungated). User decision 2026-11-14 after a look at other 3DS software: **extend the polygons** (rejected:
+a mask, a crop/zoom, an engine edit of the clip windows). Built inline; two corrections came from the first measurements (walls on
+their own lines, never-narrows; span strips merged per band after one strip per quad nearly filled the ring). **Code review
+(`c3d-critic`, effort medium): APPROVE, 8 minors.** Fixed in code: 1 (span strips leave room for their own polygon), 3 (no wall
+strip through the eye plane or a vanishing point, host tests added), 5 (landscape strips kept to their rows). In the text: 2, 4
+(never-narrows kept for walls, accepted), 6, 7, 8. The first gate series was lost with a session and rerun; all 25 runs pass
+(`PERF.md` "Stage 10 M9 fix"). Commit `9760e14d0`.
+
+### M9 fix: the sky bleed (coordinator, with the user at the console, 2026-11-15)
+The console decided what Azahar could not: with `stereo_gaps 1` the sky stayed magenta on every stereo frame (the PICA drew no
+landscape), with `stereo_land_w 32767` 0 uncovered pixels and a right sky by eye. The "bleed" was the never-cleared eye texture's
+previous frame showing where nothing was drawn. **User decision: cap the landscape's stereo `w` at 32 767** (rejected: a shader
+change to keep the full 6 px shift; a lower cap that would bring the sky forward). The same all-2^24 case in `static_w`'s fallback
+was capped too. Not reviewed by `c3d-critic` (a constant and a clamp; the console result is the evidence). A launch with the
+defaults showed both fixes right; the user then stopped. Commit `a0b9061bf`. **Next:** the rest of `NEXT-SPRINT.md` "M9 fix console
+check", then the tag `port-stage10-M9b`; the user's deeper-sky wish; then M7, whose kickoff must also keep every constant-`w`
+primitive at `kWMax` or below.

@@ -1,5 +1,8 @@
 # Paste this into a fresh Claude Code session started in the stage10-c3d worktree
 
+> **Done 2026-11-15.** Both defects fixed and seen right on the console (`9760e14d0` edge strip, `a0b9061bf` sky bleed; `PERF.md`
+> "Stage 10 M9 fix" and "... — console"). What remains of step 6 is in `NEXT-SPRINT.md` "M9 fix console check". Kept as a record.
+
 (`/Users/dashielashie/Desktop/Aleph_3ds/.claude/worktrees/stage10-c3d`, branch `stage10-c3d`. Written 2026-11-13 after the
 partial M9 console check (docs commit `3c96f658d`, `PERF.md` "Stage 10 M9 — console"). The tag `port-stage10-M9` is the build the
 defects were found on. Earlier kickoff of the same shape: `KICKOFF_M6B.md`.)

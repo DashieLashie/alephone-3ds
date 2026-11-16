@@ -63,7 +63,7 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
   console's PICA draws no landscape whose vertices all carry `w = 2^24`** (the shader scales clip by `w`); landscapes now carry
   `kWMax` = 32 767 on stereo frames (user decision; key `stereo_land_w`); the never-cleared eye texture showed its last frame there.
   Still to run: the edge control, the bench @60, M9's blocks F/G/H/J (`NEXT-SPRINT.md` "M9 fix console check"); the deeper-sky wish is open;
-  **next: M7** (2x2 supersampling, last; its spec must settle VRAM against stereo: design 9.1's note); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  **then M7** (2x2 supersampling, last; its spec must settle VRAM against stereo: design 9.1's note); **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
   `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
@@ -156,6 +156,11 @@ must not touch citro3d (`NEXT-SPRINT.md`, G0-b item 7).
 sized in `a1_3ds_platform.cpp` (`__ctru_linear_heap_size`) and **must fit inside it** or the console fails to boot
 (Azahar does not: `PATCHES.md` 25; New 3DS: heap 98 304 KiB, linear 19 960 KiB). The audio/music path uses bounded
 chunks (<= 8 KiB PCM per request); never load a whole track. citro3d costs about 1 MiB of linear heap; VRAM is 6 MiB.
+
+**PICA vs Azahar.** The console's PICA draws nothing of a polygon whose vertices all carry a clip `w` near `2^24` (the world
+shader scales clip by `w`; the M9 sky bleed, `PERF.md` "Stage 10 M9 fix — console"); 32 767 works, the real limit is unknown.
+Azahar computes in float32 and draws it. Keep every constant-`w` primitive at `kWMax` or below; when only the console shows a
+defect, a magenta clear (`stereo_gaps`) tells "not drawn" from "drawn wrong".
 
 **Screens.** The top screen is 400x240; menus and dialogs stay 640x480 logical and are halved. In game, HUD + Map
 (default, `bottom_screen=0`) renders the view 1:1 at 400x240 and draws HUD + overhead map on the bottom screen

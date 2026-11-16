@@ -21,6 +21,8 @@ Hard platform facts to design around (mark any you cannot confirm from local hea
 - ~6 MB VRAM; textures power-of-two, size-limited, stored in the GPU's tiled layout (citro3d/GX handles conversion).
 - Top screen 400x240 (800x240 wide mode exists), bottom 320x240; stereoscopic 3D needs two render targets.
 - New 3DS only, ~124 MB app RAM, cooperative single-core threads (see CLAUDE.md).
+- Measured on the console (2026-11-15, M9 fix): the PICA draws nothing of a textured polygon whose vertices all carry a
+  clip w near 2^24 (our world shader scales clip by w); 32 767 works. Azahar draws it, so only the console shows it.
 
 The design doc MUST cover, each with a "risk" and "how we test without hardware" line:
 1. Frame flow: where the C3D path hooks in (one seam, behind A1_RENDER_C3D), fallback to software at runtime.
