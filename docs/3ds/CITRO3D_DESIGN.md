@@ -4481,9 +4481,61 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     the centre pass's sprite can remain. The weapon in front of the screen (D3) has more out-of-screen parallax than a
     wall nearer than `weapon_w`, though it is drawn over it. A rectangle clipped by a window keeps its centre-view cut. The static's noise and every overlay sit
     on the screen plane. Readback, SW and Classic frames are flat. Old 3DS: not measured.
-  - *Not in M9:* SSAA with stereo (M7), an engine edit to widen the clip windows, a crosshair with depth, Classic; the
+  - *Not in M9:* SSAA with stereo (M7), an engine edit to widen the clip windows (not needed: "M9 fix: the edge strip" below continues the polygons in the port), a crosshair with depth, Classic; the
     right eye's centre pass as a `GX_TextureCopy` of the left's (critic round 1, minor 12: it needs a frame split; backlog,
     to be judged on the console's 4-pass figure).
+  - **M9 fix: the edge strip (2026-11-14, after the console check; user decision: extend the polygons).** *The defect:* the
+    engine clips every polygon at the view's left and right edges (`RenderRasterize.cpp:563-567`: a clipped vertex takes
+    `window->x0` / `x1`, an unclipped one is pinned to `[0, screen_width]`), so a shifted pass has nothing to draw in a strip of
+    up to `P·max(1, near)` pixels: far surfaces leave the edge the eye's picture moves away from, surfaces nearer than `w0` the
+    other. With fill 1 the strip shows the centre pass's unshifted pixels (visible where a texture change falls there), with
+    fill 0 the previous frame's. Measured in Azahar before the fix (L01 film, slider 100, fill 0, `stereo_gaps`): 769.8 uncovered
+    pixels per sample in the 8 outer columns each side. T4 had counted them and reported them apart ("edge columns"), ungated.
+    *What other software does* (asked by the user): commercial games and the citro3d examples render the scene once per eye
+    with an off-axis frustum (`Mtx_PerspStereoTilt`, `c3d/maths.h`; `examples/3ds/graphics/gpu/composite_scene`), so each eye
+    has geometry at both edges; that needs the engine's visibility and clipping per eye, which M9 avoided. Depth-shift
+    renderers stretch, repeat or mask the edge. *The fix (port only, no engine edit):* on a stereo frame every primitive the
+    view edge cut is continued `b = stereo_edge_px(stereo_k, stereo_near) = ceil(K·max(1, near))` pixels past it (6 with
+    the defaults; the largest shift of the run, so the ramp needs no special case). The attributes are the surface's own:
+    `wall_vertex`, `floor_vertex` and `landscape_attrs` are plane functions of the screen point, so they are evaluated at the
+    outer corners. (a) *Convex polygons (the fan):* for every polygon edge lying on `x == 0` or `x == w` a separate quad
+    `{A, A', B', B}` (`core/stereo.h` `stereo_edge_strip`) shares the edge's two vertices; the polygon itself is issued
+    unchanged, so what it rasterises inside the view is bit for bit what it was (mono frames, T2 and `direct_check` cannot
+    move). `A'` and `B'` lie at `x = −b` or `w + b`: for a wall (entry Vertical) on the wall's own line through the vertex
+    (`stereo_wall_edge_y`: `y = Y0 − (Y0 − y)·depth(x_A)/depth(x')`, `Y0 = hh + dtp`), for floors and landscapes on the
+    line through the polygon's neighbouring edge; then **the strip never narrows** (the upper corner goes no lower than its
+    vertex, the lower no higher) and y is clamped, a floor's or a landscape's to the polygon's own rows (a floor's attributes are
+    not defined across the horizon; a landscape's texture part and row offset were chosen for those rows), a wall's to `[0, h]`.
+    A wall whose signed depth (`wall_vertex`'s before its `fabs`) changes sign between the vertex and the outer corner, or grows
+    more than 16 times there (a vanishing point within the strip), gets no strip (`edge_skipped`): `wall_vertex`'s attributes
+    past it are not the wall's (critic, M9 fix review, finding 3). Never-narrows also applies to a wall's own line: a vertex the
+    view's top or bottom clipped is not on the wall's top or bottom line, and its line would open a gap; the price is a wedge of
+    at most slope·b pixels over farther content beside a steep wall edge, inside the b-pixel strip that would otherwise be a gap
+    (finding 4, accepted). The never-narrows rule and the wall's own line were added after the first measurement:
+    a polygon one or two pixels wide at the edge has rounded vertices whose slopes say nothing, its strip collapsed, and
+    the captures showed a full-height gap beside it (edge gap 3.3 px per sample, then 1.2). A strip that is too large is
+    overdrawn by nearer surfaces (the painter's order holds for strips as for polygons); one that is too small leaves a gap.
+    (b) *Span polygons* (non-convex, multi-band landscapes): consecutive quads that touch the same view edge share one
+    rectangle strip per band. One strip per quad was measured first: a slanted sky polygon is one quad per line, the vertex
+    ring's high water went from 1 549 to 2 045 of 2 048 and two film frames were discarded to SW. The merge is exact because
+    the shift is `P·(1 − w0/w)` and `1/w` is linear in y along a vertical screen line for a floor, constant for a wall and a
+    landscape, so the shifted edge stays straight and the tall strip joins every quad. (c) *Rectangles:* a sprite the screen
+    edge cut (`clip_left <= 0` and `x0 < 0`, or the mirror) is widened in place to `max(x0, −b)` / `min(x1, w + b)`: its
+    texcoords are linear in x and its `w` constant (unchanged inside the view within the GPU's interpolation, which is why
+    `rect_bias` exists). A rectangle cut by a window inside the view keeps its cut (Known limitations). (d) *Rarely the reason
+    for a discard:* a strip whose attributes are not finite past the edge, or that would not leave room for the rest of its own
+    span polygon plus the ring's last 256 vertices / 384 indices, is not drawn (`edge=N/M` in the "stereo final" line: drawn / not
+    drawn). Strips drawn early in a frame still use vertices a later polygon may need when a frame nears the ring's 2 048, so
+    the gates watch `discard` and `ring_hw_v`. *Where the strips land:* left strips (x in `[−b, 0)`) are clipped at x = 0 (T1's
+    quad 4 leaves the left edge the same way and passed on the console); right strips are drawn into the unused columns
+    400-511 of the 512-wide view texture (the projection covers all 512, `view_proj_width()`), which the composite never samples;
+    shifted passes already wrote there before the fix. Test key `stereo_edge 0|1` (default 1; 0 = M9's behaviour, the negative control).
+    *What it does not fix:* a very near wall a few pixels wide at the screen edge moves one way while the scene behind it
+    moves the other, which opens the ordinary depth-edge gap (up to `P·(1 + near)` wide) beside it: the fill pass's case, as
+    anywhere else in the view. A strip starts wherever an edge lies on x = 0 / x = w, including a portal window clamped to the
+    view edge and a rectangle with `clip_left <= 0`: the surface then continues up to b pixels where an off-screen occluder
+    belongs (it has no polygon in the view, so no strip), in one eye. The gate measures coverage only (magenta), not the strips'
+    content: their texture is judged by eye on the console. Gates and figures: `PERF.md` "Stage 10 M9 fix".
   - **Decisions (user, 2026-11-09).** **D1** "GPU (experimental)" turns stereo on; the 3D slider is the control (the
     640 KiB smaller pool is accepted). **D2** the gap fill is on by default (4 passes). **D3** **the weapon in front of the
     screen** (`stereo_weapon` −50 as the first value, console-tuned), the crosshair and overlays at zero parallax. **D4**

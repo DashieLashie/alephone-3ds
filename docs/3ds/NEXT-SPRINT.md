@@ -2059,3 +2059,44 @@ hitch (the FCRAM-sampled landscape's cost; `c3d_draw`/`c3d_wait` in the bench li
 `PERF.md` ("Stage 10 M9 — console"): launches 1-7's results, the BENCH table (mono / s0 / f1 / f0 @60), the comfort picks (`stereo_k`,
 `stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`: new defaults if the user prefers others, a one-line change in
 `core/config.h`/`config.cpp` plus the host test of the defaults), then the design's M9 status, section 10 item 13 and the Review log.
+
+## M9 fix console check (the two stereo defects, then M9's unfinished blocks; ~45 min, 8 launches plus comfort values; when the user is at the console)
+
+**Not run yet.** Written 2026-11-15 for the M9 fix (`KICKOFF_M9_FIX.md`; design section 7 "M9 fix: the edge strip"; `PERF.md`
+"Stage 10 M9 fix"). Setup and driving as in "M9 console check" (`$H/m1/run.sh`, ftpd first for the card, then the netloader; the
+console's IP was 192.168.100.72), `cmake --build build-3ds-c3d-prof` at the M9 fix commit, the New 3DS, HUD + Map, Framerate Target 60,
+**3D slider by hand**. **Press A at once at the menu.** Tell the user before each launch which files go on the card.
+
+**1. The sky bleed: what the hardware draws** (1 launch, ~5 min; decides the sky fix). `debug-perf` removed; `m9fix-diag-gaps.cfg`
+as `debug-c3d` (`m9-console.cfg` + `stereo_gaps 1`: both eye textures cleared to magenta on every stereo frame, fill 1). Play L0
+(BEGIN NEW GAME), slider up, turn toward the sky and along the wall/sky edges, then walk. **Read it:** the **sky area magenta** (or
+magenta smears that follow the camera) = the console does not draw the landscape on stereo frames (its vertices carry `w = 2^24`;
+Azahar computes in float32, the PICA in float24); **no magenta** apart from a rare speck = everything is drawn and what the user saw
+is the fill pass's content (centre-view pixels beside the sky). **Record** the log's `[c3d] stereo_gaps: ... gap_px=N (edge columns
+E, interior I)` lines (every 30th stereo frame; a small hitch at each is expected; Azahar on the L01 film with fill 1: 792 of 798
+samples 0 px, max 6) and what the user saw, in their words. Then one look with the slider low.
+
+**2. The edge strip by eye** (2 launches, ~8 min). `m9-console.cfg` (the fix on) then `m9fix-console-edge-off.cfg` (`stereo_edge 0`,
+M9's behaviour) as `debug-c3d`. Each time on L0: line a texture change (a door frame, a wall seam, a light panel) up with the
+**right** edge of the screen, close the right eye (the left eye failed at its right edge); then the **left** edge with the left eye
+closed; slider low, then full; turn slowly so the seam crosses the edge. **Pass:** with the fix no slim strip at either edge in
+either eye, the texture continuous up to the screen edge; with `stereo_edge 0` the strip is back (the control: if it is not, the
+test did not find a seam). Expected residue (design "What it does not fix"): a very near wall a few pixels wide at the screen edge
+can still open a gap beside it, as any near depth edge does. **Record** `stereo final` `edge=N/M` (strips drawn / not drawn; M
+should be 0 or tiny) and `replay_discards` 0 from the first launch.
+
+**3. Bench re-check @60** (2 launches, ~6 min; the strips add a few vertices). `debug-perf-L0` then `debug-perf-L20`, each with
+`m9-bench-f1.cfg`. **Pass:** fps >= 55 (M9 console: 60.54 / 60.46), `direct final` >= 95 %, `stereo final` `edge=N/0`. Record the BENCH
+lines beside the M9 rows.
+
+**Then M9's unfinished blocks, with the fixed build** (from "M9 console check"):
+- **F = its step 3b** (fill 0 against fill 1 by eye, `m9-console-fill0.cfg`, 1 launch).
+- **G = its step 4** (identity and re-entries, `m9-console-identity.cfg` + the Terminal Test plugin, 1 launch; then the ramp after a
+  level change / saved game with `m9-console.cfg`, 1 launch).
+- **H = its step 6** (menus in 3D mode and the Renderer preference, no `debug-c3d`, 1 launch).
+- **J = its step 3's comfort tuning** (one key at a time: `stereo_k`, `stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`; last,
+  with whatever time is left; defaults stay unless the user prefers another value).
+
+**End:** ftpd: delete `/3ds/alephone/debug-c3d`, `/3ds/alephone/debug-perf`, the Terminal Test plugin and any `screen-c3d-*` files.
+**Record** in `PERF.md` "Stage 10 M9 fix — console": step 1's reading (it decides the sky fix: ask the user before building it), step
+2's look, step 3's figures, F/G/H/J as M9's runbook says; tag `port-stage10-M9b` only when both defects are fixed and the console agrees.

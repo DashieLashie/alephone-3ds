@@ -2477,3 +2477,75 @@ T2's identity, black specks after a terminal / map / new game / saved game; the 
 `stereo_weapon`, `stereo_ramp`: **all defaults kept, none tried**), L20 fill 0, the Old 3DS, the M8 and M6b console checks. The sky
 and edge defects were not isolated further (no low-slider or per-eye sky test, no screenshots, no `stereo_gaps` / `stereo_check`
 run on the hardware).
+
+## Stage 10 M9 fix: the edge strip (Azahar — non-authoritative)
+
+Recorded 2026-11-15 on `stage10-c3d` (kickoff `KICKOFF_M9_FIX.md`; design section 7 "M9 fix: the edge strip"). Fixes the second
+defect of "Stage 10 M9 — console" (the per-eye edge strip); **the sky bleed is not fixed**: it waits on one console launch
+(`NEXT-SPRINT.md` "M9 fix console check", step 1). **No engine edit, no `PATCHES.md` entry.** Binary `build-3ds-c3d-prof` md5
+`544444e4…` (after the review fixes below); host GPU unless marked sw (Azahar's software backend, `gxq_budget 3` configs). Logs
+`build/m9fix/`, bench `build/perf/m9fix-*` (not in git).
+
+**Diagnosis (2026-11-14, Azahar, before any code).** L01 film, slider 100, `stereo_gaps 1` (both eye textures cleared to magenta,
+every 30th stereo composite counted): **fill 0** 769.8 uncovered pixels per sample in the 8 outer columns each side (median 720,
+max 2 628), interior 156 (median 60) along the wall/ceiling edges beside the sky; **fill 1** 792 of 798 samples 0 pixels, max 6.
+The edge strip reproduces in Azahar: the engine clips every polygon at the view's left and right edges
+(`RenderRasterize.cpp:563-567`), so the shifted pass has no geometry for the strip that slides in at the opposite edge; T4 had
+counted it ("edge columns") and left it ungated. The sky bleed does not reproduce with fill 1, so it is either the fill pass's
+content or a hardware-only failure of the landscape at `w = 2^24` (float24): the console decides.
+
+**The fix** (user decision 2026-11-14: extend the polygons, after a look at what other 3DS software does: two cameras with
+`Mtx_PerspStereoTilt`; masks or stretches for depth-shift renderers). On stereo frames every primitive the view edge cut continues
+`b = 6` px past it with the surface's own attributes (fan strips, merged span strips, widened rectangles); test key `stereo_edge
+0|1`. Two corrections came from the first measurements (edge gap 3.3 then 1.2 px per sample): walls follow their own top and bottom
+lines and a strip never narrows; span strips are merged per band (one strip per quad took the ring to 2 045 of 2 048 and discarded
+two frames).
+
+**Review** (`c3d-critic`, effort medium): APPROVE, eight minors. Fixed in code: (1) a span strip leaves room for the rest of its
+own polygon as well as the 256 / 384 reserve; (3) a wall whose signed depth changes sign, or grows more than 16x, within the strip
+gets no strip (`wall_vertex`'s `fabs` made a finite wrong depth there; host tests with vanishing points at columns 400 and 403);
+(5) landscape strips are clamped to the polygon's rows. In the design text: (2) right strips land in the texture's unused columns
+400-511, left ones are clipped at x = 0; (4) never-narrows kept for walls (a vertex clipped by the view's top is not on the wall's
+line), its wedge accepted; (7) rectangles unchanged within the GPU's interpolation; (8) the off-screen occluder case; (1b) "rarely"
+the reason for a discard, the gates watch `discard` and `ring_hw_v`; (6) the gate measures coverage, not content: the console
+judges content by eye.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| **The edge gate** (`m9fix-edge-film.cfg`: L01 film, slider 100, fill 0, `stereo_gaps`) | edge columns **avg 3.6 px per sample** (median 0, p90 0, max 1 680; 77 of 822 samples non-zero), interior 167.2 (median 61.5); `edge=195 825/2` (strips drawn / not drawn), `w_low` 0 of 7.49 M, `replay_discards` 0, `discard` all 0, `ring_hw_v` 1 593 |
+| Its negative control (`m9fix-edge-off-film.cfg`, `stereo_edge 0`) | edge columns **avg 830.6** (median 756, p90 1 440, max 2 620; 456 of 497 samples; the run ended at the 500 s timeout), `edge=0/0`, `ring_hw_v` 1 549 |
+| Host tests (`c3d-host/build.sh`) | 2 658 061 checks, 0 failures (`stereo_edge_px`, `stereo_edge_strip` incl. never-narrows and given lines, `stereo_wall_edge_y` incl. the eye-plane / vanishing-point refusals, the key) |
+| **T2** identity (`stereo_force`, slider 0, `stereo_check 30`): L0 / L6 / L20 | fill 1: 36 / 36 / 42 checks, fill 0: 39 / 39 / 43, **0 differing pixels** (M9's counts); `direct_check` 100 % within 1 |
+| **T2** L01 film `stereo_check 5`, fill 1 / fill 0 | 3 589 / 3 704 checks, **0 bad** |
+| **T2** Fade Test (fill 1) | 4 164 checks, 0 bad; the 9 `direct_check`s under 100 % within 1 are fade frames (affine / fold), within 2 100 %, max Δ 2: M6b's tolerance. (The run had no `--timeout` and ran until stopped: a gate-script slip, not a hang) |
+| **T2** sw, L0 | 35 checks, 0 bad; `direct_check` 35, max Δ 1 |
+| **T3** parallax (slider 100): L0 / L6 / L20 / film; sw L0 | 0 replay discards, `w_low` 0 everywhere; `edge` 30 055/0, 9 597/0, 18 940/0, 125 459/1; sw 29 878/0; `ring_hw_v` 493 / 403 / 222 / 1 488 (film); `direct_check` 45 sw, 0 bad |
+| **T4** gaps, fill 0, slider 100 | edge columns L0 **2.0** / L6 0 / L20 0 per sample (M9: 1 019.5 / 366.0 / 1 061.4 total, mostly the edge strip) |
+| **T4** at P = 0 | L0 0 |
+| **T5** `direct_check` L0 / L6 / L20, `stereo 0` and `stereo 1` + slider 0 | 41 / 41 / 44 checks each, 100.000 %, 0 bad; `stereo=0` in every slider 0 run |
+| Builds | four builds, 0 warnings (the changed TUs recompiled); OFF build `nm` count 0 |
+
+### The bench (`perf-bench.sh`, `RUNS=1`, HUD + Map, profile build, `quiet 1`)
+
+Every row: every world frame direct and stereo (`stereo=` = `frames=`), `replay_discards` 0, `discard` 0, `gaps` 0, `edge=N/0`.
+
+| Row | L | fps | busy | `c3d_draw` | `c3d_stereo` | M9 busy | M9 `c3d_draw` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| mono direct (`stereo 0`) @60 | 0 / 6 / 20 | 59.71 / 59.66 / 59.66 | 14.83 / 14.91 / 14.84 | 4.91 / 4.92 / 3.09 | 0 | 14.92 / 14.94 / 14.68 | 4.88 / 4.89 / 3.08 |
+| slider 100, fill 1 @60 | 0 / 6 / 20 | **59.61 / 59.62 / 59.66** | 15.34 / 15.31 / 14.87 | 5.23 / 5.12 / 3.27 | — | 15.35 / 15.25 / 14.90 | 4.92 / 4.93 / 3.10 |
+| slider 100, fill 1 @30 | 0 / 6 / 20 | 30.35 / 30.36 / 30.31 | 12.69 / 13.22 / 10.39 | 5.25 / 5.13 / 3.28 | 2.47 / 2.46 / 0.81 | 12.38 / 13.03 / 10.22 | 4.94 / 4.94 / 3.11 |
+
+Reading it: the strips cost **+0.31 / +0.19 / +0.17 ms of `c3d_draw`** on L0 / L6 / L20 (the extra attribute evaluation and
+vertices; 22 / 7 / 12.5 strips per frame), which shows one-for-one in busy @30; `c3d_stereo` (the replayed passes) is unchanged. **@60 fill 1
+holds 59.6-59.7 fps** as in M9, against the goal of 55; the console figures to set it beside are M9's 60.54 / 60.46 (L0 / L20,
+"Stage 10 M9 — console"). Mono is unchanged within the noise (the edge path does not run). The console re-check is
+`NEXT-SPRINT.md` "M9 fix console check", step 3.
+
+### Left for the console
+
+`NEXT-SPRINT.md` "M9 fix console check": (1) the sky-bleed diagnostic (`m9fix-diag-gaps.cfg`), which decides the second fix; (2) the
+edge strip by eye, fix on against `stereo_edge 0`, both edges, both eyes, slider low and full (content, wedges beside steep walls:
+critic findings 3-5); (3) the bench @60 on L0/L20; then M9's unfinished blocks F, G, H, J. Tag `port-stage10-M9b` only when both
+defects are fixed and the console agrees.

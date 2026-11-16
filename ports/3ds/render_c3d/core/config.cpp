@@ -255,6 +255,8 @@ bool config_apply(Config& cfg, const std::string& key, const std::string& value)
 		return parse_unsigned(value, 0, 100000, cfg.stereo_check);
 	if (key == "stereo_gaps")
 		return parse_flag(value, cfg.stereo_gaps);
+	if (key == "stereo_edge")
+		return parse_flag(value, cfg.stereo_edge);
 	if (key == "stereo_fail")
 		return parse_flag(value, cfg.stereo_fail);
 	if (key == "fallback")

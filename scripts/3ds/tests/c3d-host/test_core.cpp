@@ -5611,6 +5611,106 @@ static void test_m9_core()
 	test_m9_gx_accounting();
 }
 
+// --- M9 fix (design 7, "M9 fix: the edge strip"): the extension width, the strip of a clipped polygon, the key ---
+static void test_m9_fix_core()
+{
+	CHECK(stereo_edge_px(96, 100) == 6 && stereo_edge_px(96, 0) == 6 && stereo_edge_px(96, 200) == 12);
+	CHECK(stereo_edge_px(100, 100) == 7 && stereo_edge_px(0, 100) == 0);
+	{
+		Config c;
+		CHECK(c.stereo_edge);
+		CHECK(config_apply(c, "stereo_edge", "0") && !c.stereo_edge);
+		CHECK(!config_apply(c, "stereo_edge", "2") && config_apply(c, "stereo_edge", "1") && c.stereo_edge);
+	}
+	const int W = 400, H = 240, b = 6;
+	Point2 s[4];
+	// A wall cut by the right edge: top edge rising 1 in 2, bottom edge falling 1 in 3 towards the edge.
+	{
+		const Point2 v[4] = {{300, 100}, {400, 50}, {400, 180}, {340, 200}};
+		CHECK(accept_polygon(v, 4, W, H) == Accept::Draw && convex_cw(v, 4));
+		CHECK(!stereo_edge_strip(v, 4, 0, W, b, 0, H, s) && !stereo_edge_strip(v, 4, 2, W, b, 0, H, s));
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s));
+		CHECK(s[0].x == 400 && s[0].y == 50 && s[3].x == 400 && s[3].y == 180);
+		CHECK(s[1].x == 406 && s[1].y == 47 && s[2].x == 406 && s[2].y == 180);
+		CHECK(accept_polygon(s, 4, W + b, H) == Accept::Draw && convex_cw(s, 4));   // clockwise, like the polygon
+		CHECK(!stereo_edge_strip(v, 4, 1, W, 0, 0, H, s));                           // no width, no strip
+	}
+	// The same shape mirrored to the left edge: the edge runs upwards, the strip goes to x = -b.
+	{
+		const Point2 v[4] = {{0, 180}, {0, 50}, {100, 100}, {60, 200}};
+		CHECK(accept_polygon(v, 4, W, H) == Accept::Draw);
+		CHECK(stereo_edge_strip(v, 4, 0, W, b, 0, H, s));
+		CHECK(s[0].x == 0 && s[0].y == 180 && s[3].x == 0 && s[3].y == 50);
+		CHECK(s[1].x == -6 && s[1].y == 180 && s[2].x == -6 && s[2].y == 47);
+		int64_t area2 = 0;
+		for (int i = 0; i < 4; ++i)
+			area2 += static_cast<int64_t>(s[i].x) * s[(i + 1) % 4].y - static_cast<int64_t>(s[(i + 1) % 4].x) * s[i].y;
+		CHECK(area2 > 0);
+	}
+	// Clamps: a steep edge leaves [ylo, yhi]; a floor's rows (its own ymin..ymax) hold the outer corners.
+	{
+		const Point2 v[4] = {{398, 30}, {400, 2}, {400, 239}, {398, 200}};
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s));
+		CHECK(s[1].y == 0 && s[2].y == 240);
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 2, 239, s));
+		CHECK(s[1].y == 2 && s[2].y == 239);
+	}
+	// A screen-corner polygon: the neighbours lie on the top and bottom edges, so the strip is a rectangle; a neighbour on
+	// the same view edge (collinear) keeps its y.
+	{
+		const Point2 v[4] = {{0, 0}, {400, 0}, {400, 240}, {0, 240}};
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s) && s[1].y == 0 && s[2].y == 240 && s[1].x == 406);
+		CHECK(stereo_edge_strip(v, 4, 3, W, b, 0, H, s) && s[1].y == 240 && s[2].y == 0 && s[1].x == -6);
+		const Point2 c[5] = {{300, 10}, {400, 10}, {400, 100}, {400, 200}, {300, 200}};
+		CHECK(stereo_edge_strip(c, 5, 1, W, b, 0, H, s) && s[1].y == 10 && s[2].y == 100);
+		CHECK(stereo_edge_strip(c, 5, 2, W, b, 0, H, s) && s[1].y == 100 && s[2].y == 200);
+	}
+	// The strip never narrows: sides that close towards the edge go straight on; sides that open keep their own lines.
+	{
+		const Point2 v[4] = {{380, 60}, {400, 98}, {400, 102}, {380, 140}};
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s));
+		CHECK(s[1].y == 98 && s[2].y == 102);
+		const Point2 t[3] = {{396, 100}, {400, 90}, {400, 110}};
+		CHECK(stereo_edge_strip(t, 3, 1, W, b, 0, H, s));
+		CHECK(s[1].y == 75 && s[2].y == 125);
+		// given lines (a wall's own) replace the vertex slopes; one that would narrow the strip, or a NaN, is refused
+		const double ys[2] = {80.4, 131.6}, bad[2] = {95.0, std::nan("")};
+		CHECK(stereo_edge_strip(t, 3, 1, W, b, 0, H, s, ys) && s[1].y == 80 && s[2].y == 132);
+		CHECK(stereo_edge_strip(t, 3, 1, W, b, 0, H, s, bad) && s[1].y == 90 && s[2].y == 110);
+	}
+	// A wall's own line: a wall square to the view (depth constant) keeps its rows; one receding to the right closes
+	// towards the horizon row by the ratio of the depths.
+	{
+		TexView tv{};
+		tv.hw = 200; tv.hh = 120; tv.wx = 200; tv.wy = 200; tv.dtp = 0;
+		const WallSurf sq{2048, -1024, 0, 0, 1024, -1024};   // x = 2048 everywhere
+		CHECK(stereo_wall_edge_y(tv, sq, 400, 50, 406) == 50.0);
+		const WallSurf rc{1024, -1024, 0, 512, 1024, -1024};   // receding to the right, vanishing at column 600
+		const double d400 = wall_vertex(tv, rc, 400, 0).w, d300 = wall_vertex(tv, rc, 300, 0).w;
+		CHECK(d400 > d300);
+		const double y = stereo_wall_edge_y(tv, rc, 300, 20, 400);
+		CHECK(std::fabs(y - (120.0 - 100.0 * d300 / d400)) < 1e-9 && y > 20.0 && y < 120.0);
+		CHECK(stereo_wall_edge_y(tv, rc, 300, 220, 400) < 220.0);   // below the horizon it rises
+		// M9 fix, critic finding 3: past a vanishing point (or through the eye plane) wall_vertex's fabs makes a finite
+		// depth that is not the wall's; the line is NaN there, and so is a depth growing over kWallEdgeMaxRatio times.
+		const WallSurf v400{1024, -1024, 0, 1024, 1024, -1024};   // vanishing at column 400 (den == 0 there)
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v400, 395, 20, 400)));   // the guarded den: a huge negative depth
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v400, 395, 20, 401)));   // past it: the sign flips
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v400, 300, 20, 399)));   // same side, 100x deeper
+		const WallSurf v403{1024, -1024, 0, 1000, 1015, -1024};   // vanishing at 403: inside the strip 400..406
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v403, 400, 20, 406)));   // through it: the sign flips
+		CHECK(std::isfinite(stereo_wall_edge_y(tv, v403, 400, 20, 402)));   // before it, 3x deeper: still the wall
+		CHECK(std::isfinite(stereo_wall_edge_y(tv, v403, 300, 20, 395)));   // 12.9x: under the ratio
+		CHECK(std::isfinite(stereo_wall_edge_y(tv, rc, 400, 20, 406)));   // far from its vanishing point: fine
+	}
+	// A zero-length edge, an edge inside the view and a polygon touching the edge with one vertex give nothing.
+	{
+		const Point2 v[4] = {{300, 100}, {400, 120}, {400, 120}, {300, 140}};
+		for (int i = 0; i < 4; ++i)
+			CHECK(!stereo_edge_strip(v, 4, i, W, b, 0, H, s));
+	}
+}
+
 int main()
 {
 	test_config();
@@ -5641,6 +5741,7 @@ int main()
 	test_m6_core();
 	test_m6b_core();
 	test_m9_core();
+	test_m9_fix_core();
 	std::printf("%d checks, %d failures\n", s_checks, s_fail);
 	return s_fail ? 1 : 0;
 }

@@ -101,7 +101,18 @@ void C3dRasterizer::texture_rectangle(rectangle_definition& r)
 	const double eps = static_cast<double>(rect_bias_) / 131072.0;
 	const DrawKey key{classify(Entry::Rectangle, to_transfer(r.transfer_mode), foreground_), r.texture, r.shading_tables,
 	                  r.transfer_mode, r.transfer_data, static_cast<uint16_t>(r.flags & _SHADELESS_BIT)};
-	const int xs[4] = {box.cl, box.cr, box.cr, box.cl}, ys[4] = {box.ct, box.ct, box.cb, box.cb};
+	// M9 fix: a rectangle the screen's left / right edge cut (not a window's) continues up to edge_ pixels past it on a
+	// stereo frame; its texcoords are linear in x (rect_t), its w constant, so the part inside the view is unchanged.
+	int xl = box.cl, xr = box.cr;
+	if (edge_)
+	{
+		if (box.cl == 0 && r.x0 < 0 && r.clip_left <= 0)
+			xl = std::max(static_cast<int>(r.x0), -edge_);
+		if (box.cr == w_ && r.x1 > w_ && r.clip_right >= w_)
+			xr = std::min(static_cast<int>(r.x1), w_ + edge_);
+		edge_strips_ += (xl != box.cl) + (xr != box.cr);
+	}
+	const int xs[4] = {xl, xr, xr, xl}, ys[4] = {box.ct, box.ct, box.cb, box.cb};
 	Vertex v[4];
 	for (int i = 0; i < 4; ++i)
 	{
@@ -449,6 +460,28 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			o.a = 0xFF;
 		}
 	};
+	// M9 fix: the strip past a view edge (core/stereo.h stereo_edge_strip), with the polygon's own attribute functions
+	// at its two outer corners. Without finite attributes it is not drawn; it leaves room in the ring for the rest of its
+	// own polygon (`later` span quads, checked as a whole before the first) plus the last kEdgeRingReserveV vertices /
+	// kEdgeRingReserveI indices for the polygons still to come, so a strip rarely costs a later primitive its place (a
+	// frame that fills the ring with strips drawn early can still run short: the gates watch discard and ring_hw_v).
+	constexpr unsigned kEdgeRingReserveV = 256, kEdgeRingReserveI = 384;
+	auto strip = [&](const Point2* q, int piece, double row_off, unsigned later = 0) {
+		TexAttr qa[4];
+		if (!back::view_ring_room(4 + 4 * later + kEdgeRingReserveV, 6 + 6 * later + kEdgeRingReserveI) ||
+		    attrs_of(q, 4, piece, row_off, qa) != TexResult::Ok)
+		{
+			++edge_skipped_;
+			return;
+		}
+		Vertex sv[4];
+		make(q, qa, 4, sv);
+		if (back::view_polygon(sv, 4, key, tsp))
+			++edge_strips_;
+	};
+	// Floors and landscapes: the outer corners stay inside the polygon's rows (a floor's attributes are not defined across
+	// the horizon; a landscape's piece and row offset were chosen for these rows). Walls: the view's rows.
+	const int strip_ylo = horizontal ? ymin : 0, strip_yhi = horizontal ? ymax : h_;   // horizontal includes landscapes
 	auto count_drawn = [&]() {
 		++drawn_;
 		if (landscape)
@@ -508,8 +541,29 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			return;
 		}
 		land_spans_ += landscape;
+		// M9 fix: the open strip at the view's left [0] and right [1] edge (rows [y0, y1) of one band)
+		struct EdgeRun
+		{
+			bool open;
+			int y0, y1, band;
+			double off;
+		};
+		EdgeRun runs[2] = {};
 		int off_band = 0x7FFFFFFF;
 		double off = 0.0;
+		auto flush_run = [&](int side, unsigned later) {
+			EdgeRun& r = runs[side];
+			if (!r.open)
+				return;
+			r.open = false;
+			if (landscape)
+				set_part(r.band);
+			const Point2 right[4] = {{w_, r.y0}, {w_ + edge_, r.y0}, {w_ + edge_, r.y1}, {w_, r.y1}};
+			const Point2 left[4] = {{0, r.y1}, {-edge_, r.y1}, {-edge_, r.y0}, {0, r.y0}};
+			strip(side ? right : left, r.band, r.off, later);
+			if (landscape && off_band != 0x7FFFFFFF)
+				set_part(off_band);   // back to the band being drawn
+		};
 		for (int k = 0; k < nr; ++k)
 		{
 			const Span& rc = rects[k];
@@ -553,7 +607,32 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			if (!back::view_polygon(v, 4, key, tsp))
 				return;
 			++span_quads_;
+			if (edge_)
+			{
+				// x runs along the span (horizontal) or across the lines (vertical); the rows are q's own. Consecutive
+				// quads that touch the same view edge share one strip per band (a slanted polygon is one quad per line;
+				// the shift is linear in y along a vertical line, so the tall strip joins every quad without a crack).
+				const int x0 = horizontal ? rc.a0 : l0, x1 = horizontal ? rc.a1 : l1;
+				const int y0 = horizontal ? l0 : rc.a0, y1 = horizontal ? l1 : rc.a1;
+				const double so = landscape ? off : row_off0;
+				const bool touch[2] = {x0 == 0, x1 == w_};
+				for (int side = 0; side < 2; ++side)
+				{
+					EdgeRun& r = runs[side];
+					if (r.open && (!touch[side] || r.band != band_of[k] || r.y1 != y0))
+						flush_run(side, static_cast<unsigned>(nr - k));   // quad k is drawn: nr - k - 1 to come, + slack
+					if (touch[side])
+					{
+						if (!r.open)
+							r = EdgeRun{true, y0, y1, band_of[k], so};
+						else
+							r.y1 = y1;
+					}
+				}
+			}
 		}
+		flush_run(0, 0);
+		flush_run(1, 0);
 		count_drawn();
 		return;   // no tie pixels: span edges lie on pixel boundaries, and the spans are SW's own
 	}
@@ -569,6 +648,29 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			           self->tie_mask_[static_cast<size_t>(m) * self->w_ + k] = 1;
 		           },
 		           this);
+		if (edge_)
+			for (int i = 0; i < n; ++i)
+			{
+				Point2 s[4];
+				if (!stereo_edge_strip(pts, n, i, w_, edge_, strip_ylo, strip_yhi, s))
+					continue;
+				if (e == Entry::Vertical)
+				{
+					// A wall (or a static one): its own top and bottom lines, whatever the polygon's width.
+					const TexView tv = tex_view(false);
+					const WallSurf ws{static_cast<int>(p.origin.x), static_cast<int>(p.origin.y), static_cast<int>(p.origin.z),
+					                  p.vector.i, p.vector.j, p.vector.k};
+					const double ys[2] = {stereo_wall_edge_y(tv, ws, s[0].x, s[0].y, s[1].x),
+					                      stereo_wall_edge_y(tv, ws, s[3].x, s[3].y, s[2].x)};
+					if (std::isnan(ys[0]) || std::isnan(ys[1]))
+					{
+						++edge_skipped_;   // the wall crosses the eye plane or vanishes within the strip
+						continue;
+					}
+					stereo_edge_strip(pts, n, i, w_, edge_, strip_ylo, strip_yhi, s, ys);
+				}
+				strip(s, piece0, row_off0);
+			}
 	}
 }
 

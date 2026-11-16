@@ -21,6 +21,7 @@
 #include <cstdint>
 
 #include "config.h"
+#include "geometry.h"
 
 namespace a1_c3d {
 
@@ -60,6 +61,33 @@ enum class StereoWKind : uint8_t { Wall, Static, Rectangle, Landscape };
 // attrs() or the mean): `geometric_w`, already clamped. Rectangle: weapon_w when `foreground`, else clamp_wp(depth).
 // Landscape: kWPerspMax.
 float stereo_w(StereoWKind kind, int32_t depth, bool foreground, float weapon_w, float geometric_w);
+
+// --- the edge extension (M9 fix, design 7 "M9 fix: the edge strip") ---
+
+// The engine clips every polygon at the view's left and right edges, so an eye's shifted pass has nothing to draw in a
+// strip of up to P * max(1, near) pixels at one edge (far surfaces leave one edge, surfaces nearer than w0 the other).
+// On stereo frames the front end continues each clipped polygon past the edge by this many pixels: the largest shift of
+// the run (slider 1), whole pixels.
+int stereo_edge_px(unsigned stereo_k, unsigned stereo_near);
+
+// The strip that continues a clockwise (y-down) polygon past the edge i -> i+1 when that edge lies on the view's left
+// (x == 0) or right (x == w) edge: out = {A, A', B', B}, clockwise, A' and B' at x = -b or w + b. Their y: ys[0] / ys[1]
+// when given (the surface's own lines through A and B: stereo_wall_edge_y), else the lines through the polygon's two
+// neighbouring edges (a neighbour that also lies on the view edge keeps its y). Then the strip never narrows (the upper
+// corner goes no lower than its vertex, the lower one no higher: a polygon one or two pixels wide has rounded vertices
+// that say nothing about its lines, and a strip that is too large is overdrawn by nearer surfaces while one that is too
+// small leaves a gap), and y is rounded and clamped to [ylo, yhi]. The strip shares A and B with the polygon, so the
+// polygon itself is drawn unchanged. False: not such an edge (or b <= 0).
+bool stereo_edge_strip(const Point2* v, int n, int i, int w, int b, int ylo, int yhi, Point2 out[4],
+                       const double* ys = nullptr);
+
+// A wall's own line (constant height: its top, its bottom, any line along it) through the screen point (px, py), at
+// screen column x: y = Y0 - (Y0 - py) * depth(px) / depth(x), Y0 = hh + dtp the horizon row, depth = wall_vertex's w
+// before its fabs (signed). Exact whatever the polygon's width. NaN when the wall crosses the eye plane between px and x
+// (the signs differ, or a depth is 0) or its depth grows more than kWallEdgeMaxRatio times (a vanishing point within the
+// strip): wall_vertex's attributes there are not the wall's, so the caller does not draw that strip.
+constexpr double kWallEdgeMaxRatio = 16.0;
+double stereo_wall_edge_y(const TexView& v, const WallSurf& o, int px, int py, int x);
 
 // --- the calibration (stereo_cal 1, test T1; design 7, "M9 specification", "Tests") ---
 

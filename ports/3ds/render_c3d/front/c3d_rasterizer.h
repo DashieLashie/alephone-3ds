@@ -52,11 +52,18 @@ public:
 	// the w of core/stereo.h stereo_w (rectangles their depth, the weapon `weapon_w`, landscapes kWPerspMax, unmasked static
 	// polygons their surface's depth); on any other frame nothing changes (w = 1 where it was 1). Persists across set_target;
 	// the frame sets it every frame, after set_target.
-	void set_stereo(bool on, float weapon_w)
+	// M9 fix (design 7, "M9 fix: the edge strip"): edge_px > 0 continues every primitive the engine clipped at the view's
+	// left or right edge by that many pixels on stereo frames (core/stereo.h stereo_edge_strip), so a shifted eye has
+	// content at its edges; 0 = M9's behaviour.
+	void set_stereo(bool on, float weapon_w, int edge_px = 0)
 	{
 		stereo_ = on;
 		weapon_w_ = weapon_w;
+		edge_ = on && edge_px > 0 ? edge_px : 0;
 	}
+	// Edge strips drawn / not drawn (attributes not finite past the edge, or no ring room). Not reset by set_target.
+	unsigned edge_strips() const { return edge_strips_; }
+	unsigned edge_skipped() const { return edge_skipped_; }
 	// Vertices issued on stereo frames with w < 16 (kWMin: the smallest a wall or floor carries): must stay 0, it catches any
 	// path that still sends w = 1 (the landscape span path included). Not reset by set_target.
 	unsigned w_low() const { return w_low_; }
@@ -152,6 +159,8 @@ private:
 	bool stereo_ = false;
 	float weapon_w_ = 1024.0f;
 	unsigned w_low_ = 0, stereo_vertices_ = 0;
+	int edge_ = 0;
+	unsigned edge_strips_ = 0, edge_skipped_ = 0;
 
 	bool foreground_ = false;
 	bool textures_ = false;

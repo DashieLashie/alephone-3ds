@@ -639,7 +639,8 @@ int stereo_counts_text(char* buf, size_t size)
 	{
 		const int m = back::draw_stereo_text(buf + n, size - n);
 		if (m > 0 && n + m < static_cast<int>(size))
-			snprintf(buf + n + m, size - n - m, " w_low=%u/%u", s_play_rast.w_low(), s_play_rast.stereo_vertices());
+			snprintf(buf + n + m, size - n - m, " w_low=%u/%u edge=%u/%u", s_play_rast.w_low(), s_play_rast.stereo_vertices(),
+			         s_play_rast.edge_strips(), s_play_rast.edge_skipped());
 	}
 	return n;
 }
@@ -1187,7 +1188,8 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				s_play_rast.set_options(cfg.textures, cfg.uv_half, cfg.lit, cfg.rect_bias);
 				// M9: the w a vertex carries (every frame, so a flat frame after a stereo one is exactly M6's)
 				s_play_rast.set_stereo(stereo_frame, stereo_weapon_w(static_cast<float>(cfg.stereo_w0),
-				                                                       static_cast<float>(cfg.stereo_weapon) / 100.0f));
+				                                                       static_cast<float>(cfg.stereo_weapon) / 100.0f),
+				                       cfg.stereo_edge ? stereo_edge_px(cfg.stereo_k, cfg.stereo_near) : 0);
 				s_recorder.replay(&s_play_rast);
 				uint8_t* const* rows = reinterpret_cast<uint8_t* const*>(dest->row_addresses);
 				if (direct)

@@ -169,7 +169,8 @@
 	  direct frame takes the stereo path even at strength 0), stereo_check N (every N-th stereo composite compares the
 	  right framebuffer with the left), stereo_fail 0|1 (the second view texture's allocation fails), stereo_cal 0|1 (T1: five
 	  calibration quads instead of the world, both eyes read back) and stereo_gaps 0|1 (T4: both eye textures cleared
-	  to magenta, uncovered pixels counted)
+	  to magenta, uncovered pixels counted); stereo_edge 0|1 (M9 fix, default 1: primitives the engine clipped at the view's left
+	  or right edge continue past it on stereo frames; 0 = M9's behaviour, for the before/after gap counts)
 
 	This program is free software; you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -270,6 +271,7 @@ struct Config
 	bool stereo_cal = false;                // test only (M9 part 2)
 	unsigned stereo_check = 0;              // test only
 	bool stereo_gaps = false;               // test only (M9 part 2)
+	bool stereo_edge = true;                // test only (M9 fix): 0 = polygons end at the view's edges, as in M9
 	bool stereo_fail = false;               // test only
 };
 
