@@ -73,7 +73,7 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
 
 - Two remotes. `origin` is **upstream Aleph One** (`Aleph-One-Marathon/alephone`): read-only for us, never push to it and
   never open PRs against it. `alephone-3ds` is **the user's fork** (`github.com/DashieLashie/alephone-3ds`), where the
-  port is published: as of 2026-11-02 it holds `3ds-port`, `stage10-c3d`, `stage10-bb` and the tags `port-stage10-P1`, `-B`, `-M0`, `-M1`, all in step with the local branches.
+  port is published: as of 2026-11-16 it holds `3ds-port`, `stage10-c3d`, `stage10-bb` and every tag `port-stage10-P1`, `-B`, `-M0` ... `-M9`, all in step with the local branches.
   Pushing to the fork is allowed, but it is outward-facing: do it only when the user asks (or has said to, for the
   task at hand), push the branch you worked on, never force-push, and never push to `origin`. The clone is shallow
   (boundary `fc4c274`); the fork accepts pushes as is.
