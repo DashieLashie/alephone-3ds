@@ -59,7 +59,12 @@ float stereo_weapon_w(float w0, float t);
 enum class StereoWKind : uint8_t { Wall, Static, Rectangle, Landscape };
 // The w a vertex carries on a stereo frame. Wall (walls, floors, liquids) and Static (an unmasked static polygon,
 // attrs() or the mean): `geometric_w`, already clamped. Rectangle: weapon_w when `foreground`, else clamp_wp(depth).
-// Landscape: kWPerspMax.
+// Landscape: kWLandStereo.
+// M9 fix, the sky bleed (design 7, "M9 fix: the sky bleed"): the console's PICA draws nothing of a textured polygon whose
+// vertices all carry w = kWPerspMax (2^24) once the shader scales clip by w (sky magenta in every stereo frame, 15 478
+// pixels uncovered at L0's start; 0 at w = 32 767, measured 2026-11-15). Landscapes carry kWMax instead, the farthest a wall
+// goes: the shift is P * (1 - w0 / 32767) = 0.969 P (5.81 px of 6), the same depth as the farthest walls.
+constexpr float kWLandStereo = kWMax;
 float stereo_w(StereoWKind kind, int32_t depth, bool foreground, float weapon_w, float geometric_w);
 
 // --- the edge extension (M9 fix, design 7 "M9 fix: the edge strip") ---

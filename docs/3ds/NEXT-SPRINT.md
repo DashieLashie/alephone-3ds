@@ -2062,7 +2062,11 @@ hitch (the FCRAM-sampled landscape's cost; `c3d_draw`/`c3d_wait` in the bench li
 
 ## M9 fix console check (the two stereo defects, then M9's unfinished blocks; ~45 min, 8 launches plus comfort values; when the user is at the console)
 
-**Not run yet.** Written 2026-11-15 for the M9 fix (`KICKOFF_M9_FIX.md`; design section 7 "M9 fix: the edge strip"; `PERF.md`
+**Run partly on the console 2026-11-15** (3 launches; record `PERF.md` "Stage 10 M9 fix — console"): step 1 found the sky
+bleed's cause (the PICA draws no landscape at `w = 2^24` on stereo frames; fixed the same evening, `kWLandStereo = kWMax`), and a
+launch with `m9-console.cfg` showed both fixes right by eye. **Still to run, with the current build:** step 2's second launch
+(the edge control, `m9fix-console-edge-off.cfg`), step 3 (bench @60 L0/L20), the slider low with the fixes, then F, G, H, J.
+Step 1 needs no repeat (`m9fix-diag-gaps.cfg` with the fixed build would only confirm launch 2). Written 2026-11-15 for the M9 fix (`KICKOFF_M9_FIX.md`; design section 7 "M9 fix: the edge strip"; `PERF.md`
 "Stage 10 M9 fix"). Setup and driving as in "M9 console check" (`$H/m1/run.sh`, ftpd first for the card, then the netloader; the
 console's IP was 192.168.100.72), `cmake --build build-3ds-c3d-prof` at the M9 fix commit, the New 3DS, HUD + Map, Framerate Target 60,
 **3D slider by hand**. **Press A at once at the menu.** Tell the user before each launch which files go on the card.

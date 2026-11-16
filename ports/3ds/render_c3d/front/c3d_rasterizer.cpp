@@ -184,7 +184,7 @@ TexResult C3dRasterizer::attrs(bool horizontal, const polygon_definition& p, con
 // surface it lies on, so w comes from attrs() like a wall's or floor's (s and t stay 0, unused). If attrs() reports
 // anything but Ok (Degenerate: a floor with o.z == 0, which the constant path never could; or a non-finite texcoord, which
 // does not matter here) every vertex takes the polygon's mean geometric w: clamp_wp of the mean of the finite wall x /
-// floor depths, kWPerspMax when there is none (a floor at eye height is on the horizon). The polygon is still drawn.
+// floor depths, at most kWMax, and kWMax when there is none (a floor at eye height is on the horizon). The polygon is still drawn.
 void C3dRasterizer::static_w(bool horizontal, const polygon_definition& p, const Point2* pts, int n, TexAttr* out) const
 {
 	TexAttr tmp[MAXIMUM_VERTICES_PER_SCREEN_POLYGON];
@@ -219,7 +219,9 @@ void C3dRasterizer::static_w(bool horizontal, const polygon_definition& p, const
 			++k;
 		}
 	}
-	const float w = k ? clamp_wp(static_cast<float>(sum / k)) : kWPerspMax;
+	// One w for every vertex: its value does not change a flat frame's picture (constant w is affine), and kWMax keeps
+	// it in the range the console draws on stereo frames (M9 fix, the sky bleed: a polygon all at 2^24 is not drawn).
+	const float w = k ? std::min(clamp_wp(static_cast<float>(sum / k)), kWMax) : kWMax;
 	for (int i = 0; i < n; ++i)
 		out[i] = TexAttr{w, 0.0f, 0.0f};
 }
@@ -429,11 +431,13 @@ void C3dRasterizer::polygon(Entry e, polygon_definition& p)
 			Vertex& o = out[i];
 			o.x = static_cast<float>(q[i].x);
 			o.y = static_cast<float>(q[i].y);
-			// M9: on a stereo frame landscapes carry kWPerspMax (their texcoords are affine: the picture of w = 1); walls,
+			// M9: on a stereo frame landscapes carry kWLandStereo (their texcoords are affine: the picture of w = 1); walls,
 			// floors and static polygons keep the w of attrs() (core/stereo.h stereo_w); w_low counts any that stayed under 16.
 			o.w = stereo_ ? stereo_w(landscape ? StereoWKind::Landscape : (stat ? StereoWKind::Static : StereoWKind::Wall),
 			                         0, false, 0.0f, qa[i].w)
 			              : qa[i].w;
+			if (stereo_ && landscape && land_w_ > 0.0f)
+				o.w = land_w_;
 			note_w(o.w);
 			o.u0 = qa[i].s;
 			o.v0 = qa[i].t;

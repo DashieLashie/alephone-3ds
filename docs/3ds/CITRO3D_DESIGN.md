@@ -4149,7 +4149,7 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   check is `NEXT-SPRINT.md` "M8 console check".
 
 ### M9 — stereo 3D (done 2026-11-13, tag `port-stage10-M9`, Azahar only; `PERF.md` "Stage 10 M9"; Review log "M9 commit 1: code review", "M9 commit 2: code review", "M9 done"; open question 9 answered yes 2026-10-19, user 2026-11-07)
-- **Console (2026-11-13, partial, `PERF.md` "Stage 10 M9 — console"): the stereo path works on the hardware (T1 30/30, eyes right, HOME/sleep/Close clean, fill 1 holds 60.5 fps @60 on L0/L20, `gpu_ms view` 1.09 / 2.43 / 3.84 ms for 1 / 2 / 4 passes) but two defects are open: the sky bleed and the per-eye edge strip. Not run: fill 0 by eye, identity/re-entries, menus/preference, comfort tuning.**
+- **Console (2026-11-13, partial, `PERF.md` "Stage 10 M9 — console"): the stereo path works on the hardware (T1 30/30, eyes right, HOME/sleep/Close clean, fill 1 holds 60.5 fps @60 on L0/L20, `gpu_ms view` 1.09 / 2.43 / 3.84 ms for 1 / 2 / 4 passes) but two defects are open: the sky bleed and the per-eye edge strip. Not run: fill 0 by eye, identity/re-entries, menus/preference, comfort tuning.** **M9 fix (2026-11-15): both defects fixed and seen right on the console** (block "M9 fix: the edge strip" and "M9 fix: the sky bleed" below; `PERF.md` "Stage 10 M9 fix" and "Stage 10 M9 fix — console"); M9's blocks F, G, H, J and the fix's bench re-check are still to run.
 - **Status (2026-11-13): done.** Built in three commits and a fix (`8de3697da` the stereo path at parallax 0, `f77ef9af7` parallax, `f81a41962` the review fix, and the records commit), all gates passed in Azahar on both backends where the specification says so; **next: M7 (supersampling), last**. What is left is the console list below (`NEXT-SPRINT.md` "M9 console check", section 10 item 13). The text of the specification that follows is as approved; where the build differs it says so ("Changed after the code review", "As built").
 - **VRAM after M8:** a player who turns the preference off mid-run keeps the 512 KiB view texture and the overlay surface
   allocated (M8 frees nothing on the switch; critic, M8 code review minor 2). The budget below assumes them allocated anyway.
@@ -4536,6 +4536,29 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
     view edge and a rectangle with `clip_left <= 0`: the surface then continues up to b pixels where an off-screen occluder
     belongs (it has no polygon in the view, so no strip), in one eye. The gate measures coverage only (magenta), not the strips'
     content: their texture is judged by eye on the console. Gates and figures: `PERF.md` "Stage 10 M9 fix".
+    *Console (2026-11-15):* no strip at either edge in either eye by eye (`m9-console.cfg`, slider full); `edge=77 200/161`
+    over 5 454 stereo frames (161 not drawn, against 2 on the Azahar film: probably the wall refusal of finding 3 when walking
+    along walls by hand, not examined); the control launch with `stereo_edge 0` was not run.
+  - **M9 fix: the sky bleed (2026-11-15, found and fixed on the console; user decision: cap the landscape's w at 32 767).**
+    *The defect:* on stereo frames the console's PICA drew **nothing** of the landscape: L0's sky stayed magenta in every
+    stereo frame with `stereo_gaps 1` (`m9fix-diag-gaps.cfg`, fill 1: interior gaps median 15 478 pixels per sample, max
+    52 111, against 0 in Azahar), and without the magenta clear the eye texture kept its previous frame there, which the user
+    saw as wall and ceiling texture "bleeding" over the sky when the camera moved (M9's `r_clears=0`: nothing clears the eye
+    textures). Flat frames drew it (the magenta went away with the slider at 0). *Cause, measured:* M9 gave a landscape vertex
+    `w = kWPerspMax` (2^24) on stereo frames, and the world shader scales the clip position by `w` (`mul opos, r1, v0.zzzz`), so every
+    vertex of the sky reached the PICA with clip coordinates near 2^24. With the test key `stereo_land_w 32767` the same
+    diagnostic counted **0 uncovered pixels in 241 of 241 samples** and the user saw a normal sky. Why the PICA drops it is
+    **UNVERIFIED** (its float24 has a 16-bit mantissa and the clipper/rasteriser setup are not documented in libctru/citro3d;
+    the limit lies somewhere between 32 767 and 2^24 and was not searched for). What the failing case has that the passing ones
+    lack: T1's quad 3 (flat colour, 16x16, all at 2^24) was drawn on the console, and floor vertices near the horizon reach
+    2^24 one at a time beside nearer ones; the sky is a large textured polygon with **every** vertex at 2^24. *The fix:*
+    `kWLandStereo = kWMax` (32 767, the farthest a wall goes, `core/stereo.h`): the sky shifts `P·(1 − w0/32767)` = 0.969 P
+    (5.81 px of 6 at slider 1), the depth of the farthest walls; texcoords are unchanged (a landscape's `w` is constant over the
+    polygon, so its interpolation stays affine). The same case existed in `static_w`'s fallback (an unmasked static polygon
+    with no finite depth: every vertex at 2^24): it is capped at `kWMax` too, which does not change a flat frame (one `w` for
+    every vertex). Test key `stereo_land_w N` (0 = the default; 16 777 216 = M9's value, the negative control). The user's
+    wish for a deeper sky is separate and still open: with the sky now at the walls' far limit, a deeper sky needs a
+    landscape-only extra shift.
   - **Decisions (user, 2026-11-09).** **D1** "GPU (experimental)" turns stereo on; the 3D slider is the control (the
     640 KiB smaller pool is accepted). **D2** the gap fill is on by default (4 passes). **D3** **the weapon in front of the
     screen** (`stereo_weapon` −50 as the first value, console-tuned), the crosshair and overlays at zero parallax. **D4**

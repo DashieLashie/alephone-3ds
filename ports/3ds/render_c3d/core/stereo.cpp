@@ -74,7 +74,7 @@ float stereo_w(StereoWKind kind, int32_t depth, bool foreground, float weapon_w,
 		case StereoWKind::Rectangle:
 			return foreground ? weapon_w : clamp_wp(static_cast<float>(depth));
 		case StereoWKind::Landscape:
-			return kWPerspMax;
+			return kWLandStereo;
 	}
 	return geometric_w;
 }

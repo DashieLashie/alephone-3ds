@@ -49,7 +49,7 @@ public:
 	}
 
 	// M9 (design 7, "M9 specification", "What w a vertex carries on a stereo frame"): on a stereo frame the vertices carry
-	// the w of core/stereo.h stereo_w (rectangles their depth, the weapon `weapon_w`, landscapes kWPerspMax, unmasked static
+	// the w of core/stereo.h stereo_w (rectangles their depth, the weapon `weapon_w`, landscapes kWLandStereo, unmasked static
 	// polygons their surface's depth); on any other frame nothing changes (w = 1 where it was 1). Persists across set_target;
 	// the frame sets it every frame, after set_target.
 	// M9 fix (design 7, "M9 fix: the edge strip"): edge_px > 0 continues every primitive the engine clipped at the view's
@@ -62,6 +62,8 @@ public:
 		edge_ = on && edge_px > 0 ? edge_px : 0;
 	}
 	// Edge strips drawn / not drawn (attributes not finite past the edge, or no ring room). Not reset by set_target.
+	// M9 fix, sky diagnostic (test key stereo_land_w): a landscape's w on stereo frames; 0 = kWLandStereo (core/stereo.h).
+	void set_land_w(float w) { land_w_ = w; }
 	unsigned edge_strips() const { return edge_strips_; }
 	unsigned edge_skipped() const { return edge_skipped_; }
 	// Vertices issued on stereo frames with w < 16 (kWMin: the smallest a wall or floor carries): must stay 0, it catches any
@@ -160,6 +162,7 @@ private:
 	float weapon_w_ = 1024.0f;
 	unsigned w_low_ = 0, stereo_vertices_ = 0;
 	int edge_ = 0;
+	float land_w_ = 0.0f;
 	unsigned edge_strips_ = 0, edge_skipped_ = 0;
 
 	bool foreground_ = false;

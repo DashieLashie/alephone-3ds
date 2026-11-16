@@ -5395,7 +5395,7 @@ static void test_m9_weapon_and_w()
 	CHECK(stereo_w(StereoWKind::Rectangle, -5, false, 2048.0f, 0.0f) == 16.0f);
 	CHECK(stereo_w(StereoWKind::Rectangle, 1 << 30, false, 2048.0f, 0.0f) == kWPerspMax);
 	CHECK(stereo_w(StereoWKind::Rectangle, 4096, true, 2048.0f, 0.0f) == 2048.0f);
-	CHECK(stereo_w(StereoWKind::Landscape, 4096, false, 2048.0f, 99.0f) == kWPerspMax);
+	CHECK(stereo_w(StereoWKind::Landscape, 4096, false, 2048.0f, 99.0f) == kWLandStereo && kWLandStereo == kWMax);   // M9 fix
 	// no stereo w is ever under the clamp
 	for (int d : {0, 1, 15, 16, 17})
 		CHECK(stereo_w(StereoWKind::Rectangle, d, false, 512.0f, 0.0f) >= 16.0f);

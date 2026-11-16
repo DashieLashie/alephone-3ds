@@ -1190,6 +1190,7 @@ bool run_play_frame(const Config& cfg, DrawFn draw, void* ctx, bitmap_definition
 				s_play_rast.set_stereo(stereo_frame, stereo_weapon_w(static_cast<float>(cfg.stereo_w0),
 				                                                       static_cast<float>(cfg.stereo_weapon) / 100.0f),
 				                       cfg.stereo_edge ? stereo_edge_px(cfg.stereo_k, cfg.stereo_near) : 0);
+				s_play_rast.set_land_w(static_cast<float>(cfg.stereo_land_w));
 				s_recorder.replay(&s_play_rast);
 				uint8_t* const* rows = reinterpret_cast<uint8_t* const*>(dest->row_addresses);
 				if (direct)

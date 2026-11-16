@@ -2481,8 +2481,8 @@ run on the hardware).
 ## Stage 10 M9 fix: the edge strip (Azahar — non-authoritative)
 
 Recorded 2026-11-15 on `stage10-c3d` (kickoff `KICKOFF_M9_FIX.md`; design section 7 "M9 fix: the edge strip"). Fixes the second
-defect of "Stage 10 M9 — console" (the per-eye edge strip); **the sky bleed is not fixed**: it waits on one console launch
-(`NEXT-SPRINT.md` "M9 fix console check", step 1). **No engine edit, no `PATCHES.md` entry.** Binary `build-3ds-c3d-prof` md5
+defect of "Stage 10 M9 — console" (the per-eye edge strip); the sky bleed was not fixed in this commit: it was found and fixed
+the same evening on the console (next section, "Stage 10 M9 fix — console"). **No engine edit, no `PATCHES.md` entry.** Binary `build-3ds-c3d-prof` md5
 `544444e4…` (after the review fixes below); host GPU unless marked sw (Azahar's software backend, `gxq_budget 3` configs). Logs
 `build/m9fix/`, bench `build/perf/m9fix-*` (not in git).
 
@@ -2549,3 +2549,46 @@ holds 59.6-59.7 fps** as in M9, against the goal of 55; the console figures to s
 edge strip by eye, fix on against `stereo_edge 0`, both edges, both eyes, slider low and full (content, wedges beside steep walls:
 critic findings 3-5); (3) the bench @60 on L0/L20; then M9's unfinished blocks F, G, H, J. Tag `port-stage10-M9b` only when both
 defects are fixed and the console agrees.
+
+## Stage 10 M9 fix — console (New 3DS, 2026-11-15; partial: stopped by the user after 3 launches)
+
+`NEXT-SPRINT.md` "M9 fix console check", the user at the console, netloader + ftpd (IP 192.168.100.72). Launch 1 on
+`build-3ds-c3d-prof` at `9760e14d0` (the edge fix); launches 2-3 on the working tree with the test key `stereo_land_w` and then the
+sky fix (`cd5ce528…`, committed afterwards). Transcripts `build-3ds/hw/m1/m9fix-{diag,landw,look}.txt` in the main checkout (not
+in git). Card cleaned at the end (no `debug-*`, the four old `screen-c3d-odd*` captures from January deleted).
+
+**Result: both defects fixed and seen right by the user.** The sky bleed was a hardware-only failure: the PICA did not draw the
+landscape on stereo frames at all.
+
+| Launch | Config | What the user saw | Log |
+| --- | --- | --- | --- |
+| 1 | `m9fix-diag-gaps.cfg` (`stereo_gaps 1`, fill 1, hardware slider) | **sky magenta**; gone with the slider at 0 | interior gaps median **15 478** px per sample (most samples identical: the view still), max 52 111, 238 samples (Azahar, the same config on the L01 film: 0 in 792 of 798); edge columns avg 127; 7 088 stereo frames, 0 discards; HOME > Close clean |
+| 2 | the same + `stereo_land_w 32767` | **sky right**: textured, no magenta, no bleed while turning | interior gaps **0 in 241 of 241 samples**, edge columns 0; 7 194 stereo frames, 0 discards |
+| 3 | `m9-console.cfg` (no test key; the sky fix as the default) | **sky normal, no strip at either edge** (each edge with the opposite eye closed, slider full) | 5 454 stereo frames, slider 1.00 throughout, `edge=77 200/161`, `w_low` 0, 0 discards; `release done` |
+
+**Cause and fix** (design section 7, "M9 fix: the sky bleed"): M9 gave landscape vertices `w = 2^24` on stereo frames and the
+shader scales the clip position by `w`; the console drew nothing of the sky, the eye texture kept its last frame there (never
+cleared), and that was the "bleed". Landscapes now carry `w = 32 767` (`kWMax`, the walls' far limit): the sky shifts 5.81 px instead of
+6 at full slider. The PICA's actual limit is UNVERIFIED (between 32 767 and 2^24). `static_w`'s all-2^24 fallback is capped the same way.
+
+**Not run** (the user stopped, "good progress"): launch 4, the edge control with `stereo_edge 0` (`m9fix-console-edge-off.cfg`:
+the strip should come back; it shows the edge test found a seam); step 3, the bench re-check @60 on L0/L20; M9's blocks F
+(fill 0 by eye), G (identity and re-entries), H (menus and the preference), J (comfort tuning); the slider low with the fixes.
+Open: 161 edge strips not drawn in launch 3 (Azahar film: 2); probably the wall refusal near vanishing points when walking along
+walls by hand, not examined.
+
+**The sky fix in Azahar** (after the console, rule 4's order reversed because only the console showed the defect; binary
+`cd5ce528…`; logs `build/m9fix/sky/`, bench `build/perf/m9fixsky-f1-60*`). Azahar drew the sky at `2^24` too, so nothing here can show
+the fix; these runs check that the smaller sky shift breaks nothing:
+
+| Gate | Result |
+| --- | --- |
+| T2 identity L0 / L6 / L20 (fill 1) | 36 / 36 / 42 checks, 0 differing pixels; `direct_check` 100 % within 1 |
+| T3 L0 / L6 / L20, sw L0 | 0 replay discards, `w_low` 0, `edge` 30 076/0, 9 611/0, 19 002/0, sw 29 767/0, `discard` 0 |
+| T4 L0 (fill 0, slider 100) | edge columns 1.0 px per sample (before the sky fix 2.0), interior 46 (54): the sky's 0.19 px smaller shift closes a little of its seam |
+| T5 L0, `stereo 0` and slider 0 | 41 checks each, 100 %, `stereo=0` at slider 0 |
+| The edge gate (L01 film) | edge columns avg 1.3 (median 0; with the sky at `2^24`: 3.6), `edge=193 851/2`, 0 discards, `ring_hw_v` 1 593 |
+| Bench fill 1 @60 | **59.60 / 59.66 / 59.61 fps** L0 / L6 / L20, busy 15.41 / 15.34 / 14.92 ms, every frame direct and stereo. The first try printed no BENCH line on any level: the 240 s wall-clock limit ran out while Azahar was slow (the run stopped as the measurement began, about 45 s in guest time; no guest fault); the rerun is the figure |
+| Host tests, builds | 2 658 061 checks, 0 failures; both citro3d builds 0 warnings |
+
+Not reviewed by `c3d-critic` (a constant and a clamp; the console result is the evidence).
