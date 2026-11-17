@@ -738,6 +738,20 @@ Azahar) [PERF "Next candidates"]
     from the runbook text: the d1 line itself reads `should close 0` (the order to close arrives a
     moment later; the gate line right after already has `should_close 1`).
 
+**Antialiasing, to explore later (stage 10; user 2026-11-17).** M7 (2x2 supersampling) is **dropped**: 2 048 KiB of VRAM
+for the 1024x512 view (the whole texture pool; no room beside stereo's right-eye objects, design 9.1) and an extrapolated
+~5-6 ms of GPU fill at 4x (UNVERIFIED), against ~3.4 ms of headroom @60. The user would rather keep the headroom; the game
+plays well without it. Cheaper options, none started (design section 7 "M7", open questions 6, 8, 10):
+
+| Option | What it fixes | Cost (estimates, UNVERIFIED) | Catch |
+| --- | --- | --- | --- |
+| **Texture filtering** (bilinear, optionally mipmaps; `GPU_LINEAR`, `GPU_PT_LINEAR_MIP_LINEAR`, `enums.h`) | texture shimmer on far floors and walls, the most visible aliasing at 400x240 | ~0 GPU time; mipmaps ~+33 % texture memory, bilinear alone 0 | changes Marathon's crisp look (desktop Aleph One's OpenGL renderer has it as an option); no effect on polygon edges; off by default. **First choice if any.** |
+| **2x1 horizontal AA** (view at 800x240, halved horizontally; `GX_TRANSFER_SCALE_X`, `gx.h`:36, or a bilinear composite) | jaggies on near-vertical edges (wall corners, door frames, sprite sides) | ~+512 KiB VRAM (1024x256 target); ~+1.3 ms GPU (M9's 2-pass console figure 2.43 vs 1.09 ms) | horizon edges stay jagged; stereo frames: off, or two 1 MiB eye targets (pool -1 MiB) |
+| **Wide mode, 800 px** (`gfxSetWide`, `gfx.h`:98-101) | real double horizontal resolution (the panel has 800 columns), not AA | as 2x1, plus a 240x800 screen target | 2D only (no stereo); non-square pixels; not on Old 2DS |
+
+Ruled out: FXAA/MLAA-style post-processing (the PICA has a fixed TEV, no fragment shaders; on the CPU it undoes direct mode's
+saving) and temporal AA (another frame buffer, no reprojection without shaders: ghosting in a fast shooter).
+
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
 previews are BMPs); Old 3DS untested (no hardware); one controller binding per action;

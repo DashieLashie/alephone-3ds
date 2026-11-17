@@ -1,5 +1,8 @@
 # Paste this into a fresh Claude Code session started in the stage10-c3d worktree
 
+> **Superseded 2026-11-17: M7 was dropped by the user** (design Review log "M7 dropped"; the cheaper anti-aliasing options are in
+> `NEXT-SPRINT.md` "Antialiasing, to explore later"). Do not run this prompt. Kept as a record.
+
 (`/Users/dashielashie/Desktop/Aleph_3ds/.claude/worktrees/stage10-c3d`, branch `stage10-c3d`. Written 2026-11-17 after the M9 fix
 (`9760e14d0` edge strip, `a0b9061bf` sky bleed; both seen right on the console 2026-11-15). Earlier kickoffs of the same shape:
 `KICKOFF_M6B.md`, `KICKOFF_M9_FIX.md`.)

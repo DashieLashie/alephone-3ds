@@ -109,7 +109,7 @@ section 10). A failed b-half reopens the decision taken on the a-half.
 | — | | **G1** (user): build the 3D renderer? Decided from P0/P1 Azahar data with the caveat that console numbers are unconfirmed (Azahar overstates render ~40%, understates copies ~40%, [PERF.md](PERF.md):90-110) and that M0-M5 bring **no speedup** |
 | **M0-M5** | Harness, M1 = flat-shaded walls, ... full renderer in readback mode | **G2-a**: `R_est = (R_az / render_az) × 5.78 ms ≤ 3 ms` (R = M0 null-mode floor) and Azahar busy(readback) ≤ busy(SW) + 1 ms. **G2-b**: the same on the console |
 | **M6** | Direct mode (HUD + Map) — the renderer's only performance payoff | **G3-a**: VRAM 9.1, command-buffer and queue budgets hold at 800x480 in Azahar. **G3-b**: console `C3D_GetDrawingTime` leaves room for 4x fill |
-| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo (**M9 done 2026-11-13**, tag `port-stage10-M9`; **M9 fix 2026-11-15**: the edge strip and the sky bleed fixed, seen right on the console, the rest of its console check and the tag `port-stage10-M9b` still to come), supersampling — **in this order: M7 goes last and is the next to build** (user, 2026-11-08; before that M7 → M8 → M9, 2026-11-07; optional before that) | — |
+| M8, M6b, M9, M7 | Preference (**M8 done 2026-11-08**), fades in direct mode (**M6b done 2026-11-08**), stereo (**M9 done 2026-11-13**, tag `port-stage10-M9`; **M9 fix 2026-11-15**: the edge strip and the sky bleed fixed, seen right on the console, the rest of its console check and the tag `port-stage10-M9b` still to come), supersampling — **M7 dropped 2026-11-17 (user)**: cheaper anti-aliasing options are backlog (`NEXT-SPRINT.md` "Antialiasing, to explore later"); before that M7 was last (user, 2026-11-08) | — |
 
 **User decisions (2026-10-16):** stage 10 **pauses at G0** until a console
 session confirms G0-b; it does not proceed on G0-a alone. G1 (build the 3D
@@ -4125,7 +4125,11 @@ least (underwater tint above all, "would be annoying"); the rest are bonus if th
   - *Revision 2's console list (adds to the above):* the TEV's per-stage precision over five stages; `GPU_BLEND_MIN`/`MAX`
     on hardware (factors `ONE`); the three passes' GPU time on a fade frame (`gpu_ms`); the noise's look at 30 and 60 fps.
 
-### M7 — 2x2 supersampling (to be built LAST, after M9; user 2026-11-08; G3 measured but not deciding)
+### M7 — 2x2 supersampling (DROPPED 2026-11-17, user; kept as a record)
+- **Dropped (user, 2026-11-17):** 2 048 KiB of VRAM for the view (the whole M7 pool; ~1 490 KiB left beside stereo's objects,
+  9.1) and ~5-6 ms of extrapolated 4x fill against ~3.4 ms of headroom @60; the user keeps the headroom for other features.
+  Cheaper options (texture filtering, 2x1 horizontal AA through `GX_TRANSFER_SCALE_X`, wide mode) are in `NEXT-SPRINT.md`
+  "Antialiasing, to explore later"; `KICKOFF_M7.md` is superseded. Review log "M7 dropped".
 - **Open for its spec (2026-11-08):** M9 will have shipped first, so M7 inherits M9's VRAM budget (section 6 needs a second
   linked screen target and a second view target) and must say whether SSAA is **off while 3D is on** (the 1024x512 view
   target is 2 048 KiB, two of them cannot fit). M9's console fill-rate figure (2 eyes = 2x fill) is the first real evidence
@@ -4852,12 +4856,12 @@ P1 alone meets the target depends on P0's console baseline; G0/G1 decide.
    2026-10-19):** yes, aiming at M7 and M9 (0.5).
 4. Direct mode for Classic, or readback + P1 there?
 5. Runtime switch: debug file only, or the M8 preference?
-6. SSAA default on or off?
+6. ~~SSAA default on or off?~~ **Moot (2026-11-17):** M7 dropped; see the backlog's AA options.
 7. Support `software_alpha_blending` (see-through liquids) later?
-8. Mipmaps/linear filtering as an option (not SW-faithful)?
+8. Mipmaps/linear filtering as an option (not SW-faithful)? **Backlog (2026-11-17):** the first AA option to try if any.
 9. ~~Stereo wanted?~~ **Answered (user, 2026-10-19):** yes (M9; direct mode,
    so HUD + Map only, section 6).
-10. 800 px wide mode (`gfx.h`:101) instead of SSAA?
+10. 800 px wide mode (`gfx.h`:101) instead of SSAA? **Backlog (2026-11-17)**, with 2x1 horizontal AA.
 11. Texture conversion on another thread (core 1 runs audio)?
 12. GPU-drawn crosshair to keep direct frames overlay-free?
 13. ~~Fatal error off the main thread: park the main thread, or hand the fatal
@@ -6099,3 +6103,12 @@ was capped too. Not reviewed by `c3d-critic` (a constant and a clamp; the consol
 defaults showed both fixes right; the user then stopped. Commit `a0b9061bf`. **Next:** the rest of `NEXT-SPRINT.md` "M9 fix console
 check", then the tag `port-stage10-M9b`; the user's deeper-sky wish; then M7, whose kickoff must also keep every constant-`w`
 primitive at `kWMax` or below.
+
+### M7 dropped (coordinator, 2026-11-17; user decision)
+After reading the M7 kickoff's cost figures (9.1: the 1024x512 view is 2 048 KiB, the whole pool, ~1 490 KiB left beside stereo's
+right-eye objects; console fill 1.09 / 2.43 / 3.84 ms for 1 / 2 / 4 passes at 400x240, so 4x the pixels is an extrapolated ~5-6 ms
+against ~3.4 ms of headroom @60) the user dropped 2x2 supersampling: the game plays well without it and the headroom is kept for
+other features. Cheaper anti-aliasing is recorded as backlog, none started (`NEXT-SPRINT.md` "Antialiasing, to explore later"):
+texture filtering (bilinear/mipmaps, ~0 GPU, the first choice), 2x1 horizontal AA (`GX_TRANSFER_SCALE_X`, `gx.h`:36; ~+512 KiB,
+~+1.3 ms, UNVERIFIED), wide mode (`gfxSetWide`, `gfx.h`:98-101; 2D only, not on Old 2DS). Ruled out: FXAA-style post-processing
+(no fragment shaders) and temporal AA. Stage 10's milestone list is complete with M9; what remains is console checks.
