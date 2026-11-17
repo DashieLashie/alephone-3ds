@@ -1104,11 +1104,13 @@ Added 2026-11-08 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M8"). 
 `#ifdef A1_RENDER_C3D` inside an existing `#ifdef A1_PLATFORM_3DS` block of patch 40 (the Bottom Screen preference), so the
 preference exists only in builds that have the renderer.
 
-48. **`Misc/preferences.h` and `Misc/preferences.cpp`: Graphics > Heads-Up Display > Renderer, "Software" (0, the default) or
-    "GPU (experimental)" (1), saved as `<graphics c3d_renderer="0|1">`.**
+48. **`Misc/preferences.h` and `Misc/preferences.cpp`: Graphics > Heads-Up Display > Renderer, "Software" (0) or
+    "GPU (experimental)" (1, the default since 2026-11-17: the first release ships with the GPU on, user decision; it was 0 before),
+    saved as `<graphics c3d_renderer="0|1">`.** A preferences file that already holds `c3d_renderer="0"` (any earlier ON build
+    wrote it) keeps Software; files without the attribute (OFF builds, new installs) get the GPU.
     - `preferences.h`:108-112: the field `int16 c3d_renderer` in `graphics_preferences_data`.
     - `preferences.cpp`:1043-1047 the labels; :1405-1410 the `w_select` under Bottom Screen; :1559-1566 the dialog's apply
-      (`changed = true` on a change, so the file is written); :3795-3797 `root.put_attr`; :4314-4316 the default 0;
+      (`changed = true` on a change, so the file is written); :3795-3797 `root.put_attr`; :4314-4316 the default (1 since 2026-11-17, 0 before);
       :4550-4553 the validate step (anything but 0 or 1 becomes 0); :4851-4853 `root.read_attr`.
     Port side (no engine edit): `render_c3d/front/frame.cpp` reads `graphics_preferences->c3d_renderer` before each frame's
     first decision (hook 3a, then `render_frame`) and passes it to `back::config_preference()`, which applies the bundle

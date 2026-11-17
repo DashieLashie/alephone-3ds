@@ -4315,7 +4315,7 @@ static void default_graphics_preferences(graphics_preferences_data *preferences)
 #ifdef A1_PLATFORM_3DS
 	preferences->bottom_screen = 0;   // a1_3ds::BottomHudMap
 #ifdef A1_RENDER_C3D
-	preferences->c3d_renderer = 0;    // Software
+	preferences->c3d_renderer = 1;    // GPU (experimental): the release default (user, 2026-11-17)
 #endif
 #endif
 }
