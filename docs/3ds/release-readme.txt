@@ -43,7 +43,8 @@ Controls (defaults; change them in Preferences > Controls)
 
 Graphics options (Preferences > Graphics)
 -----------------------------------------
-- Renderer: "GPU (experimental)" (the default) draws the 3D view with the console's GPU and enables
+- Renderer: "GPU (experimental)" (the default for new players: if you ran an earlier build, your saved
+  preferences may still say "Software"; switch it here) draws the 3D view with the console's GPU and enables
   stereoscopic 3D: raise the 3D slider. "Software" is the original renderer: no 3D, the most tested path.
   If you see a rendering problem, switch to Software and please report it.
 - Bottom Screen: "HUD + Map" (default; the view fills the top screen, the HUD and map are on the bottom

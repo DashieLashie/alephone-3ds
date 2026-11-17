@@ -45,7 +45,17 @@ mkdir -p ~/Documents/3ds-tools-src/bin && cp ~/Documents/3ds-tools-src/Project_C
 Built 2026-11-17 and first used for `0.1.0-beta1`: makerom accepted `alephone.rsf` without a message; the CIA's NCCH
 carries title ID `000400000a1e3000` (checked by reading the header).
 
-## What a CIA changes against the 3dsx (UNVERIFIED until a CIA has booted on the console)
+## The CIA on the console (2026-11-17, `0.1.0-beta1`, New 3DS)
+
+Installed with FBI from `/cias/`, started from the HOME Menu: **boots, sound, GPU renderer, stereo 3D, HOME > Close all
+work** (user; log in `build-3ds/hw/cia-0.1.0-beta1/`, not in git). From `log.txt`: `env: homebrew 0, run flags 0x0`
+(the application branch); linear heap 19 468 KiB against 19 700 KiB under the launcher (-232 KiB), `C3D_Init` and the
+right-eye objects fine; 5 708 view frames, 5 666 direct, 42 software (`why=darken`: the expected darken fallback),
+stereo 5 498 frames at full depth (`p=1.000`, slider 1.00), `release done` -> `real gfxExit returned` -> `exit`.
+Stereo was missing at first: the player's old preferences file held `c3d_renderer="0"` (Software, kept on purpose by
+`PATCHES.md` 48); switching Renderer to GPU in the menu fixed it. The README says to do that.
+
+## What a CIA changes against the 3dsx (written before the console run above)
 
 - **Memory.** Under the Homebrew Launcher the port gets the New 3DS extended memory the launcher was started with. A CIA
   asks for it in its settings: `SystemModeExt: 124MB` (New 3DS), `SystemMode: 80MB` (Old 3DS, unsupported). The heap
