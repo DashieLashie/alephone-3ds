@@ -757,6 +757,30 @@ saving) and temporal AA (another frame buffer, no reprojection without shaders: 
 previews are BMPs); Old 3DS untested (no hardware); one controller binding per action;
 no keyboard for the Lua console. [STAGE3 "Stubs", STAGE6, ENVIRONMENT, STAGE5]
 
+## Other scenarios: Marathon 1 and Infinity (survey 2026-11-17)
+
+Azahar — non-authoritative. Release build (`0.1.0-beta1`, GPU default), script `06-gameplay.txt`, scenario chosen with
+`scenario.txt`, data from the `data/Scenarios/Marathon` and `Marathon Infinity` submodules (fetched 2026-11-17, shallow).
+Logs and captures were in the session scratchpad, not kept.
+
+| | Infinity | Marathon 1 as shipped | Marathon 1 without "Default HUD" |
+| --- | --- | --- | --- |
+| Boot, menu, new game, HOME, exit | ok (menu `Music.ogg` 44.1 kHz stereo via Tremor) | ok | ok |
+| Layout | HUD + Map | **Classic forced**: a Lua HUD is running (`screen.cpp`:117, `PATCHES.md` 37); the M1 Lua HUD leaves a ~170x100 view | HUD + Map, full 400x240 view |
+| Renderer | 100 % direct, stereo on | **0 % direct** (`blocked=not_native`), stats lines suggest ~5 fps | ~95 % direct (the rest the usual fallbacks), stereo on |
+| Bottom screen | HUD + map | the legend | map only: **the HUD panel is empty** |
+
+- **Infinity: ready as is** (same plugins as Marathon 2, its Lua HUD off in `Scripts/Default Preferences.xml`). Left:
+  a console session (load times, memory: `Sounds.sndA` 18.5 MB against M2's 14.2 MB; a bench on heavy levels), and a
+  CIA of its own if wanted (title ID, icon, banner, default scenario). Estimate: small.
+- **Marathon 1: medium.** Its data enables the Lua plugin "Default HUD" (`hud_lua`, no `auto_enable="false"`); the port
+  needs (1) the built-in HUD instead: a default that disables that plugin for M1, or the Lua HUD drawn onto the bottom
+  screen (larger); (2) the built-in HUD to appear on the bottom screen with M1's interface (`Marathon.mml` `<interface>`
+  rects, M1 shapes): it draws nothing there now, cause not looked at; (3) level music: M1 ships `Music/00-15.ogg`
+  (44.1 kHz mono); no music decoding was logged in ~30 s of level 1: check whether it plays and what in-game Tremor
+  decoding costs on the console (M2 plays music only in menus); (4) a console session. The old formats (`.appl`
+  resources, `.scen`, `.shps`, `.sndz`) loaded without a message.
+
 ## Stage 2 runbook (with the user and the console)
 1. **Questions first** (no console needed): the two map-zoom choices (A.3). Items 8
    and 13 are decided (rate to 32728; the report deferred). Items 9-11 stay deferred
