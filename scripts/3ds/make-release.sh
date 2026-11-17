@@ -32,8 +32,8 @@ COMMIT="$(git -C "$ROOT" rev-parse --short=9 HEAD)"
 
 echo "== configure + build ($BUILD, A1_RENDER_C3D=ON, profiler OFF)"
 cmake -S "$ROOT/ports/3ds" -B "$BUILD" -DA1_RENDER_C3D=ON -DA1_PROFILE=OFF > /dev/null
-cmake --build "$BUILD" -j8 2>&1 | tee "$BUILD/build.log" | grep -iE "warning|error" || true
-if grep -qiE "warning" "$BUILD/build.log"; then
+cmake --build "$BUILD" -j8 2>&1 | tee "$BUILD/build.log" | grep -E "warning:|error:" || true
+if grep -qE "warning:" "$BUILD/build.log"; then
 	echo "error: the build printed warnings (the port keeps 0)" >&2
 	exit 1
 fi
@@ -59,5 +59,5 @@ else
 	echo "== cia skipped: makerom and/or bannertool not found (docs/3ds/RELEASE.md, 'Tools')" >&2
 fi
 
-(cd "$OUT" && shasum -a 256 ./*.zip ./*.cia 2> /dev/null > SHA256SUMS.txt; cat SHA256SUMS.txt)
+(cd "$OUT" && shopt -s nullglob && shasum -a 256 ./*.zip ./*.cia > SHA256SUMS.txt && cat SHA256SUMS.txt)
 echo "== commit $COMMIT, version $VERSION"
