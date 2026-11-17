@@ -7,6 +7,9 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
 
 ## State of the project
 
+- **2026-11-17: `stage10-c3d` merged into `3ds-port`** (`19cf68747`) for the first release; the Renderer preference now
+  defaults to GPU (`24e827ede`); M7 dropped (cheaper AA ideas in `NEXT-SPRINT.md`). Releases: `docs/3ds/RELEASE.md`,
+  `scripts/3ds/make-release.sh VERSION` (3dsx zip + CIA). The stage 10 notes below are kept as history.
 - Upstream base: tag `release-20260930` (`fc4c274`, v1.11.1). Port branch: **`3ds-port`** (checked out in the main
   checkout, `/Users/dashielashie/Desktop/Aleph_3ds`). There is no local `main`.
 - Stages 0-7 are done and passed on a real **New 3DS** (Marathon 2 plays to the end of level 1+, controls, audio,
