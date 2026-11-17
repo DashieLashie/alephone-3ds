@@ -36,6 +36,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef A1_RENDER_C3D
+#include "a1_c3d_port.h"
+#endif
+
 namespace a1_3ds {
 
 namespace {
@@ -137,12 +141,47 @@ bool present_native(const void* pixels, int pitch)
 	return true;
 }
 
+// 640x480 halved into the 320 middle columns of a rotated 240x400 framebuffer
+// (the bars are not touched). Used by present_screen_cpu() and by the GPU
+// present's self-check (present_reference). Forced inline, with the caller's `src`
+// local kept: present_screen_cpu() then compiles to exactly the code it had before
+// this was a function (objdump of video_3ds.o, -O2, identical); plain `inline`
+// changed its register allocation.
+__attribute__((always_inline)) inline void half_rotate(u32* fb, const u8* src, int pitch)
+{
+	// kBlock output rows at a time (2 * kBlock source rows, read left to
+	// right); each output column gets one 16-byte run per pass.
+	u32* col0 = fb + kBarW * kScreenH;
+	for (int y0 = 0; y0 < kOutH; y0 += kBlock)
+	{
+		const u8* row = src + 2 * y0 * pitch;
+		const u32* r0 = reinterpret_cast<const u32*>(row);
+		const u32* r1 = reinterpret_cast<const u32*>(row + pitch);
+		const u32* r2 = reinterpret_cast<const u32*>(row + 2 * pitch);
+		const u32* r3 = reinterpret_cast<const u32*>(row + 3 * pitch);
+		const u32* r4 = reinterpret_cast<const u32*>(row + 4 * pitch);
+		const u32* r5 = reinterpret_cast<const u32*>(row + 5 * pitch);
+		const u32* r6 = reinterpret_cast<const u32*>(row + 6 * pitch);
+		const u32* r7 = reinterpret_cast<const u32*>(row + 7 * pitch);
+		// Output row y0 + i lands at column offset 239 - (y0 + i).
+		u32* d = col0 + (kScreenH - kBlock - y0);
+		u32* const end = d + kOutW * kScreenH;
+		for (; d != end; d += kScreenH)
+		{
+			d[3] = to_fb(box(r0, r1));
+			d[2] = to_fb(box(r2, r3));
+			d[1] = to_fb(box(r4, r5));
+			d[0] = to_fb(box(r6, r7));
+		}
+	}
+}
+
 } // namespace
 
-bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
+namespace {
+
+bool present_screen_cpu(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
 {
-	fatal_test_tick(false);   // debug-fatal (5.6.3 tests); before the service point
-	fatal_service_point();    // a fatal error handed over by another thread (5.6.3 step 4)
 	if (width == kScreenW && height == kScreenH && gfxGetScreenFormat(GFX_TOP) == GSP_RGBA8_OES &&
 	    (sdl_format == SDL_PIXELFORMAT_RGB888 || sdl_format == SDL_PIXELFORMAT_ARGB8888))
 		return present_native(pixels, pitch);
@@ -177,37 +216,56 @@ bool present_screen(const void* pixels, int pitch, int width, int height, uint32
 		return false;
 	clear_bars(fb);
 
-	// kBlock output rows at a time (2 * kBlock source rows, read left to
-	// right); each output column gets one 16-byte run per pass.
 	const u8* src = static_cast<const u8*>(pixels);
-	u32* col0 = fb + kBarW * kScreenH;
-	for (int y0 = 0; y0 < kOutH; y0 += kBlock)
-	{
-		const u8* row = src + 2 * y0 * pitch;
-		const u32* r0 = reinterpret_cast<const u32*>(row);
-		const u32* r1 = reinterpret_cast<const u32*>(row + pitch);
-		const u32* r2 = reinterpret_cast<const u32*>(row + 2 * pitch);
-		const u32* r3 = reinterpret_cast<const u32*>(row + 3 * pitch);
-		const u32* r4 = reinterpret_cast<const u32*>(row + 4 * pitch);
-		const u32* r5 = reinterpret_cast<const u32*>(row + 5 * pitch);
-		const u32* r6 = reinterpret_cast<const u32*>(row + 6 * pitch);
-		const u32* r7 = reinterpret_cast<const u32*>(row + 7 * pitch);
-		// Output row y0 + i lands at column offset 239 - (y0 + i).
-		u32* d = col0 + (kScreenH - kBlock - y0);
-		u32* const end = d + kOutW * kScreenH;
-		for (; d != end; d += kScreenH)
-		{
-			d[3] = to_fb(box(r0, r1));
-			d[2] = to_fb(box(r2, r3));
-			d[1] = to_fb(box(r4, r5));
-			d[0] = to_fb(box(r6, r7));
-		}
-	}
+	half_rotate(fb, src, pitch);
 
 	GSPGPU_FlushDataCache(fb, kScreenW * kScreenH * sizeof(u32));
 	gfxScreenSwapBuffers(GFX_TOP, false);
 	return true;
 }
+
+} // namespace
+
+bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
+{
+	// Before the GPU present too: with citro3d up, present_screen_cpu() is not reached.
+	fatal_test_tick(false);   // debug-fatal (5.6.3 tests); before the service point
+	fatal_service_point();    // a fatal error handed over by another thread (5.6.3 step 4)
+#ifdef A1_RENDER_C3D
+	// The GPU present (docs/3ds/CITRO3D_DESIGN.md, 5.1): citro3d owns the top screen once it
+	// is up and takes every surface it is given. False only while it is not in use.
+	if (a1_c3d_present(pixels, pitch, width, height, sdl_format))
+		return true;
+#endif
+	const bool done = present_screen_cpu(pixels, pitch, width, height, sdl_format);
+#ifdef A1_RENDER_C3D
+	if (!done)
+		a1_c3d_note_false_return();
+#endif
+	return done;
+}
+
+#ifdef A1_RENDER_C3D
+// The picture present_screen_cpu() would put in the framebuffer, written into `fb` (a
+// 240x400 rotated RGBA8 buffer, bars black) by the same code. For the GPU present's
+// self-check (debug-c3d "present_diff", render_c3d/back/present.cpp). False, `fb`
+// untouched, for a surface the CPU present does not take (then SDL presents).
+bool present_reference(u32* fb, const void* pixels, int pitch, int width, int height, uint32_t sdl_format)
+{
+	if (sdl_format != SDL_PIXELFORMAT_RGB888 && sdl_format != SDL_PIXELFORMAT_ARGB8888)
+		return false;
+	if (width == kScreenW && height == kScreenH)
+		rotate_copy<u32, to_fb>(fb, 0, static_cast<const u8*>(pixels), pitch, kScreenW, kScreenH);
+	else if (width == kSrcW && height == kSrcH)
+	{
+		memset(fb, 0, kScreenW * kScreenH * sizeof(u32));
+		half_rotate(fb, static_cast<const u8*>(pixels), pitch);
+	}
+	else
+		return false;
+	return true;
+}
+#endif
 
 bool present_bottom(const void* pixels, int pitch)
 {

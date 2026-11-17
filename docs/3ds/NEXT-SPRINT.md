@@ -128,6 +128,7 @@ touch buttons (the console's buttons already do MAP / ACTION / NEXT WEAPON).
 | 11 | Perf candidates | Deferred | M-L each | yes | HUD + Map leaves idle headroom |
 | 12 | Backup bundle | **Done** (refreshed after each session) | none | no | Closed |
 | 13 | devkitPro LD report | **Deferred by the user** (2026-10-12) | XS | for the repro | Kept as a note; see item 13 |
+| 14 | Fatal error off the main thread | **Found** 2026-10-17 (Azahar, also without citro3d): no error screen | S-M | yes | Ask the user; see item 14 |
 
 Sources in brackets. Statuses were verified against the docs on 2026-10-12.
 
@@ -259,6 +260,8 @@ Azahar) [PERF "Next candidates"]
     bug). If it is ever filed: run the reproducer (`scripts/3ds/tests/exidx-repro/`) on
     the console first (only verified in Azahar), check that `devkitarm-crtls` `master`
     has not fixed it since 2026-10-11, and the user posts it. [STAGE5-PREREQS item 9]
+
+**Found by stage 10's P1 follow-ups**
 14. **A fatal error on a thread other than main never reaches the error screen**
     (Azahar — non-authoritative, 2026-10-17, branch `stage10-c3d`, `debug-c3d`
     `present cpu` so citro3d plays no part). `test_vhalt 2` (`abort()` on a second
@@ -308,6 +311,16 @@ Azahar) [PERF "Next candidates"]
     idempotent in our SDL build (`build-sdl2.sh`; an upstream SDL report would be
     outward-facing); and, for errors on other threads, hand the whole fatal path to the
     main thread so `SDL_Quit` never runs under a live main loop.
+    **Causes (2026-10-19/23):** dumps 3 and 4: SDL2 2.32.10's `SDL_Quit` releases HID
+    one time more than it took (traced on `3ds-port`, `b43f9e6`); dump 6: newlib's
+    signal handlers are per thread, so `abort()` off the main thread skips `on_abort`
+    and runs libctru's whole exit (`__appExit`: sdmc unmounted, heap freed) on that
+    thread while the main thread runs on (`CITRO3D_DESIGN.md` 5.6.3). **User decision
+    (2026-10-19), all three:** (a) the error screen takes its own HID reference; (b) the
+    SDL patch, **done** (`5cd45ce`, `scripts/3ds/patches/SDL2-release-2.32.10/`); (c)
+    errors on other threads hand the fatal path to the main thread
+    (`CITRO3D_DESIGN.md` 5.6.3, with `--wrap=abort` and a fenced `vhalt()` edit,
+    `PATCHES.md` 54).
     **Decided 2026-10-23 and in progress** (design `CITRO3D_DESIGN.md` 5.6.0, on
     `stage10-c3d`): piece 0 (the SDL2 patch, `N3DS_JoystickQuit` releases HID once, `5cd45ce`)
     is done; **piece 1 done on `3ds-port` (console check pending):** `error_screen()` draws
@@ -725,6 +738,20 @@ Azahar) [PERF "Next candidates"]
     from the runbook text: the d1 line itself reads `should close 0` (the order to close arrives a
     moment later; the gate line right after already has `should_close 1`).
 
+**Antialiasing, to explore later (stage 10; user 2026-11-17).** M7 (2x2 supersampling) is **dropped**: 2 048 KiB of VRAM
+for the 1024x512 view (the whole texture pool; no room beside stereo's right-eye objects, design 9.1) and an extrapolated
+~5-6 ms of GPU fill at 4x (UNVERIFIED), against ~3.4 ms of headroom @60. The user would rather keep the headroom; the game
+plays well without it. Cheaper options, none started (design section 7 "M7", open questions 6, 8, 10):
+
+| Option | What it fixes | Cost (estimates, UNVERIFIED) | Catch |
+| --- | --- | --- | --- |
+| **Texture filtering** (bilinear, optionally mipmaps; `GPU_LINEAR`, `GPU_PT_LINEAR_MIP_LINEAR`, `enums.h`) | texture shimmer on far floors and walls, the most visible aliasing at 400x240 | ~0 GPU time; mipmaps ~+33 % texture memory, bilinear alone 0 | changes Marathon's crisp look (desktop Aleph One's OpenGL renderer has it as an option); no effect on polygon edges; off by default. **First choice if any.** |
+| **2x1 horizontal AA** (view at 800x240, halved horizontally; `GX_TRANSFER_SCALE_X`, `gx.h`:36, or a bilinear composite) | jaggies on near-vertical edges (wall corners, door frames, sprite sides) | ~+512 KiB VRAM (1024x256 target); ~+1.3 ms GPU (M9's 2-pass console figure 2.43 vs 1.09 ms) | horizon edges stay jagged; stereo frames: off, or two 1 MiB eye targets (pool -1 MiB) |
+| **Wide mode, 800 px** (`gfxSetWide`, `gfx.h`:98-101) | real double horizontal resolution (the panel has 800 columns), not AA | as 2x1, plus a 240x800 screen target | 2D only (no stereo); non-square pixels; not on Old 2DS |
+
+Ruled out: FXAA/MLAA-style post-processing (the PICA has a fixed TEV, no fragment shaders; on the CPU it undoes direct mode's
+saving) and temporal AA (another frame buffer, no reprojection without shaders: ghosting in a fast shooter).
+
 **Accepted gaps** (no action unless the user asks): hyperlinks do nothing
 (`PATCHES.md` 2); no Opus/FLAC; Lua `io`/`os` gaps; SDL2_image not built (so save
 previews are BMPs); Old 3DS untested (no hardware); one controller binding per action;
@@ -798,3 +825,1296 @@ ended with a lid close holds port 17491 and the next launch cannot bind.
    zoom on the console), `STAGE5.md` open items, this file; commit per piece;
    refresh the backup bundle (`STAGE5-PREREQS.md` item 8).
 
+## Stage 10 G0-b runbook (the citro3d GPU present on the console)
+
+*(Historical: the pause at G0 was the user's decision of 2026-10-16, and it is over.
+G0-b ran on 2026-10-19 and the user decided the same day: keep the GPU present, and
+G1 = build the renderer (`CITRO3D_DESIGN.md` 0.5). Stage 10 is **not** paused; the plan
+below is in progress.)* G0-b asked whether to keep the GPU present (P1, tag
+`port-stage10-P1`): **HUD + Map `present` drops ≥ 2 ms with no visible change**. Same
+driving as "How to drive the console"; kill leftover 3dslink first.
+
+**All console steps are done** (2026-10-19, two sessions: `PERF.md` "Console
+G0-b, first session" and "second session"). In short:
+
+- `present`, GPU against software: HUD + Map −2.24 to −2.30 ms @30, −1.54 to −1.89
+  @60 (+0.3-1.0 ms moves into `bottom`); Classic −2.21 to −2.43 @30, −1.26 to −1.28
+  @60. The worst frame (`max`) is up to 22 ms longer. The software build already
+  runs HUD + Map @60 at ~60 fps.
+- Pass: no tearing (every capture frame N), `present_diff` 0 differences, the odd
+  surface (pixel-exact), the L20 water and the "Saving..." box (by eye), HOME and
+  back, sleep and wake, HOME > Close in a dialog, the citro3d release before
+  `gfxExit` on every error path, the off-main-thread hand-off, no crash in citro3d.
+- **Blocker: HOME > Close in a game hangs** (2 of 2 tries in the second session):
+  a present runs after the suspend, then `release()` never returns ("Closing
+  software..." for good, power button only). Not seen in the software build.
+- Not citro3d, but found on the way: every fatal error ends in a Luma exception and
+  a power-off (backlog item 14, now console-confirmed); `error_screen()` on a second
+  thread draws nothing; the 3dslink mirror can freeze the game (backlog item 15).
+
+The card is clean (`debug-*` deleted) and the prefs are the user's (HUD + Map,
+Framerate Target 60). The helpers stay in `build-3ds/hw/` (not in git):
+`g0b/run.sh BUILD TAG` (console IP 192.168.100.72 written in it) and
+`sprint8/setprefs.sh IP MODE FPS`.
+
+**Decided (user, 2026-10-19; `CITRO3D_DESIGN.md` 0.5, open questions 3 and 9):**
+keep the GPU present, build the 3D renderer aiming at M7 (2x2 supersampling) and
+M9 (stereo 3D, HUD + Map only), try the zero-copy present, and fix what the console
+found. The plan, in order (each piece: Azahar first, then a console check; stage 10
+pieces go through `c3d-architect` / `c3d-critic` / `c3d-implementer` as in
+`CLAUDE.md`):
+
+A. **Fixes** (before anything builds on P1), in the order of `CITRO3D_DESIGN.md`
+   5.6.0 (design critic-approved, `3233e60`). **Handoff, 2026-10-24** (a fresh session
+   continues from here; nothing below is pushed to the fork yet):
+   0. **Done** on `3ds-port`: the SDL2 patch, HID released once (item 14 b,
+      `5cd45ce` + `b829aff`; SDL reinstalled into portlibs), and the 3dslink mirror no
+      longer blocks (item 15, `29a3326`).
+   1. **Done** on `3ds-port`: `error_screen` draws through the console device, holds its
+      own HID reference, survives HOME, logs d6 (`94e3036` + review follow-up `612173a`;
+      critic APPROVE).
+   2. **Done** on `3ds-port`: the fatal hand-off to the main thread (`8d66595` + round-1
+      fixes `05c6d27` + round-2 minors `b1495f1`; `PATCHES.md` 54, `--wrap=abort`,
+      `debug-fatal` modes 1-11 incl. 6b/8a/8t, all clean in Azahar). Critic: round 1
+      REVISE, round 2 APPROVE (2026-10-24); two items deferred to `3ds-port` NEXT-SPRINT
+      item 14 (HOME during the fallback; the merge note in 4).
+   3. **Done** on `3ds-port`: the A1 port side (design 5.6.1 a, c): `exit_requested()` also
+      returns `aptShouldClose()`, `app_suspended()` (unused until piece 5), d1 (every APT hook
+      logged with thread, GPU right, should-close), script command `home-close [should-close]`,
+      scripts `22-c3d-home-close.txt` / `22-c3d-home-close-fast.txt` (`1199548` + follow-up
+      `189857e`; `3ds-port` NEXT-SPRINT item 16). Critic round 1 APPROVE (medium effort).
+   4. **Done** (2026-10-24): `3ds-port` (`189857e`) merged into `stage10-c3d`. Conflicts:
+      `CLAUDE.md` (kept this branch's stage 10 state), NEXT-SPRINT items 14-16 (both copies
+      auto-merged; one kept, with this branch's "Causes / user decision" paragraph). Merge
+      adaptations: (a) `present_screen()` runs `fatal_test_tick` and `fatal_service_point()`
+      before the GPU branch (they were in `present_screen_cpu()`, never reached with citro3d
+      presenting); (b) `error_screen_here()`: on main `a1_c3d_release_top()` first; in 5.6.3's
+      fallback (off main, `raw_log`) only the new `a1_c3d_owns_top()` (one atomic load), because
+      `release_from_any_thread()` `printf`s through the tee lock and waits 2 s for a main thread
+      known to be blocked; with citro3d up the fallback logs `citro3d still up (fallback off
+      main): logged only`, draws nothing, no wait (design 5.6.2 a; critic round 2 item 5: never
+      citro3d off main). Four builds 0 warnings; `arm-none-eabi-nm`: OFF builds 0 citro3d
+      symbols, ON 119. Azahar — non-authoritative (`build-3ds-c3d`, GPU present): `debug-fatal`
+      modes 1, 2, 6, 11: release on main, then the error screen, `exit`; modes 7, 10: the
+      fallback line above, `svcExitProcess`; scripts 22 fast (no dialog frame) and plain (the
+      dialog frame; Azahar keeps GPU rights, so no hang); 0 null reads in each run.
+   **Plan A is complete (2026-10-26): pieces 0-5 are done, A6 and A7 passed on the console (items 14-16).
+   Next: B (the zero-copy present), then C (the renderer).**
+   5. **Done (Azahar; console check pending), 2026-10-24:** the HOME > Close hang (A1, design
+      5.6.1 a/b), `stage10-c3d` only, no engine edit (no `PATCHES.md` entry), commit
+      `stage10: A5 ...`. What it is, in the order of the code:
+      - `render_c3d/core/gate.h` (new, pure, host-tested): `GateInputs` (`!gpu_right ||
+        should_close || suspended`), `GateTracker` (d5 transitions, per-episode and total skip
+        counts), `retire_wait` (poll a non-blocking try with a 1 ms sleep between, up to a
+        bound; a template, so the host test drives it with a fake queue and clock), `FrameStart
+        { Ok, AlreadyInFrame, Abandoned }`. Host test:
+        `scripts/3ds/tests/c3d-host/build.sh` (36 checks: the parser incl. the four new keys,
+        the gate, the tracker, the retire loop; also the first host test of `core/`, so the
+        directory is new).
+      - `back/context.cpp`: `gate_closed()` = `!gspHasGpuRight() || aptShouldClose() ||
+        a1_3ds::app_suspended()`; `serve_release()` (the former `ensure_up()` branch, now
+        step 1 of the present); `gate_present()` (step 2: Skip = closed and citro3d up or
+        surrendered, return true with no citro3d call; Cpu = closed and citro3d not up, return
+        false; with `suspend_gate 0` it only watches and logs); `ensure_up()` refuses to
+        initialise while the gate condition holds (step 3); `frame_begin()` returns the
+        tri-state, and polls `C3D_FrameBegin(C3D_FRAME_NONBLOCK)` with 1 ms sleeps up to
+        `retire_wait_ms` **only when the gate condition holds** (the measured path with the gate
+        open is the unchanged `C3D_FrameBegin(0)`); `release_and_fini()` always uses the bounded
+        wait instead of `C3D_FrameBegin(0)` and, past the bound, `abandon()`s: no `C3D_Fini`, no
+        `present_free`, `s_off`/`s_surrendered`/`s_abandoned` set, `s_up` false last, and
+        `__wrap_gfxExit` still calls the real `gfxExit()`. No `gxCmdQueueWait(q, N > 0)` anywhere
+        (`gx.h`:125). d2: a state line first (`in_frame`, gate and its inputs, frames ended with
+        the gate closed, skipped presents, ms since the last frame end), then one line per
+        step. d4: `real gfxExit returned`. d5: `gate closed at present N (...)`, `gate open
+        again after K skipped presents`, `gate_skipped=` in the stats line and in `[c3d] final`.
+      - `back/present.cpp`: the order of 5.6.1 a in `a1_c3d_present()` (serve release, gate,
+        `ensure_up()`); an `Abandoned` frame_begin returns true without drawing and without the
+        "already inside a frame" branch; d3 breadcrumbs (before/after `frame_begin` inside
+        `frame_begin`, before the VBlank wait, before and after `frame_end` with `gspHasGpuRight()`
+        and in-frame), printed only while the gate condition holds; `present_close_frame()`
+        (`close_frame 1`: in the release, when the gate condition holds, one forced frame that
+        draws the present quad from the present texture, no upload).
+      - `debug-c3d` keys (`core/config.h` + parser + host test): `suspend_gate 0|1` (default 1),
+        `retire_wait_ms N` (default 500, 0 = unbounded, max 600000), `force_abandon 0|1`,
+        `close_frame 0|1`. Configs in `scripts/3ds/tests/c3d/`: `p1-home-close-diag.cfg`
+        (`suspend_gate 0`, `retire_wait_ms 5000`, `close_frame 1`), `p1-abandon.cfg`,
+        `p1-unbounded.cfg` (`suspend_gate 0`, `retire_wait_ms 0`: the old behaviour, to
+        reproduce the hang on purpose; not needed by any run).
+      **Deviations from the design text:** (1) d2/d5 log the gate's inputs as `gpu_right`,
+      `should_close`, `suspended` (`app_suspended()` = `in_home || asleep`); the design names
+      `in_home` and `asleep` separately, but only the combined value is exported, and the
+      accessors are in `input_3ds.cpp`/`a1_3ds_platform.h`, shared with `3ds-port` (5.6.0: fixed
+      there, not here). (2) `frame_begin()` also returns `AlreadyInFrame` when our own
+      `s_in_frame` is set, without calling citro3d (a NONBLOCK poll would otherwise spin out the
+      whole bound on a refused `C3D_FrameBegin`). (3) `ensure_up()` returns false without
+      setting `s_off` while the gate condition holds, so citro3d can still start later (the gate
+      at boot is open anyway). (4) The release's state line and step lines are printed for every
+      release, not only gate-closed ones (they cost nothing outside an exit). (5) `crumb` (d3)
+      lines go through `fflush(stdout)` each, so the last breadcrumb is on the card before a
+      hang. (6) A release started by a thread other than main waits `kHandoffWaitMs` = 2 s
+      (`context.cpp`); with `p1-home-close-diag.cfg` the main thread's release can take up to
+      5 s + 5 s, so an off-main caller would give up first in that config (only matters for
+      run 1 if an error screen on a second thread coincides; not expected).
+      **Azahar — non-authoritative** (`build-3ds-c3d`, Marathon 2; Azahar keeps GPU rights,
+      retires GPU frames synchronously and cannot hang a queue, so `queue retired after 0 ms`
+      every time and the gate closes through `in_home` only):
+      - script 22 plain (`home-close`: ONSUSPEND hook, then `SDL_QUIT`, the invisible quit dialog)
+        with `p1-gpu.cfg`: `apt hook ONSUSPEND ... gpu right 1`, `gate closed at present 558
+        (gpu_right 1, should_close 0, suspended 1)`, 3 presents skipped (the dialog's draw
+        included, no citro3d call), release state line `gate closed ... skipped presents 3`,
+        every d2 line, `release done`, `final: ... gate_skipped=3 gate_episodes=1`, `real
+        gfxExit returned`, `exit`. Script 22 fast: gate never observed (no present after the
+        hook), 0 skipped, same release lines, `exit`.
+      - `p1-home-close-diag.cfg` (`suspend_gate 0`, 5000 ms, `close_frame 1`), script 22 plain:
+        `gate closed ... ; suspend_gate 0: presenting anyway`, d3 breadcrumbs around three
+        presents (`frame_begin ... retired in 0 ms`, VBlank, `before frame_end (gpu right 1, in
+        frame 1)`, `after frame_end`), release: `close_frame 1: one forced present frame`, its
+        breadcrumbs, `queue retired after 0 ms`, `release done`, `frames_gate_closed=4`, `real
+        gfxExit returned`, `exit`. Fast script: same release path.
+      - `p1-abandon.cfg` (`force_abandon 1`), scripts 22 plain and fast: `release abandoned
+        (release): force_abandon 1, not polling`, `final: ... abandoned=1`, `real gfxExit
+        returned`, `exit`; no CPU present afterwards.
+      - `test_vhalt` 1, 2, 3, 4 (`p1-vhalt*.cfg`, script 17), against pieces 1-2: one `release`
+        each (modes 2-4 served by the main thread, d6 `thread main`, `stdout device ... log`),
+        `queue retired after 0 ms`, `release done`, `real gfxExit returned`, `exit`; mode 1 also
+        logs gfxExit #2 (`citro3d down`).
+      - `debug-fatal` modes 1, 2, 7, 11 (script 24, `--fatal`): 1, 2 and 11 release on main then the
+        error screen then `exit`; 7 logs `citro3d still up (fallback off main): logged only` and
+        `svcExitProcess` (no citro3d call off main), as before the piece.
+      - Regression, `p1-gpu.cfg` and `p1-diff.cfg`, scripts 07, 08, 13, 14, 19: all run to the
+        end (07 and 14 have no `quit` and are stopped by the timeout, so no `final` line; their
+        last `[c3d] stats` line is read), **0 skipped presents** in every run (the scripted `home`
+        and `sleep` hold the main thread in the hook), `present_screen_false_returns=0`,
+        `present_diff` 0 differences in every check (diff-08: 71 checks, diff-13: 31, diff-14: 24,
+        diff-19: 3; 07: all logged checks 0), gx high-water 3. Frame-indexed `p1-calibrate.cfg` and
+        `p1-calibrate-altload.cfg`: 24 captures each, every one uniform and showing the logged
+        frame number; `p1-odd.cfg`: odd picture captures taken, 120 odd presents, 0 false
+        returns. `azahar_log.txt`: no guest fault in any run.
+      - Builds: all four, 0 warnings; `arm-none-eabi-nm build-3ds/alephone.elf` and
+        `build-3ds-prof/alephone.elf | grep -ciE 'citro|C3D_|a1_c3d'` = 0. Frame cost of the gate:
+        `PERF.md` "Stage 10 plan A piece 5".
+      **Console runs still to do (the single session, item 6; design 5.6.1 runs 1-4).** Build
+      `build-3ds-c3d` (or `-prof`), install over the launcher as before, **start every run from
+      the Homebrew Launcher**, not 3dslink: the pass criterion is that "Closing software..."
+      ends, the launcher comes back and Aleph One launches again. Put the config on the card with
+      `scripts/3ds/sd-ftp.sh IP put scripts/3ds/tests/c3d/<cfg> /3ds/alephone/`, remove the old one
+      (`sd-ftp.sh IP rm /3ds/alephone/debug-c3d`; a rename onto an existing file may fail on the
+      card's FAT and silently keep the previous config) and rename the new one to `debug-c3d`
+      (`sd-ftp.sh IP mv /3ds/alephone/<cfg> /3ds/alephone/debug-c3d`). **Check each run's config
+      at the top of `log.txt`:** the boot line `[c3d] debug-c3d: ... suspend_gate X,
+      retire_wait_ms Y ...` must match the run (run 1: `suspend_gate 0`). Read the card's
+      `/3ds/alephone/log.txt` afterwards (the d1-d5 lines are in it; a launcher start has no
+      3dslink mirror). Delete `debug-c3d` at the end.
+      1. **Diagnostic**, `p1-home-close-diag.cfg`, Classic @30 (as `home-close-1`), in a game:
+         HOME, then Close. Expect `apt hook ONSUSPEND on thread <main> (main <same>): gpu right 1`
+         and no hook line after it; the `d3 close_frame:` breadcrumbs with `gpu right 0` before
+         the forced `frame_end`; then `did not retire` / `release abandoned (release): the GPU
+         queue did not retire after 5000 ms`, `real gfxExit returned`, a normal close.
+         **Also a pass (the other ordering):** a natural present after the hook runs first, its
+         bounded `frame_begin` succeeds (citro3d's ONSUSPEND hook drained the queue) and its
+         `frame_end` submits without rights; the release's `close_frame` then abandons inside
+         `frame_begin`: `release abandoned (frame_begin): the GPU queue did not retire after
+         5000 ms`, the `gpu right 0` breadcrumb is that present's `before frame_end`, and there
+         is no `close_frame: after frame_begin` and no `release: waiting for the queue` line.
+         Either ordering confirms the last UNVERIFIED step (GSP never completes work without rights). If
+         `queue retired after X ms` with a large X: slow, not never; report X. If it hangs: the
+         last `d3`/`release:` line on the card names the wait; stop and report. Then relaunch.
+      2. **The fix**, `p1-gpu.cfg`: HOME > Close in a game three times (HUD + Map @60 twice,
+         Classic @30 once). Expect the release's state line `gate closed (gpu_right 0, should_close 1, ...)`,
+         and `gate closed at present N` with >= 1 skipped present only if a present came before
+         the quit (with piece 3's fast path there may be no present, so no such line), `queue retired
+         after 0 ms`, `release done`, `real gfxExit returned`, `exit`. Each close returns to the
+         launcher and Aleph One starts again.
+      3. `p1-diff.cfg`: HOME and back in a game twice, sleep (lid) and wake in a game twice: the
+         picture is right, `present_diff` shows 0 differences, `gate_skipped=0` in the stats lines
+         (predicted: the main thread is blocked in `aptMainLoop()` for both), each d1 hook on the
+         main thread with gpu right 1. Also the software keyboard (e.g. naming a save) confirmed
+         and cancelled, and POWER then cancel, both with `p1-gpu.cfg`: library-applet suspend /
+         power menu, the gate never seen closed or reopened with presents resuming (a skipped
+         ONRESTORE would leave `s_in_home` set: every present skipped, frozen top screen).
+      4. No regression: HOME > Close in a dialog and at the main menu; no new Luma dumps.
+      Also read off the first run: whether `retire_wait_ms` 500 is ever hit in a normal release
+      (an error screen right after a busy frame): a `release abandoned` line outside run 1 is a bug.
+      Reading d2: "ms since the last frame end" is genuinely 0 when the release is served from
+      `present_bottom`'s service point right after the top present (`test_vhalt` 2-4,
+      `debug-fatal` 2).
+      **Critic round 1 on `6b152e4`: APPROVE** (2026-10-24, medium effort; runbook findings 1, 2,
+      6 applied above). Deferred: (3) after an abandon, `a1_c3d_owns_top()` and
+      `release_from_any_thread()` report citro3d gone, so an error screen during exit does
+      `consoleInit` on the top screen while citro3d's `onQueueFinish` is still bound (it would
+      `gfxScreenSwapBuffers` on the GSP thread if the abandoned queue ever retired): decide
+      log-only-after-abandon or document the accepted race (5.6.1 b); reachable only with an
+      abandon plus an error at exit, or the forced configs. (4) `kHandoffWaitMs` (2000) is
+      shorter than a main release under `p1-home-close-diag.cfg` (up to 5 + 5 s); fix later as
+      max(2000, 2 x `retire_wait_ms` + 500); not reachable in run 1. (5) 500 ms default kept.
+      Nits: `p1-unbounded.cfg` is a deliberate reproduction only; `ensure_up()`'s
+      `if (s_up) return !serve_release();` is dead in practice.
+      **Console (New 3DS), 2026-10-24 (A6 session, `build-3ds-c3d`, 192.168.100.72, every run
+      started from the Homebrew Launcher, logs read from the card; raw logs in
+      `build-3ds/hw/a6/`, outside git).** Runs 1-4 all pass; each close returned to the launcher
+      and Aleph One launched again; no new Luma dump (still dumps 0-6).
+      - **Run 1, `p1-home-close-diag.cfg`, Classic @30 (`A1-diag.log`).** Boot line `suspend_gate 0,
+        retire_wait_ms 5000, close_frame 1`. `ONSUSPEND on thread 287 (main 287): gpu right 1,
+        should close 0`, no hook after it. Release: `gate closed (gpu_right 0, should_close 1,
+        suspended 1)`, `close_frame 1: one forced present frame`, `d3 frame_begin: after, retired
+        in 0 ms` (citro3d's own ONSUSPEND hook drained the queue, as predicted), `d3 close_frame:
+        before frame_end (gpu right 0, in frame 1)`, `after frame_end`, `release: waiting for the
+        queue (up to 5000 ms)`, then **`release abandoned (release): the GPU queue did not retire
+        after 5000 ms`**, `final: ... abandoned=1`, `real gfxExit returned`, `exit`: the first
+        ordering. **GSP did not complete work submitted without GPU rights, for the full 5 s
+        ("never", not "slow").** The close took 9.4 s from the hook (5 s of it that wait); the user
+        saw a slow but clean close.
+      - **Run 2, `p1-gpu.cfg` (`A2-1/2/3.log`).** Boot line `suspend_gate 1, retire_wait_ms 500,
+        close_frame 0`. HUD + Map @60 twice and Classic @30 once: `gate closed at present 833 / 964
+        / 747 (gpu_right 0, should_close 1, suspended 1)` (the gate was seen closed by a present
+        after the hook, in all three), release state line `gate closed ... skipped presents 1 / 1
+        / 2`, **`queue retired after 0 ms`** each time, `release done: C3D_Fini returned; linear
+        free 17788 KiB, VRAM free 6144 KiB`, `real gfxExit returned`, `exit`;
+        `gate_skipped=1 / 1 / 2`, `gate_episodes=1`. Hook to `exit` 3.3 / 3.0 / 4.8 s ("much
+        faster", the user).
+      - **Run 3, `p1-diff.cfg`, HUD + Map @60 (`A3.log`).** `present_diff final: 166 checks, 0 with
+        RGB differences` (0 of 96000 pixels in every logged check); HOME and back ×2 (3.5 s, 3.6
+        s), lid sleep and wake ×2 (1.1 s, 0.9 s), the name keyboard confirmed (a library-applet
+        `ONSUSPEND`/`ONRESTORE` pair around it): every hook on the main thread with gpu right 1,
+        presents resumed after each, `gate_skipped=0`, `gx_refused=0`, `odd_surface=0`, 5000
+        presents. The software keyboard was the main menu's Player name (saves in game do not open
+        one). POWER then cancel: see below.
+      - **Run 4, `p1-gpu.cfg`, HUD + Map @60 (`A4-1.log`, `A4-2.log`).** HOME > Close with a
+        dialog/menu showing (`terminals: 640x320`, after several HOME round trips): gate closed,
+        `queue retired after 0 ms`, `release done`, `exit`, `gate_skipped=0`; HOME > Close at the
+        main menu after cancelling the name keyboard (`keyboard: cancelled (button 0, result 1)`,
+        hooks paired): the same. **No `release abandoned` line in runs 2-4** (the `retire_wait_ms`
+        500 was never hit in a normal release; an error screen right after a busy frame is part
+        B, not run yet).
+      - **POWER (short press) then cancel (in `A3.log`).** Not a resume: the app is closed. The
+        log has `ONSUSPEND` (gpu right 1, should close 0), no `ONRESTORE`, the gate closed at
+        the release, `queue retired after 0 ms`, `release done`, `exit` about 1 s later; the user
+        is left at the HOME menu. The earlier expectation "presents resume after the cancel"
+        does not hold on this console; the close is clean.
+      **Parts B and C (sessions 2-3, 2026-10-25/26):** see items 14 and 15 (B1-B5, 6, 11 and the
+      shipping spot check pass; 6b and mode 10 end in the system's restart; part C inconclusive).
+      **Mode 7 on the shipping build (2026-10-26) also restarts the console** (item 14). **Not run:**
+      B8 on the GPU build (skipped by the user's choice) and part D (hold POWER > Power Off,
+      declined by the user).
+   6. **Done on the console (2026-10-26) with two findings** (see the results under item 5 and in
+      items 14-16): part A, B0-B5, 6, 11 and the shipping spot check pass; **6b and mode 10 fail**
+      (the fallback's `svcExitProcess` makes the system restart the console, item 14); part C
+      is inconclusive (item 15); B8 and part D were not run. Open: the fallback exit fix (mode 7 on the shipping
+      build shows it is not citro3d-specific), then a console re-check of mode 7, 6b and 10, part C
+      with a chattier log, part D.
+      **One console session** (procedure and order for a fresh agent: `docs/3ds/CONSOLE-SESSION-A6.md`) for all of it: design 5.6.1 runs 1-4 (written out in item 5), the `debug-fatal`
+      list in item 14 (boot-time control, mode 1 by eye, modes 2-4, 6, 6b; the launcher
+      relaunches Aleph One after each; the DSP falls silent after 6/6b/7), the mirror
+      check (item 15: `kill -STOP` the host 3dslink), and read the card's `log.txt`
+      (raw fatal lines are not mirrored). Workflow per piece: implementer, then critic
+      (max 2 revise rounds); design: architect then critic.
+      **The fallback exit fix is piece 7 (built overnight 2026-10-26, Azahar only, UNVERIFIED on
+      the console).**
+   7. **A7, the fallback's exit (built 2026-10-26; Azahar passes; console passes, 2026-10-26):**
+      design `CITRO3D_DESIGN.md` 5.6.3 step 3a (decision and rejected options), commits
+      `4981782` (decision), `db10ade` (code), `5da39e0` + `5bd0867` (review round 1), critic
+      round 2 APPROVE (medium effort). The fallback now ends through `gfxExit` (software build
+      only), `aptExit()` and `APT_CloseApplication` (libctru's deferred close, through
+      `__system_retAddr`), without the heap frees, behind a 5 s watchdog; `apt_hook` on the
+      fallback thread logs one raw line and returns; d7 logs the launcher's run flags at boot.
+      Port code only (`ports/3ds/source/a1_3ds_platform.cpp`, `input_3ds.cpp`,
+      `ports/3ds/include/a1_3ds_platform.h`, `scripts/3ds/run-azahar.sh`): no engine edit, no
+      `PATCHES.md` entry. **These files are shared with `3ds-port`, which still has the old
+      fallback** (the shipping build restarts the console in mode 7); A7 is on `stage10-c3d`
+      only, by the user's instruction for this task (design 5.6.0 row A7); carrying it over is
+      the user's decision once the console passes (done, item 14). Results: item 14.
+      **Console (New 3DS), 2026-10-26: the A7 console session passes** (item 14 F1-F5, item 15 C1-C2,
+      item 16 part D; no new Luma dump in any run). The fallback ends cleanly on hardware in both
+      builds: mode 7 (software), 6b and 10 (GPU) return to the launcher with no restart message; HOME
+      and HOME > Close on the fallback thread are handled. Findings: d7 reads `homebrew 1, run flags
+      0x4 (aptreinit 0, aptchainload 1)`, so this console's `aptExit()` takes the chainload branch and
+      the exit is `svcExitProcess` after `aptExit` (not the `APT_CloseApplication` path Azahar
+      shows); `APT_CloseApplication` runs only after HOME > Close (F5) and returns. So the working
+      part of the fix is the `aptExit` (plus `gfxExit` in the software build); `gspExit` is not
+      needed in the GPU build. **A7 was carried to `3ds-port` on 2026-10-26** (item 14), and the shipping
+      build passes mode 7 on the console.
+B. **Zero-copy present** (critic P1 finding 3): `main_surface` in linear memory,
+   read by the GPU, TEV reorders the channels; one engine edit (`PATCHES.md` 55+).
+   Measured on the console against the current GPU present.
+   **Status (2026-10-26):** designed (`CITRO3D_DESIGN.md` 5.7; critic round 1 REVISE, round 2
+   APPROVE). The estimate's lower end (~0.1-0.4 ms per frame) is within the console's noise, so the
+   engine edit is **not** built on it: B is split into **B-a** (port only, `two_frame` behind
+   `debug-c3d`, off by default; built, `a35aa79f4`, Azahar passes: `PERF.md` "Stage 10 B-a") and
+   **B-b** (the engine edit and the channel reorder), built only if the **"B-a console runbook"**
+   below shows a saving of ≥ 0.5 ms per frame @30 on L0, L6 and L20. **Console session run on
+   2026-10-26: saving 0.435 / 0.350 / 0.355 ms on L0 / L6 / L20, i.e. NO-GO by the rule** (`PERF.md`
+   "Stage 10 B-a"; the upload wait costs 0.61 ms; the unexplained `bottom` drop of ~0.4 ms with
+   `two_frame 1` would raise it to ~0.7-0.9 ms if it carried over). Functional run passes. **Next: the
+   user's choice: build B-b anyway, stop B at the design (B-a stays as an off-by-default
+   diagnostic), or revert B-a.**
+   **Decision (user, 2026-10-26): build B-b, but on its own branch `stage10-bb` (worktree
+   `.claude/worktrees/stage10-bb`, from `8626f3065`), not merged into `stage10-c3d`. The renderer
+   (plan C, M0 first) goes on `stage10-c3d` meanwhile. B-b is re-measured at 60 fps once the
+   renderer exists, and merged only if it helps there.**
+   **B-b built (2026-10-26, branch `stage10-bb`, tag `port-stage10-B`; critic round 1 REVISE, round 2
+   APPROVE):** engine edit `PATCHES.md` 55, `debug-c3d zero_copy` (default 1; the OFF build is unchanged,
+   `objdump -d` identical). Azahar passes 5.7.9 items 1-5 (`PERF.md` "Stage 10 B-b": `present_diff` 0 on
+   every path and path switch, both negative controls fire). **Next: the "B-b console runbook" below, when
+   the user decides** (at the latest with the renderer, at 60 fps); not merged into `stage10-c3d`.
+C. **The renderer:** M0-M5 (readback, no speedup; gate G2), M6 (direct mode, HUD +
+   Map; gate G3), then M7 (supersampling), M9 (stereo). M8 (a Renderer preference)
+   is optional; open questions 4-8, 10-12 are asked when their milestone comes up.
+   **Status (2026-10-27): M0 done** (tag `port-stage10-M0`; `PERF.md` "Stage 10 M0", Azahar —
+   non-authoritative): the seam (`PATCHES.md` 45), the record/replay diff harness (SW-vs-SW 0
+   differing pixels on L0/L6/L20 and the menu demo), null mode (`R_est` 0.33-0.62 ms, far under
+   G2-a's 3 ms), the readback calibration (30/30 ok in Azahar with the design's starting values).
+   **M1 done (2026-10-27**, tag `port-stage10-M1`; `PERF.md` "Stage 10 M1", Azahar — non-authoritative):
+   citro3d draws opaque walls on diff frames; coverage equals SW's except tie pixels (0 non-edge
+   mismatches on L0/L6/L20 and 200 film frames); reserves 508 + 20 words; rings and `C3D_Init`
+   unchanged; `debug-c3d film`. **Next (user decision 2026-10-27): M2** (textured walls and floors, patch 46;
+   kickoff `KICKOFF_M2.md`), console checks deferred; **M2's texture upload code waits for "M1 console
+   check, short version"** (at the end of this file) to pass. The full "M1 console check" (it carries
+   the M0 console check) waits for a longer session.
+   **M2 session 1 done (2026-11-02**, no tag; `PERF.md` "Stage 10 M2 session 1"): spec + critic, texture
+   conversion and tiling (tex3ds byte-identical), the pure texture cache, hooks 2a/2b (`PATCHES.md` 46),
+   floors and texcoords in the front end, the harness (neighbourhood colour gate, user decision
+   2026-10-31). Interim Azahar run (flat colour, both backends): pass except 13 film floor pixels (a
+   non-convex sliver, to fix in session 2). **"M1 console check, short version": run and passed on the
+   console 2026-11-02** (`PERF.md` "Stage 10 M1 — console, short check").
+   **M2 done (2026-11-02**, tag `port-stage10-M2`; `PERF.md` "Stage 10 M2", Azahar — non-authoritative):
+   textured walls and floors (full bright) on diff frames, texture cache v1 (linear upload, VRAM
+   promotions, generations), the texture-binding restore, non-convex polygons as SW's spans; colour
+   gate passes on L0/L6/L20 and the film under both Azahar backends, one recorded exception (the load
+   test's level-1 ceiling, user decision). **"M2 console check, short version": run and passed on the
+   console 2026-11-03** (`PERF.md` "Stage 10 M2 — console, short check": the conversion flush and the
+   TextureCopy promotion verified). **Next: the user's choice** — M3 (lighting, kickoff to be written),
+   or the full "M1 console check" in a longer session.
+   **M3 (2026-11-05**, kickoff `KICKOFF_M3.md`; `PERF.md` "Stage 10 M3", Azahar — non-authoritative): the
+   shade LUT (256x256 L8, worst 1 level vs SW on the host), texcoord1, two TEV stages, infravision, weapon
+   flash, negative ambient (SW's short-index wrap excluded); passes on L0/L6/L20, both films (L01, L08) and
+   infravision on the host GPU, and on the 20-check runs under the software backend; unit 1 unbound after each
+   lit frame (Azahar's software backend crashed otherwise). Azahar's software rasteriser also faults when a draw
+   samples FCRAM and VRAM textures together (bisected; design Review log "M3 acceptance, software-backend
+   films"): under it the films run all-linear (`gxq_budget 3`) and pass. **Next (user decision 2026-11-05):
+   M4.** Console: "M3 console check, short version" at the end of this file.
+   **Negative ambient: passed in Azahar (2026-11-06, piece 0 of `KICKOFF_M4.md`).** A solo Lua plugin
+   (`Negative Light Test`, `run-azahar.sh --negative-light-test`) puts every light state at −0.5; one lit L0
+   diff per backend (`m3-neglight.cfg`): 604 negatively lit polygons drawn, 0 wraps, M3's lit gate passes on
+   both (`PERF.md` "Stage 10 M3", "Negative ambient").
+   **M4 done (2026-11-06**, kickoff `KICKOFF_M4.md`; `PERF.md` "Stage 10 M4", Azahar — non-authoritative):
+   rectangles (RLE, flip, clip; one quad each, SW's fixed-point steps at the corners), mask textures (A8), the
+   tinted constant-colour blend, and **play mode on** in readback mode (frames recorded once and replayed into
+   C3D, or into SW for landscapes/static/discards; ten resource discards in a row turn it off until the next
+   level). Sprites, weapons, tinted and the full frame pass on both Azahar backends (sprites gated on L0 and the
+   films: user decision); play mode passes scripts 06, 07, 12, 13, the L01 film, Classic L20 and the off test;
+   L20 bench +22 % busy (no speedup expected before M6). **Next: the user's choice** — M5 (landscapes, static,
+   eviction hardening), or the M3/M4 short console checks first ("M4 console check, short version" at the end
+   of this file).
+   **Next (user decision 2026-11-07): M5**, kickoff `KICKOFF_M5.md`. It ends at G2-a ("busy(readback) ≤
+   busy(SW) + 1 ms"), which M4's L20 bench already misses by 2.5 ms: what to do then is the user's call.
+   **M5 done (2026-11-07**, tag `port-stage10-M5`; `PERF.md` "Stage 10 M5", Azahar — non-authoritative):
+   landscapes (two texture parts, cut at row 512), static (LFSR noise on unit 1), eviction hardening (a promotion
+   allocates before it evicts, blocks for its generation when the heap refuses, landscapes evicted last), the play
+   scan, `fail_every`, the cache audit. Every play frame is now C3D (no landscape or static frame goes to SW);
+   landscapes exact on the host GPU, static within ±2 points, all 5 films pass on both Azahar backends.
+   **G2-a fails** (busy +2.04 / +4.88 / +3.51 ms on L0 / L6 / L20 against +1 ms; `R_est` passes). **Next (user
+   decision 2026-11-07, whatever G2-a showed): M6**, kickoff `KICKOFF_M6.md`. Console: "M5 console check, short
+   version" at the end of this file (not run).
+   **M3, M4 and M5 console short checks run 2026-11-07, in one sitting (15 launches; `PERF.md` "Stage 10 M3-M5 —
+   console, short checks"):** M3 passed (lit colours = Azahar within 0.02 `mean_nb`, command words identical, ×2
+   alpha clamps, unit 1 unbinds), M4 passed (sprites 78 non-edge, tinted exact, play mode 780/780 C3D, HOME / lid /
+   Close clean), M5 passed except the Look Up Test's strict gate (97.84 % against 98 %: PICA's float24 columns, as
+   Azahar's software backend; the clip-at-cut fallback is the remedy if wanted) and static's look (not seen).
+   **G2-b: readback costs +6.15 / +7.77 / +7.25 ms busy on L0 / L6 / L20** (Azahar +2.04 / +4.88 / +3.51).
+   The 1 Hz stutter in play was the stats printing (verified with `quiet 1`: window maxima 65-93 → 40-53 ms, L0 busy
+   −2 ms, C3D − SW +3.46; `PERF.md` "Stutter follow-up"); G2-b above is overstated by ~2 ms. **Next: M6** (`KICKOFF_M6.md`).
+   **M6 done (2026-11-07**, tag `port-stage10-M6`; `PERF.md` "Stage 10 M6", Azahar — non-authoritative; `stage10-bb`
+   merged first, user decision): direct mode — eligible HUD + Map frames stay on the GPU (a 512x256 texture target, never
+   cleared, seed/sync rules), the CPU overlays go to an RGBA8888 surface whose bands the present composites, `PATCHES.md`
+   47 (hooks 3a/3b/3c). `direct_check` exact on both backends, the frame-indexed test passes @30/@60, ineligible frames
+   (map, terminal, darken, fades, Classic) readback, M1-M5 gates unchanged; captures pass a recorded exception (user
+   decision: SDL's text blending rounds differently on a transparent surface). **First speedup:** @30 busy −6.0 / −4.2 /
+   −5.0 ms against SW, @60 59.7 fps on L0/L6/L20 (SW 54.4 on L0). G3-a holds. **M6 console check run 2026-11-07** (medium
+   variant, 15 launches; `PERF.md` "Stage 10 M6 — console, short check"): no hardware bug; orientations right, `direct_check`
+   Δ 0 and `seed_check` 0 on PICA, HOME/sleep/Close clean, **direct 60.5 fps @60 on L0/L6/L20 (goal ≥ 55 met)** and busy −0.7 /
+   −0.4 / −0.8 ms against SW (which also holds 60.5 on the console), `c3d_wait` 0.7-0.8 ms, G3-b `gpu_ms view` 1.3-1.5 ms; the
+   step 1 @30 run passed 17 of 24 (7 captures fell before the game or on a non-composite present: a harness window, not the
+   renderer). **Next (user decision 2026-11-08): M8 (the Renderer preference), then M6b (fades, flashes and tints in direct mode; underwater first), then M9 (stereo), M7 (2x2 supersampling) last**; fresh-session prompt for M8: `KICKOFF_M8.md`. M6b is `CITRO3D_DESIGN.md` section 7; the gate's tolerance is decided with its spec.
+   *Earlier:* **Next (user decision 2026-10-27): M1** (flat-shaded walls; kickoff `KICKOFF_M1.md`). The "M0
+   console check" below is **deferred**: M1 builds on a readback only Azahar has run, and M1's own
+   console runbook carries the M0 steps.
+
+## B-a console runbook (plan B's go / no-go; when the user is at the console)
+
+**Run on 2026-10-26: 12 benchmark runs @30, one pair @60 and the functional run all passed; saving 0.435 /
+0.350 / 0.355 ms on L0 / L6 / L20, below the 0.5 ms rule (results: `PERF.md` "Stage 10 B-a").**
+Written 2026-10-26. Decides whether B-b (the zero-copy present's engine edit) is
+built: design `CITRO3D_DESIGN.md` 5.7.1 and 5.7.11. Driving as in "How to drive the console"
+(ask the IP: it was 192.168.100.72; the helpers below have it written in, edit if it changed).
+Tell the user each time whether you need **ftpd** (card files) or the **Homebrew Launcher
+netloader** (Y). About 14 launches, ~40 min.
+
+**Builds** (from the `stage10-c3d` worktree, commit `a35aa79f4` or later):
+`build-3ds-c3d-prof/alephone.3dsx` (benchmarks) and `build-3ds-c3d/alephone.3dsx` (functional
+run). Check first: `cmake --build` both (nothing to do / 0 warnings).
+
+**Setup.** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw` (the main checkout; not in git),
+`mkdir -p $H/b0`, and make a run helper from G0-b's:
+`sed 's#build-3ds/hw/g0b/#build-3ds/hw/b0/#' $H/g0b/run.sh > $H/b0/run.sh; chmod +x $H/b0/run.sh`
+(it launches `<worktree>/BUILD/alephone.3dsx` over 3dslink, transcript `b0/TAG.txt`). Kill stale
+3dslink first (`pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`). ftpd: list `/luma/dumps/arm11/`
+(dumps 0-6 exist), fetch the user's `Marathon 2 Preferences` into `$H/b0/prefs-user` (to put back
+at the end), then `$H/sprint8/setprefs.sh IP 0 30` (HUD + Map, Framerate Target 30).
+
+**1. The series (HUD + Map @30, 12 runs).** Per run, on ftpd: put `$H/sprint8/debug-perf-L<N>` as
+`/3ds/alephone/debug-perf` and the config as `/3ds/alephone/debug-c3d`
+(`scripts/3ds/tests/c3d/p1-gpu.cfg` = `two_frame 0`, `b-two-frame.cfg` = `two_frame 1`;
+`scripts/3ds/sd-ftp.sh IP put <file> /3ds/alephone` puts it under its own name, so copy it to a
+file named `debug-perf` / `debug-c3d` in a scratch dir first). Then netloader:
+`$H/b0/run.sh build-3ds-c3d-prof hm30-tf<0|1>-L<N>-<a|b>`; the user presses A twice; the game
+quits by itself after the BENCH line. Order, interleaved so drift hits both sides alike:
+L0 tf0-a, L0 tf1-a, L0 tf0-b, L0 tf1-b, then the same for L6 and L20. Each run: `gaps=0` (else
+rerun), and the transcript's `[c3d] debug-c3d:` line must show the intended `two_frame`.
+**Read:** `python3 -I scripts/3ds/tests/perf-table.py $H/b0/hm30-*.txt`. Per level:
+`fill` = mean `c3d_fill` of the two tf0 runs; `extra` = mean present total (tf1) − mean present
+total (tf0); **saving = fill − extra**. Also note `c3d_upload` (the upload wait), `c3d_vblank`,
+`bottom`, `blit`, `max`, and the stats lines' `gpu_ms draw=... upload=...`. Sanity: tf0's present
+total should be close to G0-b's 2.03 ms (`PERF.md` "Console G0-b, first session"), and both
+sides' `c3d_fill` should agree.
+**Go for B-b iff saving ≥ 0.5 ms on L0, L6 and L20.** Report the table and the verdict; the user
+decides.
+
+**2. Optional, @60 (no-regression look, 2-4 runs):** `setprefs.sh IP 0 60`, L0 only, tf0 then tf1
+(once or twice each). Only fps, `max`, `gaps` and `c3d_vblank` matter here (@60 a CPU saving can
+turn into VBlank wait; design 5.7.1).
+
+**3. Functional run (`build-3ds-c3d`, `b-diff.cfg`, no `debug-perf`):** delete `debug-perf`,
+put `b-diff.cfg` as `debug-c3d`, `setprefs.sh IP 0 30`. `run.sh build-3ds-c3d fn-b`: main menu,
+start a game (HUD + Map), play ~30 s, HOME and back, close the lid ~5 s and open it, Preferences ->
+Bottom Screen Classic (in a game if possible, or from the main menu and a new game), play ~20 s, quit
+to the main menu, start a game again, then **HOME > Close in the game**. Pass: the launcher comes
+back (no hang on "Closing software..."), no Luma screen, no new dump; on the card's `log.txt`:
+`present_diff final: N checks, 0 with RGB differences`, `present_screen_false_returns=0`,
+`gx_high_water` ≤ 4, `release done`. Fetch `log.txt` into `$H/b0/fn-b-log.txt`. By eye: the
+picture as usual on both paths.
+
+**Reading a failure:** a hang at HOME > Close: power off, fetch the log, record the last `[c3d]`
+lines (as in `PERF.md` "Console G0-b, second session"), stop. `present_diff` differences with
+`two_frame 1`: record the first line (pixel, values), stop (B-a's structure is wrong on hardware;
+B-b would inherit it). A Luma dump: fetch it, `arm-none-eabi-addr2line -e
+build-3ds-c3d[-prof]/alephone.elf` (registers at 0x28), stop.
+
+**Cleanup (always):** delete `debug-perf` and `debug-c3d`; put back `$H/b0/prefs-user` as
+`Marathon 2 Preferences`; reinstall the user's `.3dsx` if a 3dslink launch replaced it (ask which;
+the shipping build is `/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/alephone.3dsx`); kill
+leftover 3dslink processes.
+
+**Record:** `PERF.md` "Stage 10 B-a" (a "Console (New 3DS), <date>" part with the table and the
+verdict), `CITRO3D_DESIGN.md` 5.7.10 item 1 and section 10 item 16, plan B above.
+
+## B-b console runbook (the zero-copy present on hardware; when the user decides)
+
+**Not run yet. Do not run it without the user's go** (decision of 2026-10-26: B-b stays on its branch and
+is judged at 60 fps once the renderer exists; this runbook can serve then, or earlier if the user wants
+the @30 figures). Written 2026-10-26. Design `CITRO3D_DESIGN.md` 5.7.9 ("Console") and 5.7.10; Azahar
+results in `PERF.md` "Stage 10 B-b". Driving as in "How to drive the console" and
+`KICKOFF_B_CONSOLE.md` (ask the IP: it was 192.168.100.72). Tell the user each time whether you need
+**ftpd** (card files) or the **Homebrew Launcher netloader** (Y). About 22 launches, ~60 min.
+
+**Builds** (from the `stage10-bb` worktree, tag `port-stage10-B` or later):
+`build-3ds-c3d-prof/alephone.3dsx` (benchmarks) and `build-3ds-c3d/alephone.3dsx` (functional run).
+Check first: `cmake --build` both (nothing to do / 0 warnings). If the renderer has been merged into a
+branch that carries B-b by then, use that branch's builds and say so in the record.
+
+**Setup.** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw` (not in git), `mkdir -p "$H/bb"`, and
+make the run helper from B-a's: `sed 's#stage10-c3d#stage10-bb#; s#hw/b0/#hw/bb/#' "$H/b0/run.sh" >
+"$H/bb/run.sh"; chmod +x "$H/bb/run.sh"`. Kill stale 3dslink first (`pgrep -fl
+'^/opt/devkitpro/tools/bin/3dslink'`). ftpd: list `/luma/dumps/arm11/` (note the highest dump number),
+fetch the user's `Marathon 2 Preferences` into `$H/bb/prefs-user` (to put back at the end).
+`setprefs.sh` below is `"$H/sprint8/setprefs.sh" IP <bottom_screen> <fps>`, as in B-a. Configs
+(copy each to a scratch file named `debug-c3d` before `sd-ftp.sh put`): **side A**
+`scripts/3ds/tests/c3d/b-zero-copy-off.cfg` (`zero_copy 0`: the P1 staging present), **side B**
+`b-zero-copy.cfg` (`zero_copy 1`). **Never use `p1-gpu.cfg` as side A on this branch**: without the key
+it runs zero-copy (default 1). The key acts at the game's screen setup, so the file must be on the card
+before the launch.
+
+**1. `present_diff` first (settles 5.7.10 items 2 and 4: the one-channel write masks and the TEV
+channel operands on the PICA).** `build-3ds-c3d`, `b-zero-copy-diff.cfg`, no `debug-perf`,
+`setprefs.sh IP 0 30`. `run.sh build-3ds-c3d diff-hm`: start a game, play ~30 s, START > quit to the main
+menu, start a game again, play ~20 s, quit from the game's menu. Pass: every `[c3d] present_diff` line
+`0 of 96000 pixels differ in RGB (0 in A only)` and `present_diff final: N checks, 0 with RGB
+differences`, max |diff| 0 in all four channels; exactly one `[c3d] zero_copy: surface buffer` line;
+`[c3d] present: 400x240 zero-copy` logged. **If any check differs: record the first lines (pixel,
+gpu/cpu words) and stop here** (B-b's reorder does not hold on hardware; the benchmarks would be
+meaningless). By eye: colours as usual (a swapped red/blue or a green tint is the failure to look for).
+
+**2. The series (HUD + Map @30, 12 runs).** `build-3ds-c3d-prof`, `setprefs.sh IP 0 30`. Per run, on
+ftpd: `$H/sprint8/debug-perf-L<N>` as `debug-perf` and the side's config as `debug-c3d`; then netloader:
+`$H/bb/run.sh build-3ds-c3d-prof hm30-zc<0|1>-L<N>-<a|b>`; the user presses A twice; the game quits
+after the BENCH line. Order, interleaved: L0 zc0-a, L0 zc1-a, L0 zc0-b, L0 zc1-b, then L6, then L20.
+Each run: `gaps=0` (else rerun), and the transcript's `[c3d] debug-c3d:` line shows the intended
+`zero_copy`; zc1 transcripts also show the `zero_copy: surface buffer` line.
+**Read:** `python3 -I scripts/3ds/tests/perf-table.py "$H"/bb/hm30-*.txt`. Per level: present total
+(`present` + `c3d_wait` + `c3d_fill` + `c3d_upload` + `c3d_vblank`) zc0 vs zc1, `c3d_fill` (zc1 must read
+0.00), `c3d_upload` (the upload wait; B-a: 0.61-0.62 ms), `blit`, `bottom` (**did B-a's ~0.4 ms `bottom`
+drop carry over?**), busy, `max`, and the stats lines' `gpu_ms draw=... upload=...` (zc1's `draw` holds
+the three fills: 5.7.10 item 3). **Keep rule (5.7.9): @30 HUD + Map `present` total and busy drop on
+L0, L6 and L20 (means of 2 runs).** Report; the user decides.
+
+**3. @60 (no-regression look, 8 runs).** `setprefs.sh IP 0 60`: L0, L6, L20 zc0 then zc1, one run
+each; then `setprefs.sh IP 2 60` (Classic) L0 zc0 and zc1. Only fps, `max`, `gaps`, `c3d_vblank` and
+`gpu_ms draw` matter: @60 a CPU saving can turn into VBlank wait (5.7.1; B-a @60: `c3d_vblank` 1.08 ->
+0.70). Classic must be unchanged (it never takes the zero-copy path: no `surface buffer` line).
+This step is the one the user's decision turns on, and the one to repeat once the renderer exists.
+
+**4. Functional run (`build-3ds-c3d`, `b-zero-copy-diff.cfg`, no `debug-perf`).** `setprefs.sh IP 0 30`.
+`run.sh build-3ds-c3d fn-bb`: start a game (HUD + Map), play ~30 s, HOME and back, close the lid ~5 s
+and open it, Preferences -> Bottom Screen Classic, play ~20 s in Classic, back to HUD + Map, play ~20 s,
+quit to the main menu, start a game again, then **HOME > Close in the game**. Pass: the launcher comes
+back, no Luma screen, no new dump; on the card's `log.txt`: `present_diff final: N checks, 0 with RGB
+differences`, exactly one `zero_copy: surface buffer` line, `present_screen_false_returns=0`,
+`gx_high_water` <= 4, `release done`. Fetch `log.txt` into `$H/bb/fn-bb-log.txt`.
+
+**Reading a failure:** differences in step 1 or 4: stop, record (above). A hang at HOME > Close: power
+off, fetch the log, record the last `[c3d]` lines, stop. A Luma dump: fetch it,
+`arm-none-eabi-addr2line -e build-3ds-c3d[-prof]/alephone.elf` (registers at 0x28), stop.
+
+**Cleanup (always):** delete `debug-perf` and `debug-c3d`; put back `$H/bb/prefs-user` as `Marathon 2
+Preferences`; reinstall the user's `.3dsx` if a launch replaced it (ask which; the shipping build is
+`/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/alephone.3dsx`); kill leftover 3dslink processes.
+
+**Record:** `PERF.md` "Stage 10 B-b" (a "Console (New 3DS), <date>" part), `CITRO3D_DESIGN.md` 5.7.10
+items 2-5 and section 10 item 16, plan B above.
+
+## Fallback exit runbook (piece A7 on the console; when the user is back)
+
+**Run on 2026-10-26: every test passed; results in items 14-16 and plan A item 7 above.**
+
+Written 2026-10-26 (overnight, no console). Piece A7 (`stage10-c3d`, `db10adee1`; design
+`CITRO3D_DESIGN.md` 5.6.3 step 3a) changes how the fatal fallback ends: instead of a bare
+`svcExitProcess()` (the system's "An error has occurred forcing the software to close. The
+system will now restart." in A6, item 14) it runs `gfxExit()` (software build only),
+`aptExit()` and `APT_CloseApplication` (through `__system_retAddr`), behind a 5 s watchdog.
+**Everything here is UNVERIFIED on the console**: that the missing APT close was the cause,
+that `aptExit()` off the main thread ends cleanly on hardware, and whether `gspExit` matters.
+Driving as in "How to drive the console"; setup, flag swaps and log fetching exactly as
+`CONSOLE-SESSION-A6.md` "Setup", with `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw/a7`
+(`mkdir -p $H`) and the user's own preferences (HUD + Map @60: the modes fire at the main
+menu, 20 s after the first present). Every run starts from the **Homebrew Launcher** (not
+3dslink: the raw fallback lines are only on the card, and a 3dslink launch overwrites
+`sdmc:/3ds/alephone.3dsx`).
+
+**Builds.** Both from the `stage10-c3d` worktree, where A7 is:
+`build-3ds/alephone.3dsx` (software renderer, A7) and `build-3ds-c3d/alephone.3dsx` (GPU
+present, A7). **Not** the main checkout's `build-3ds` (`3ds-port`, the shipping build: it does
+not have A7). Check first: `cmake --build build-3ds && cmake --build build-3ds-c3d` (nothing to
+do / 0 warnings), and `$DEVKITARM/bin/arm-none-eabi-nm build-3ds/alephone.elf | grep -ciE
+'citro|C3D_|a1_c3d'` prints 0.
+
+**Pass for F1-F3:** the port's error screen where it can be drawn (software build; with the
+GPU present up nothing is drawn by design, the top screen stays frozen until the exit), then
+the **Homebrew Launcher** comes back and Aleph One launches again from it; **no** system
+restart message, **no** Luma exception screen, **no new Luma dump** (dumps 0-6 exist:
+`/luma/dumps/arm11/`, list it before and after); silent (listen after the exit and after the
+relaunch). After each run fetch `log.txt` into `$H/F<n>.log` before the next launch and check
+its boot lines: `[3ds] debug-fatal: mode N ...` must match the run.
+
+0. **F0, d7 (read off F1's log, no extra run):** the boot line `[3ds] env: homebrew <0|1>,
+   run flags 0x<hex> (aptworkaround <0|1>, aptreinit <0|1>, aptchainload <0|1>), return address
+   <set|null>`. Record it in `CITRO3D_DESIGN.md` 5.6.4 item 6. Prediction from libctru's
+   `aptExit()` (`apt.c`:371-440): `aptreinit 0` and no close order give the close branch, i.e.
+   the line `fallback exit: APT_CloseApplication via __system_retAddr` below. `aptreinit 1` gives
+   `APT_Finalize` and `svcExitProcess (aptExit left __system_retAddr unchanged: ...)`: record it;
+   **expect the restart then** (libctru would call the loader's return address after freeing
+   the heap, which the fallback cannot do: design 5.6.3 step 3a.4), and report it as the
+   finding rather than running F2/F3 blind. Azahar shows `homebrew 0, run flags 0x0`, return
+   address null.
+1. **F1, mode 7, software build** (install `build-3ds/alephone.3dsx` of the worktree as
+   `/3ds/alephone.3dsx`; `debug-fatal` = `scripts/3ds/tests/fatal/mode-7.cfg`). The strongest
+   case: the screen is drawn, and the exit has `gfxExit` + APT close. Expected log tail (Azahar
+   order): `fatal error on thread N: handed to the main thread`, `not acknowledged in 5 s; shown
+   on this thread`, `ERROR: debug-fatal mode 7`, `error screen d6: thread other ...`, (A pressed)
+   `fallback exit: starting the 5 s watchdog`, `fallback exit: gfxExit`, `fallback exit: should
+   close 0, run flags ... ; aptExit`, `fallback exit: APT_CloseApplication via __system_retAddr`.
+   The user: the screen reads "debug-fatal mode 7 / A second thread failed holding a lock the
+   main thread needs"; one A; then the launcher.
+2. **F2, mode 6b, GPU build** (install `build-3ds-c3d/alephone.3dsx`; `mode-6b.cfg`): `fatal
+   error on thread N: handed`, `not acknowledged`, `error screen: citro3d still up (fallback off
+   main): logged only`, `starting the 5 s watchdog`, **no** `gfxExit` line, the `aptExit` line,
+   `APT_CloseApplication via __system_retAddr`. No screen (by design), so no A: the exit follows
+   within about a second of the 5 s timeout. Also the DSP check from A6 B6 that the restart
+   prevented: silent after the exit, normal sound after the relaunch.
+3. **F3, mode 10, GPU build** (`mode-10.cfg`): the same lines as F2 (the error is
+   `debug-fatal mode 4`'s text). Main sleeps 7 s; the exit should come at about 5 s, before it
+   wakes, so no `the request was taken back` line is expected.
+
+**Reading a failure (stop after the first; do not retry blindly; ask the user to power-cycle
+if it hangs).**
+- `fallback exit: watchdog fired (stuck in <step>); svcExitProcess`: that step hung on
+  hardware; the restart that follows is the old behaviour. Record the step.
+- `fallback exit: APT_CloseApplication returned; svcExitProcess`: `APT_CloseApplication` did
+  not end the process; the restart that may follow is the old path. Record it.
+- `watchdog fired (stuck in APT_CloseApplication)`: NS took more than 5 s to end the process
+  and the watchdog raced it; record whether the launcher came back anyway.
+- The `APT_CloseApplication via __system_retAddr` line, then the system's restart message: the
+  APT close was not enough (or not the cause). If F1 passed and F2/F3 restart, `gspExit` matters
+  in the GPU build (5.6.3 step 3a.2: that build ends holding the GPU right, GSP event thread
+  alive): the next candidate is a bare `GSPGPU_ReleaseRight()` on the fallback thread before
+  `aptExit` (one IPC, no citro3d call, no thread join; critic round 1, 5), a new piece. If F1 restarts too: the remaining candidates are
+  the other `__appExit` calls (`fsExit`, `hidExit`, `srvExit`) or the heap teardown itself; then
+  the narrower fix (make the fallback rarer: a longer acknowledgement bound, main serving more
+  often; 5.6.3 step 3a "Rejected" C2) is the next decision, the user's.
+- Luma's exception screen or a new dump: fetch it (registers at 0x28; `arm-none-eabi-addr2line
+  -e build-3ds[-c3d]/alephone.elf`), record, stop.
+- `apt hook <NAME> on the fallback thread: ignored` lines are expected only if HOME (or POWER)
+  is pressed while the fallback runs; don't press it in F1-F3 (optional F4 below).
+4. **F4 (optional, only if F1 passed):** F1 again, and press HOME while the fallback screen is
+   up, then back, then A. Expected: `apt hook ONSUSPEND on the fallback thread: ignored` (and
+   ONRESTORE), the error text still there after HOME (on main it survives a HOME round trip,
+   script 25 in Azahar; on the fallback thread this is untested), then F1's exit lines and the
+   launcher. This is deferred item (4) of piece 2's review, which A7 addresses; no Azahar script
+   reaches it (HOME during the fallback), so the console is its only test.
+5. **F5 (optional, only if F1 passed):** F1 again, and choose **HOME > Close** while the
+   fallback screen is up. The only way to reach `aptExit()`'s close-order branch and its ONEXIT
+   hook off main: expected `apt hook ONSUSPEND on the fallback thread: ignored`, the screen's
+   loop ends (`aptMainLoop()` false), then the exit lines with `should close 1`, `apt hook ONEXIT
+   on the fallback thread: ignored` (expected: the fallback never closes the log fd; its absence
+   is a finding), `APT_CloseApplication
+   via __system_retAddr`, then the launcher (as every HOME > Close in A6, item 16), no restart.
+
+**Then part C (3dslink mirror, item 15) with the new step, and part D only if the user says
+yes.** Part C (`build-3ds-c3d`, over 3dslink this time, HUD + Map @60):
+- **C1 (no sudo):** put an empty `debug-input` on the card (`$FTP IP put` an empty file as
+  `/3ds/alephone/debug-input`). Launch with `.../build-3ds/hw/sprint8/launch.sh IP
+  build-3ds-c3d/alephone.3dsx $H/C1-mirror.txt` in the background (kill stale 3dslink first:
+  `pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`), start a game, then `kill -STOP` the host's
+  3dslink process and have the user **move both sticks continuously** (circles) for 60 s, up to
+  4 min if no line has appeared, then `kill -CONT`. Why: the stall path needs the console's send
+  buffer full, and a stopped 3dslink leaves the host kernel's receive buffer in the way. Host
+  reproduction (`scripts/3ds/tests/link-stall/run.sh`, macOS loopback, tee_write's loop copied):
+  388-550 KB are accepted before the stall path runs, whatever buffer sizes are asked for;
+  that is 38-54 min at the in-game ~170 B/s, and about 25-35 s at the ~16 KB/s that `debug-input`
+  logs with both sticks moving (measured in Azahar — non-authoritative, 2026-10-26, a scripted
+  stick wiggle: 4796 input lines, 241 KB in 15.1 s). The Wi-Fi path and the 3DS's own socket
+  buffer sizes are UNVERIFIED, hence the 4 min ceiling.
+- **C2 (if C1 shows no stall line; needs sudo, so the user runs it in Terminal.app):** drop the
+  console's packets on the Mac, a real "stalled link" (no ACKs, so only the console's send
+  buffer has to fill):
+  `printf 'block drop quick from IP to any\nblock drop quick from any to IP\n' | sudo pfctl -a com.apple/a1-stall -f -`
+  with `IP` replaced by the console's address the user gave this session (it was
+  192.168.100.72; a stale address blocks nothing and C2 would read as "no stall")
+  then `sudo pfctl -E` (note the token it prints); keep the sticks moving for 60 s; then
+  `sudo pfctl -a com.apple/a1-stall -F rules` and `sudo pfctl -X <token>`. Check with
+  `sudo pfctl -a com.apple/a1-stall -s rules` (empty afterwards). The rule also blocks ftpd: remove
+  it before fetching the log. (macOS's `/etc/pf.conf` loads `anchor "com.apple/*"`, so the
+  anchor is evaluated.)
+- **Pass (C1 or C2):** the game keeps running (the card log's `[c3d] stats` lines keep coming
+  each second through the freeze), the card's `log.txt` has `[3ds] 3dslink mirror stopped
+  (stalled); the SD log goes on` (with C2, `(host went away)` is possible if TCP gives up
+  first: record which; both mean the game did not freeze), and the transcript stops there.
+- Afterwards: delete `debug-input`; put the wanted `.3dsx` back (the 3dslink launch overwrote it).
+
+**Cleanup (always):** delete `debug-fatal` and `debug-input`; the user's preferences stay
+(F1-F3 do not change them); reinstall the shipping build
+(`/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/alephone.3dsx`, `3ds-port`) unless the user
+wants another; kill leftover 3dslink processes; remove any pf rule (C2).
+
+**Record:** `NEXT-SPRINT.md` item 14 (the F runs, "Console (New 3DS), <date>"), item 15 (part
+C), plan A item 7; `CITRO3D_DESIGN.md` 5.6.4 items 5 and 6 (VERIFIED or REFUTED); items 14-15
+text mirrored identically to `3ds-port`. If F1-F3 pass, carrying A7 to `3ds-port` (the shipping
+build still has the old fallback) is the user's decision (cherry-pick of the A7 commit, or the
+next merge).
+
+## M0 console check (the readback calibration on hardware; when the user is at the console)
+
+**Not run yet; deferred by the user (2026-10-27); folded into the "M1 console check" below (its steps 1, 1b, 2, 3), which supersedes this one.** Written 2026-10-27. Settles `CITRO3D_DESIGN.md` section 10 item 8 for the
+renderer's readback (every M1-M5 frame is read back this way) and takes `R` on the console. Driving
+as in "How to drive the console" (ask the IP; ftpd for card files, the Homebrew Launcher netloader
+(Y) for launches). About 6 launches, ~20 min.
+
+**Builds** (from the `stage10-c3d` worktree at `port-stage10-M0` or later): `build-3ds-c3d-prof`
+(all runs below). Check first: `cmake --build build-3ds-c3d-prof` (nothing to do / 0 warnings).
+**Setup:** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw`, `mkdir -p $H/m0`, a run helper
+from G0-b's: `sed 's#build-3ds/hw/g0b/#build-3ds/hw/m0/#' $H/g0b/run.sh > $H/m0/run.sh; chmod +x
+$H/m0/run.sh`. Kill stale 3dslink first. ftpd: fetch the user's `Marathon 2 Preferences` into
+`$H/m0/prefs-user` (put back at the end), then `$H/sprint8/setprefs.sh IP 0 30` (HUD + Map @30).
+
+**1. Calibration, HUD + Map (400x240).** ftpd: `debug-perf` = `$H/sprint8/debug-perf-L0`,
+`debug-c3d` = `scripts/3ds/tests/c3d/m0-readback-cal.cfg` (copied to files named `debug-perf` /
+`debug-c3d` first, as in the B-a runbook). `run.sh build-3ds-c3d-prof m0-cal-hm`; the user presses A
+twice; the game quits after the BENCH line. **Pass:** `[c3d] readback_cal summary: 30 frames,
+orientation ok 30, current frame ok 30, channels ok 30, mismatched pixels 0 (sentinel 0), skipped 0`
+(and every `readback_cal k=` line says `mismatched 0 (sentinel 0)`). Fetch `c3d-rbcal-0.bmp` and
+`c3d-rbcal-29.bmp` into `$H/m0/` (red top left, green top right, blue bottom left, white bottom
+right).
+**1b. The resize path (revise 1):** `debug-c3d` = `m0-readback-cal-resize.cfg` (odd frames 392x232:
+the target is deleted and created every frame, out of frame); same run, same pass line; the log shows
+`[c3d] view: ... target deleted` / `unlinked RGBA8 target` pairs and no Luma dump.
+**2. The same in Classic (480x240):** `setprefs.sh IP 2 30`, `run.sh build-3ds-c3d-prof m0-cal-cl`.
+Same pass line. Then `setprefs.sh IP 0 30`.
+**3. `R` on the console (optional, 3 runs):** `debug-c3d` = `m0-null.cfg`, `debug-perf-L<N>` for N =
+0, 6, 20: `run.sh build-3ds-c3d-prof m0-null-L<N>`. Read `c3d_null` and `render` from the BENCH
+lines (`perf-table.py`) and the `[c3d] null` count lines (they must equal Azahar's: the counts are
+deterministic). G2-b's front-end part: `R ≤ 3 ms`.
+**End:** delete `debug-perf` and `debug-c3d` and the `c3d-*.bmp` from the card, put
+`$H/m0/prefs-user` back.
+
+**Reading a failure:** a line with `orientation rows flipped` / `columns flipped`: the hardware
+disagrees with Azahar; record the line, stop: the fix (design 7, M0 block) is one change in
+`back/view.cpp` and one re-run, made in the next session, and Azahar's result must be re-checked
+against it. `transposed` or `unknown`: record the corners, stop (a design change). `current frame
+NO`: record which `k` the centre shows and the `mismatched N (sentinel S)` counts (S > 0: the transfer
+had not finished when the CPU read; a missing retirement wait; wrong or missing corners with S = 0:
+the draw segment ran unflushed, design 0.3 "`C3D_FrameSplit(GX_CMDLIST_FLUSH)`" row), stop. `channels NO` with the clear right: the TEV constant's byte order; record, stop. A Luma dump:
+fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at 0x28), stop.
+
+
+## M1 console check, short version (15-20 min; when the user has little time)
+
+**Run and passed on the console 2026-11-02** (`PERF.md` "Stage 10 M1 — console, short check": calibration
+30/30 ok, walls 0 non-edge, sentinel 0, command words identical to Azahar; ties 440 / 380).
+Written 2026-10-27 (user's choice: start M2, defer the full check below). Two launches
+that settle what M2's texture uploads would otherwise build on blind: the readback on hardware, the GPU
+sync and cache order (Azahar completes transfers synchronously and has no CPU cache), and the ring
+buffers' physical addresses. **Run it before M2's texture upload code is written.** The rest of the full
+runbook below (Classic, `R`, the present check, the discard paths, L6/L20) waits for a longer session.
+
+**Needs:** the console on Wi-Fi, ftpd for two card files, then the Homebrew Launcher's netloader (Y)
+for each launch; the Mac side as in "How to drive the console". The console's preferences are left as
+they are, but the game must be in **HUD + Map** (Bottom Screen setting, the default).
+**Mac setup** (once): `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw; mkdir -p $H/m1`;
+`sed 's#build-3ds/hw/g0b/#build-3ds/hw/m1/#' $H/g0b/run.sh > $H/m1/run.sh; chmod +x $H/m1/run.sh`
+(it sends to 192.168.100.72; edit if the IP changed); `cmake --build build-3ds-c3d-prof` in the
+`stage10-c3d` worktree (tag `port-stage10-M1` or later; nothing to do / 0 warnings); kill stale 3dslink
+(`pgrep -fl '^/opt/devkitpro/tools/bin/3dslink'`).
+
+**1. Readback calibration** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf`
+and `scripts/3ds/tests/c3d/m0-readback-cal.cfg` as `/3ds/alephone/debug-c3d`. Close ftpd, Y in the
+launcher, `$H/m1/run.sh build-3ds-c3d-prof m1s-cal`; the user presses A twice (BEGIN NEW GAME); the
+game quits by itself after the BENCH line. **Pass:** `grep -a "readback_cal summary" $H/m1/m1s-cal.txt`
+shows `30 frames, orientation ok 30, current frame ok 30, channels ok 30, alpha ok 30, mismatched pixels
+0 (sentinel 0), skipped 0`.
+
+**2. Walls diff on L0** (~5 min). ftpd: put `scripts/3ds/tests/c3d/m1-diff-walls.cfg` as
+`/3ds/alephone/debug-c3d` (`debug-perf` stays). Same launch: `$H/m1/run.sh build-3ds-c3d-prof m1s-walls`.
+Then: `python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m1s-walls.txt --coverage walls --band-pct 2 --min-checks 20`.
+**Pass:** exit 0 (20 compared checks, 0 non-edge mismatches, `sentinel=0` everywhere, 0 discards), and
+`grep -a "draw: rings" $H/m1/m1s-walls.txt` ends in `physical range check ... ok`. **Record:** the
+`c3d-diff.py` table with `ties` / `tie_mismatch` (Azahar: 440 / 140; ≈ 0 mismatches would mean the 3DS
+treats pixels exactly on an edge as SW does), and the `[c3d] cmdbuf final` line (Azahar:
+`view_frame_words=952 draw_words=254 readback_words=8`; command words are deterministic, so a
+difference means something real).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf` and `/3ds/alephone/debug-c3d`. Optionally fetch
+`c3d-diff-*-walls-*.bmp` and `c3d-rbcal-*.bmp` into `$H/m1/`. Results to `PERF.md` ("Stage 10 M1 —
+console, short check") and `CITRO3D_DESIGN.md` section 10 item 8.
+
+**Reading a failure:** as the full runbook below ("Reading a failure"): `sentinel > 0` = the CPU read the
+staging before the transfer finished; whole spans missing in the C3D picture = stale ring data (a
+missing flush); rows/columns flipped = the readback orientation (one change in `back/view.cpp`). Any of
+these: record the log and stop; M2's upload code waits for the fix.
+
+## M1 console check (M0's readback calibration, then M1's walls diff, on hardware; when the user is at the console)
+
+**Not run yet.** Written 2026-10-27 for `port-stage10-M1`. It carries the deferred "M0 console
+check" (its steps 1, 1b, 2 and 3 are steps 1-4 here) and adds M1's walls diff. Azahar completes GPU
+transfers synchronously and has no CPU cache, so **this is the first real test of the renderer's sync
+and cache order**: the ring flushes, the flushing `C3D_FrameSplit` before the in-frame readback, the
+retirement wait and the invalidate (`CITRO3D_DESIGN.md` 0.3, 5.2, section 7 M1). Driving as in "How
+to drive the console" (ask the IP; ftpd for card files, the Homebrew Launcher netloader (Y) for
+launches). About 12 launches, ~50 min.
+
+**Builds** (from the `stage10-c3d` worktree at `port-stage10-M1` or later): `build-3ds-c3d-prof` for
+every run. Check first: `cmake --build build-3ds-c3d-prof` (nothing to do / 0 warnings).
+**Setup:** `H=/Users/dashielashie/Desktop/Aleph_3ds/build-3ds/hw`, `mkdir -p $H/m1`, a run helper
+from G0-b's: `sed 's#build-3ds/hw/g0b/#build-3ds/hw/m1/#' $H/g0b/run.sh > $H/m1/run.sh; chmod +x
+$H/m1/run.sh`. Kill stale 3dslink first. ftpd: fetch the user's `Marathon 2 Preferences` into
+`$H/m1/prefs-user` (put back at the end), then `$H/sprint8/setprefs.sh IP 0 30` (HUD + Map @30).
+The config files below are copied to a file named `debug-c3d` (and `debug-perf-L<N>` to
+`debug-perf`) before each put, as in the B-a runbook.
+
+**1. Calibration, HUD + Map (M0 step 1, now with the alpha check).** `debug-perf` = L0, `debug-c3d` =
+`scripts/3ds/tests/c3d/m0-readback-cal.cfg`; `run.sh build-3ds-c3d-prof m1-cal-hm`; the user presses A
+twice; the game quits after the BENCH line. **Pass:** `[c3d] readback_cal summary: 30 frames,
+orientation ok 30, current frame ok 30, channels ok 30, alpha ok 30, mismatched pixels 0 (sentinel
+0), skipped 0`. Fetch `c3d-rbcal-0.bmp` / `c3d-rbcal-29.bmp` into `$H/m1/`.
+**2. The resize path (M0 step 1b):** `debug-c3d` = `m0-readback-cal-resize.cfg`; same pass line; `target
+deleted` / `unlinked RGBA8 target` pairs in the log, no Luma dump.
+**3. Classic (M0 step 2):** `setprefs.sh IP 2 30`, `run.sh build-3ds-c3d-prof m1-cal-cl` with
+`m0-readback-cal.cfg`. Same pass line, or `view: ... is not supported ... calibration skipped` if
+Classic's world view is larger than the readback handles (record which). Then `setprefs.sh IP 0 30`.
+**4. `R` on the console (M0 step 3, optional, 3 runs):** `debug-c3d` = `m0-null.cfg`, `debug-perf-L<N>`
+for N = 0, 6, 20: `run.sh build-3ds-c3d-prof m1-null-L<N>`. `c3d_null` and `render` from the BENCH
+lines (`perf-table.py`); the `[c3d] null` counts must equal Azahar's (`PERF.md` "Stage 10 M0").
+**5. M1 walls diff, L0 / L6 / L20 (3 runs):** `debug-c3d` = `scripts/3ds/tests/c3d/m1-diff-walls.cfg`,
+`debug-perf-L<N>`: `run.sh build-3ds-c3d-prof m1-walls-L<N>`. Then on the Mac:
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m1-walls-L<N>.txt --coverage walls --band-pct 2 --min-checks 20`.
+**Pass:** exit 0, i.e. 20 compared checks, `cov_mismatch` non-edge 0 in every one, edge ≤ 2 % of the
+band, **`sentinel=0`** on every line, 0 discards; `[c3d] cmdbuf final ... prog_restore_mismatch=0`,
+`discards=0/0/0/0/0`. Record per level: the `c3d-diff.py` table, the `ties` / `tie_mismatch` totals
+(Azahar: L0 440 / 140, L6 420 / 60, L20 92 / 72, `PERF.md` "Stage 10 M1"), the `[c3d] cmdbuf final`
+line (command words are deterministic: `draw_words=254`, `view_frame_words` 952 / 1 072 / 564 as in
+Azahar, else record), and the `[c3d] draw: rings: ... physical range check ... ok` line. Fetch
+`c3d-diff-*-walls-{sw,c3d}.bmp` (dump 1) into `$H/m1/`.
+**6. The present after view frames (1 run):** `debug-c3d` = `m1-present-diff.cfg`, no `debug-perf`;
+`run.sh build-3ds-c3d-prof m1-present`; the user waits ~1 minute at the menu demo (or plays a little),
+then HOME > Close. **Pass:** `present_diff final: N checks, 0 with RGB differences` and walls checks as
+in 5 (`c3d-diff.py ... --min-checks 1`); the top screen looks normal throughout.
+**7. Discard paths on hardware (3 runs, L0):** `m1-gxq2.cfg` (20 `discarded (gx)`), `m1-reserve-mid.cfg`
+(draws issued, then 20 `discarded (cmdbuf)`), `m1-ring-small.cfg` (20 `discarded (ring)`). **Pass:**
+the expected discards, the game runs on in SW, no hang, no Luma dump.
+**End:** delete `debug-perf`, `debug-c3d` and the `c3d-*.bmp` from the card; put `$H/m1/prefs-user`
+back. Results go to `PERF.md` (a "Stage 10 M1 — console" section) and `CITRO3D_DESIGN.md` section 10
+items 6 and 8.
+
+**Reading a failure.** Steps 1-3: as the "M0 console check" above (orientation / current frame /
+channels; S > 0 = the transfer had not finished when the CPU read; wrong corners with S = 0 = the draw
+segment ran unflushed). New: `alpha NO` with everything else ok: the readback or the TEV constant
+drops alpha; record the quad's pixels from `c3d-rbcal-0.bmp`, stop. Step 5:
+- `sentinel > 0`: the readback was read before the transfer finished (retirement) — stop, record.
+- non-edge mismatches with B **missing** coverage in whole polygons or spans (compare the BMP pair):
+  the ring bytes were not flushed before the GPU read them (stale vertices/indices) — stop, record
+  the frame and the dumps.
+- non-edge mismatches of single pixels on edges shared by two walls (`tie_mismatch` normal): float24
+  position precision (the shader multiplies clip by w; design 2.1 UNVERIFIED) — record the pixels and
+  the dumps; this is a design question for M2, not a stop.
+- `tie_mismatch` ≈ 0 where Azahar had ~30-60 % of `ties`: PICA's tie rule matches SW's (good news,
+  record it); `tie_mismatch` ≈ Azahar's: PICA excludes top-edge ties as Azahar does. Either way record.
+- `skipped (down)` on every check with `rings: ... physical range check FAILED` in the log: the linear
+  heap sits beyond the 28-bit offsets on this console; record the addresses, stop (a design change).
+- A Luma dump: fetch it, `arm-none-eabi-addr2line -e build-3ds-c3d-prof/alephone.elf` (registers at
+  0x28), stop.
+
+## M2 console check, short version (15-20 min; when the user is at the console)
+
+**Run and passed on the console 2026-11-03** (`PERF.md` "Stage 10 M2 — console, short check": both runs exit 0,
+non-edge 0, `sentinel` 0, 0 discards, `promo 11/10`, command words identical to Azahar; checks identical at equal
+coverage, but L0's walls coverage cycles on the console (something in view moves; likely, not verified, an effect
+of the NPC fight L0 starts with; 69 pixels, `within_nb` ±0.01 point), so "the 20 identical" holds per view, not
+across the run: in later runbooks on L0, compare checks at equal coverage. Press A at once at the menu: its demo
+otherwise takes the diff frames.)
+Written 2026-11-02 for `port-stage10-M2`. Azahar has no CPU cache and copies textures
+synchronously, so this is the first hardware test of M2's texture path: the ranged flush after each
+conversion into a linear texture, and the VRAM promotion (`C3D_SyncTextureCopy` RAW copy, linear → VRAM)
+queued before the clear (design section 7 "M2 specification", "Upload model"; Review log "M2 commit
+review", "Needs console verification"). Setup, driving and the `$H/m1/run.sh` helper as in "M1 console
+check, short version" above (HUD + Map; `cmake --build build-3ds-c3d-prof` at `port-stage10-M2` or later).
+
+**1. Textured diff on L0** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf`
+and `scripts/3ds/tests/c3d/m2-diff.cfg` as `/3ds/alephone/debug-c3d`. Y in the launcher,
+`$H/m1/run.sh build-3ds-c3d-prof m2s-l0`; A twice; the game quits after the BENCH line. Then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m2s-l0.txt --colour walls,floors --nonedge-pct 0.1 --within 98 --tol 2 --mean 1.0 --min-checks 20`.
+**Pass:** exit 0, `sentinel=0` on every line, 0 discards, and **the 20 checks identical to each other**
+(the benchmark parks the player, so the view is the same in every check; Azahar's 20 are identical).
+Check 1 samples the new linear textures; the walls check of frame 1 promotes 8 textures and the floors
+check the other 3, so from check 2 on everything samples the VRAM copies. A check 1 worse than the rest
+= a missing/short conversion flush; checks 2+ worse than check 1 = the promotion copy. Close to Azahar
+is expected but not required to the digit: the console excludes more edge-tie pixels than Azahar (M1
+short check: `tie_mismatch` 380 vs 140), which moves `cov_mismatch` edge counts and can move the colour
+figures slightly. Azahar per check (`PERF.md` "Stage 10 M2"): walls `covered=40140/40137
+cov_mismatch=7/0 ties=22 tie_mismatch=7 within_nb=99.68% mean_nb=0.05 max_nb=60`, floors
+`covered=52624/52627 cov_mismatch=9/0 ties=35 tie_mismatch=9 within_nb=99.85% mean_nb=0.02 max_nb=32`;
+`[c3d] tex … [final]`: `conv 11 (704 KiB) promo 11/0 evict 0 alloc-fail 0 discards 0`.
+
+**2. Deferred promotions** (~5 min). ftpd: `scripts/3ds/tests/c3d/m2-gxq4.cfg` as `debug-c3d`
+(`debug-perf` stays); `$H/m1/run.sh build-3ds-c3d-prof m2s-gxq4`; same `c3d-diff.py` command. **Pass:** exit 0, 0 discards, `[c3d] tex … [final]` with `promo 11/10` (11 done, 10 deferred: one
+promotion per view frame, as Azahar), and the same figures in every check (here the textures move to
+VRAM one at a time over the first 6 checks, so a bad copy would show as checks drifting).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf` and `/3ds/alephone/debug-c3d`. **Record** in `PERF.md`
+("Stage 10 M2 — console, short check") the two tables, the `[c3d] tex … [final]` and `[c3d] cmdbuf final`
+lines (Azahar: `view_frame_words=1288 draw_words=268 readback_words=8`; command words are deterministic, so
+a difference means something real), and the `ties` / `tie_mismatch` per class. (The upload cost is not
+measured here: diff frames are not benchmark frames, so `c3d_tex` reads 0 in the BENCH line.) Then
+`CITRO3D_DESIGN.md` M2 status and the Review log entry "M2 commit review" ("Needs console verification"). **Reading a failure:** isolated wrong texels or garbage in check 1
+only = the conversion flush; a texture wrong from the frame after its promotion = the TextureCopy
+(arguments: `texture.o` `C3D_TexLoadImage`); a crash or hang at a promotion = the GX queue order.
+Record the log and stop; M3 waits for the fix.
+
+
+## M3 console check, short version (15-25 min; when the user is at the console)
+
+**Run on the console 2026-11-07, steps 1-2 passed (step 3, the L08 film, not run;
+`PERF.md` "Stage 10 M3-M5 — console, short checks").** Written 2026-11-05 for `port-stage10-M3`. Azahar cannot answer two of M3's questions (design
+section 10 item 6, "M3:"): **PICA's TEV rounding** (the lit colours assume Azahar's `(a·b)/255`; host prediction
+≤ 2 per channel, mean ≤ 0.47) and **the TEV alpha ×2 clamp** (`alpha_x2 1`; not M3's default, but M5's static
+will rely on it). It is also the first hardware run of **unit 1's unbinding after a lit frame** (a direct store
+into citro3d's context, checked at run time: `C3D_TexBind(1, NULL)` would dereference NULL + 12 on hardware,
+design 0.3; with unit 1 left enabled, Azahar's software backend segfaults at the next present). Setup, driving and the `$H/m1/run.sh` helper as in "M1
+console check, short version" (HUD + Map; `cmake --build build-3ds-c3d-prof` at `port-stage10-M3` or later).
+**Press A at once at the menu** (its demo otherwise takes the first diff frames; M2 console check). On L0
+compare checks **at equal coverage** (L0's walls coverage cycles on the console: M2 console check).
+
+**1. Lit diff on L0** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf` and
+`scripts/3ds/tests/c3d/m3-diff.cfg` as `/3ds/alephone/debug-c3d`. Y in the launcher,
+`$H/m1/run.sh build-3ds-c3d-prof m3s-l0`; A twice; the game quits after the BENCH line. Then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m3s-l0.txt --colour walls,floors --shading lit --nonedge-pct 0.1 --within 98 --tol 4 --mean 1.5 --min-checks 20`.
+**Pass:** exit 0, `sentinel=0` on every line, 0 discards, `[c3d] shade: LUT built (linear, 65536 B)` then
+`[c3d] shade: LUT promoted to VRAM` once each, `[c3d] shade: citro3d context layout confirmed`, and in
+`[c3d] cmdbuf final` `tex_restore_mismatch=0 tex1_restore_mismatch=0 tev1_not_init=0 unit1_left_bound=0
+prog_restore_mismatch=0`, `view_frame_words=1304 draw_words=282
+readback_words=10` (command words are deterministic: a difference means something real). Azahar (host GPU)
+per check: walls `covered=40140/40137 cov_mismatch=7/0 ties=22 tie_mismatch=7 within_nb=99.69% mean_nb=0.21
+max_nb=60`, floors `covered=52624/52627 cov_mismatch=9/0 ties=35 tie_mismatch=9 within_nb=99.87% mean_nb=0.71
+max_nb=21` (M2 full bright on the same view: `mean_nb` 0.05 / 0.02, so lighting adds 0.16 / 0.69). **Reading
+it:** the console's `mean_nb` against Azahar's measures PICA's rounding (a mean well above 1.5, or `within_nb`
+under 98 % while coverage is fine, = a different multiply: record and stop); coverage holes inside polygons =
+the alpha test (should not happen with scale 1).
+
+**2. The ×2 clamp** (~5 min). ftpd: `scripts/3ds/tests/c3d/m3-alpha2.cfg` as `debug-c3d` (`debug-perf` stays);
+`$H/m1/run.sh build-3ds-c3d-prof m3s-alpha2`; the same `c3d-diff.py` command. **Clamps** (Azahar's answer on
+both backends): the same figures as launch 1 at equal coverage, `non-edge 0`. **Wraps:** non-edge coverage
+mismatches (self-luminous texels, A 128 × 2 → 0, dropped by the alpha test): exit 1 on `non-edge`. Either way
+M3 is unaffected (its default is scale 1); record which, for M5 (design 4.3 static).
+
+**3. Optional, dark areas and the weapon flash: the L08 film** (~6 min). ftpd: put
+`tests/replays/Marathon 2/Tooncinator Films/M2 L08 Nuke and Pave.682.filA` as `/3ds/alephone/c3d-film.filA`,
+`scripts/3ds/tests/c3d/m3-film-l08.cfg` as `debug-c3d`, and **delete `debug-perf`**;
+`$H/m1/run.sh build-3ds-c3d-prof m3s-l08` (the film starts by itself and the game quits at its end); the same
+command with `--min-checks 200`. **Pass:** exit 0; the summary's `c3d_flash_checks` > 0 (Azahar: 8,
+`c3d_m_max=81920`). Azahar: walls 99.69 % / mean 0.60, floors 99.52 % / 0.81, 0 ring refusals.
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d` and `c3d-film.filA`. **Record** in
+`PERF.md` ("Stage 10 M3 — console, short check") per launch the class table, the per-check figures at equal
+coverage, the `[c3d] cmdbuf final` line and the lit counters; then the design's M3 status, section 10 item 6
+("M3:") and the Review log. Note any hang at a present or at the exit after a lit frame (none expected:
+unit 1 is disabled again before the present).
+
+## M4 console check, short version (20-30 min; when the user is at the console)
+
+**Run on the console 2026-11-07, steps 1-4 passed (step 3's software rerun and Classic not run;
+`PERF.md` "Stage 10 M3-M5 — console, short checks").** Written 2026-11-06 for `port-stage10-M4`. Azahar cannot answer M4's hardware questions (design
+section 10 item 6, "M4:"): **PICA's float24 texcoords on rectangles** (the host model gives 99.85 % texel agreement
+at `rect_bias` 1, UNVERIFIED), **the constant-colour blend** of tinted rectangles (exact in Azahar), and **play mode
+on hardware**: the readback and copy cost per frame and HOME > Close / suspend with play frames in flight. It can
+follow the "M3 console check, short version" in the same session (same setup). Setup, driving and the `$H/m1/run.sh`
+helper as in "M1 console check, short version" (HUD + Map; `cmake --build build-3ds-c3d-prof` at
+`port-stage10-M4`). **Press A at once at the menu** (the demo otherwise takes the first frames).
+
+**1. Sprites and weapons diff on L0** (~5 min). ftpd: put `$H/sprint8/debug-perf-L0` as
+`/3ds/alephone/debug-perf` and `scripts/3ds/tests/c3d/m4-diff.cfg` as `/3ds/alephone/debug-c3d`;
+`$H/m1/run.sh build-3ds-c3d-prof m4s-l0`; A twice; the game quits after the BENCH line. Then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m4s-l0.txt --colour sprites,weapons --shading lit --nonedge-pct 0.5 --within 98 --tol 4 --mean 1.5 --min-checks 20 --min-covered 2000 --min-covered-checks 10`
+and `… --colour frame --shading lit --within 97 --tol 4 --mean 255 --min-checks 20`. **Pass:** both exit 0,
+`sentinel=0`, 0 discards, the five restore counters 0. Azahar (host GPU), pooled over 20 checks: sprites 99.95 %
+within, 79 non-edge (0.159 %), `mean_nb` 0.61; weapons 100 %, max 1; frame 99.70 %; `view_frame_words=3432
+draw_words=282 readback_words=10`. **Reading it:** sprite coverage holes or a one-texel shift along the sprites'
+columns (non-edge well above 0.5 %, `max_nb` large) = PICA's texcoord precision differs from the float24 model:
+record, then retry with `rect_bias 2` (and 0) added to the config; the default changes only on the user's word.
+
+**2. Tinted (the invisible compilers)** (~5 min). ftpd: put the folder `scripts/3ds/tests/plugins/Invisibility
+Test` into the scenario's `Plugins/` folder (Azahar: `/3ds/alephone/Marathon2/Plugins/`; check the name with
+`scripts/3ds/sd-ftp.sh IP ls /3ds/alephone`), `m4-tinted.cfg` as `debug-c3d` (`debug-perf` L0 stays);
+`$H/m1/run.sh build-3ds-c3d-prof m4s-tinted`; then `c3d-diff.py log $H/m1/m4s-tinted.txt --colour tinted --shading
+lit --strict tinted --nonedge-pct 0.5 --within 98 --tol 3 --mean 255 --min-checks 20 --min-covered 2000
+--min-covered-checks 10`. **Pass:** exit 0; `blend_sets` = `blend_restores` (Azahar 40 / 40). Azahar: 100 % exact
+(`max 0`) on 59 040 pixels. A uniform small offset (max 1-2) = PICA's blend rounding: record; holes = the A8 mask.
+
+**3. Play mode on L20, with play checks** (~5 min). ftpd: remove the plugin folder; `$H/sprint8/debug-perf-L20` as
+`debug-perf`, `m4-play.cfg` as `debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m4s-play20`; then
+`python3 -I scripts/3ds/tests/c3d-diff.py play $H/m1/m4s-play20.txt --min-play-checks 1`. **Pass:** exit 0;
+`[c3d] play final` with `c3d` = `frames`, `sw=0`, all discards and skips 0, `sentinel=0`. Azahar: 868 C3D frames,
+28 checks at 99.70 %. **Record** the BENCH line: `c3d_draw` + `c3d_readback` against the software renderer's
+`render` on the same spot (put `m4-bench-sw.cfg` as `debug-c3d` and rerun as `m4s-sw20`). Azahar: 8.37 + 2.18 ms
+vs 8.64 ms (+22 % busy); the console's copy cost is what M6 removes.
+
+**4. HOME, sleep and Close in play mode** (~5 min). ftpd: delete `debug-perf` (`m4-play.cfg` stays);
+`$H/m1/run.sh build-3ds-c3d-prof m4s-home`; start a new game (A), walk a few seconds; HOME, back to the game; close
+the lid 5 s, open; then HOME > Close. **Pass:** the game resumes each time with the picture right, the close takes
+under ~2 s, the log ends with `[c3d] play final …` and `real gfxExit returned`; no Luma dump.
+
+**Optional: Classic.** `m4-play.cfg`, Settings > Bottom Screen > Classic, `debug-perf-L20`; the same play gate
+(Azahar: 840 C3D frames, 28 checks at 99.70 %, 29.03 fps with one 366 ms hitch: compare the console's `max`).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d` and the plugin folder. **Record** in
+`PERF.md` ("Stage 10 M4 — console, short check") per launch the class table, the `[c3d] cmdbuf final` and
+`[c3d] play final` lines and the BENCH lines; then the design's M4 status, section 10 item 6 ("M4:") and the
+Review log.
+
+## M5 console check, short version (25-35 min; when the user is at the console)
+
+**Run on the console 2026-11-07: steps 1, 3 (counters) and 4 passed; step 2 failed its strict gate narrowly
+(97.84 % against 98 %, the predicted float24 outcome); static not seen by eye (`PERF.md` "Stage 10 M3-M5 —
+console, short checks").** Written 2026-11-07 for `port-stage10-M5`. Azahar cannot answer M5's hardware questions (design
+section 10 item 6, "M5:"): **the landscape span path's columns under PICA's float24** (Azahar's software backend
+misses the strict 98 % by one column on the look-up; host GPU exact), **the 2 MiB landscape part** (its conversion
+and `TextureCopy` at level start, whether VRAM finds a contiguous 2 MiB block, the cost of sampling it from FCRAM
+when the promotion is blocked), **`MODULATE` on masked static draws**, and **G2-b** (readback vs SW busy on the
+console). It can follow the M3/M4 short checks in the same session. Setup, driving and the `$H/m1/run.sh` helper as
+in "M1 console check, short version" (HUD + Map @30; `cmake --build build-3ds-c3d-prof` at `port-stage10-M5`).
+**Press A at once at the menu.**
+
+**1. Landscapes on L6** (~5 min). ftpd: put `$H/sprint8/debug-perf-L6` as `/3ds/alephone/debug-perf` and
+`scripts/3ds/tests/c3d/m5-diff.cfg` as `/3ds/alephone/debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m5s-l6`; then
+`python3 -I scripts/3ds/tests/c3d-diff.py log $H/m1/m5s-l6.txt --colour landscape --shading lit --strict landscape --nonedge-pct 0.1 --within 98 --tol 2 --mean 255 --min-checks 20 --min-covered 2000 --min-covered-checks 10`
+and `… --colour frame --shading lit --within 97 --tol 4 --mean 255 --min-checks 20`. **Pass:** both exit 0,
+`sentinel=0`, 0 discards, restore counters 0. Azahar (host GPU): 254 700 landscape pixels, strict **100 %**; frame
+99.58 %. **Record** the `[c3d] tex: level start gen 1: …` line (Azahar: 2 MiB part converted in frame 0) and the
+log's timestamps around it (the conversion's time), and the last `tex: entries` line (`promo done/deferred/blocked
+(land n)`: a blocked landscape part is sampled from FCRAM).
+
+**2. The cut on screen: Look Up Test on L0** (~5 min). ftpd: put the folder `scripts/3ds/tests/plugins/Look Up Test`
+into the scenario's `Plugins/` folder (as M4's Invisibility Test), `debug-perf-L0` as `debug-perf`,
+`m5-lookup.cfg` as `debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m5s-look`; the landscape gate as in 1 with
+`--min-checks 60`. **Pass:** exit 0 and `c3d_land_spans > 0` in the DIFF summary. Azahar: host GPU strict 100 %,
+software backend 97.72 % (each miss one column late). **Reading it:** 97-98 % with misses one column late = PICA's
+float24 behaves like Azahar's software backend: record (design section 10, the clip-at-cut fallback is the remedy);
+lower or holes = stop and record.
+
+**3. Static and the present** (~5 min). ftpd: remove the plugin folder; `debug-perf-L0`; `m5-present-diff-l0.cfg`
+as `debug-c3d`; `$H/m1/run.sh build-3ds-c3d-prof m5s-pres`. **Pass:** `present_diff final: N checks, 0 with RGB
+differences`, `static_sets` = `static_restores` + `static_frames_ended` (> 0), `[c3d] play final` with `sw=0`.
+Look at the static on screen (the wall pattern near the start): noise, not a flat or striped area (`MODULATE`).
+
+**4. G2-b bench** (~10 min). Per level N in 0, 6, 20: `debug-perf-L<N>` as `debug-perf`; `m5-bench-c3d.cfg` as
+`debug-c3d` → `$H/m1/run.sh build-3ds-c3d-prof m5s-c3d-L<N>`; then `m5-bench-sw.cfg` → `m5s-sw-L<N>`. **Record** the
+BENCH lines (`busy`, `render`, `c3d_draw`, `c3d_readback`). Azahar: busy +2.04 / +4.88 / +3.51 ms (C3D − SW); Azahar
+understates copies, so expect worse. Recorded, not deciding (user decision 2026-11-07).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d` and the plugin folder. **Record** in
+`PERF.md` ("Stage 10 M5 — console, short check") per launch the class table, the `[c3d] cmdbuf final`, `[c3d] play
+final` and `tex:` lines and the BENCH lines; then the design's M5 status, section 10 item 6 ("M5:") and the Review
+log.
+
+
+## M6 console check, short version (medium: 15 launches, ~40 min; when the user is at the console)
+
+**Run on the console 2026-11-07, medium variant, 15 launches: no hardware bug** (`PERF.md` "Stage 10 M6 — console, short
+check"; step 1 @30 17 of 24 captures ok, the 7 are menu or non-composite presents; steps 2 and 3 pass; step 4: direct 60.5 fps
+@60 on all three, goal met). Written 2026-11-07 for `port-stage10-M6`. **User decision (2026-11-07): run the medium variant** — steps 1-3
+as written and step 4 **at Framerate Target 60 only** (3 configs × 3 levels + the G3-b run = 10 launches): **15 launches
+in all, ~40 min** (each launch is two ftpd file swaps, a 3dslink send, a level load and a 20 s bench: ~2-3 min). The full
+version (step 4 also @30) is 24 launches, ~60-75 min; a minimal one (step 4 on L0 only) 8 launches, ~20-25 min. Fresh
+session prompt: `KICKOFF_CONSOLE_M6.md`. Azahar cannot answer M6's hardware questions (design section 7,
+M6 specification, and the code review's "Needs console verification"): the **texture target's orientations** on PICA
+(`view_v_flip 1`, `band_from_end 1`, the seed's linear→tiled flags: all right in Azahar), PICA's blend rounding against
+`direct_check`'s arithmetic, **the real `c3d_wait`** (Azahar runs the GPU inside `C3D_FrameEnd`: its `c3d_wait` is 0.01 ms),
+**two C3D frames in flight across HOME / sleep / Close**, the bottom screen's VBlank wait now before the composite
+(`bottom_pending`), and **the payoff**: HUD + Map @60 ≥ 55 fps on L0/L6/L20. Setup, driving and the `$H/m1/run.sh` helper as
+in "M1 console check, short version" (`cmake --build build-3ds-c3d-prof` at `port-stage10-M6`). **Press A at once at the
+menu.** Framerate Target is set in the game's Graphics preferences (30 unless a step says 60).
+
+**1. Frame-indexed test and orientation, @30 and @60** (~6 min). ftpd: `$H/sprint8/debug-perf-L0` as
+`/3ds/alephone/debug-perf`, `scripts/3ds/tests/c3d/m6-cal.cfg` as `/3ds/alephone/debug-c3d`; `$H/m1/run.sh
+build-3ds-c3d-prof m6c-cal30`; fetch `/3ds/alephone/screen-c3d-cal-*.bmp` into `$H/m6c-cal30/` and run
+`python3 -I scripts/3ds/tests/c3d-m6cal.py $H/m6c-cal30`. Set Framerate Target 60, repeat as `m6c-cal60` (the captures are
+overwritten: fetch the first set before). **Pass:** every capture `ok` (colour of N or N−1, the white band at row
+8·(N mod 30), the four corner colours red/green/blue/white, no magenta). Azahar: 12/12 @30, 18/18 @60, all frame N.
+**Reading it:** band at another row = `band_from_end` wrong (try `band_from_end 0` in the cfg); corners swapped top/bottom or
+magenta on screen = `view_v_flip` wrong (try `view_v_flip 0`). Record and stop if either is wrong.
+
+**2. In-frame equivalence, seed and sync** (~6 min). Framerate Target 30. `debug-perf-L0` + `m6-direct.cfg` →
+`$H/m1/run.sh build-3ds-c3d-prof m6c-direct`; `debug-perf-L6` + `m6-sync.cfg` → `m6c-sync`. **Pass:** every `[c3d]
+direct_check:` line `within_1` ≥ 99.9 % and `over_32=0`; `seed_check: 0 of 96000 pixels differ`; `composite final` with
+`leaks=0`; `m6c-sync`'s `direct final` with `syncs` > 0 and its checks passing too. Azahar: 100.000 % (Δ 0) everywhere.
+**Reading it:** a uniform Δ of 1-2 = PICA's blend rounding (record; 8.3's 99.9 % is the gate); a mirrored or shifted
+picture = orientation (step 1).
+
+**3. HOME, sleep and Close with two frames in flight** (~6 min). `debug-perf` removed, `m6-ineligible.cfg` as
+`debug-c3d` (direct mode, overlays on), launch with `$H/m1/run.sh build-3ds-c3d-prof m6c-home` and play: walk, press
+**HOME** and come back (×2), **close the lid** and reopen, open the **map** (it must show, then the view comes back), then
+**HOME > Close**. **Pass:** the picture after each return is the live view (not a frozen or old frame), the map and the
+overlays show, the launcher comes back after Close, no Luma screen; the card's `log.txt` ends with `release done` and
+`direct final … policy=… blocked=map:N` (N > 0), `gate_skipped` > 0 in `[c3d] stats`, no `release abandoned`.
+
+**4. The bench: direct vs SW vs readback, @60** (~25 min, 10 launches; the first real speed test; the full version also runs
+@30). Framerate Target 60. For each level N in 0, 6, 20 and each of `m5-bench-sw.cfg`, `m5-bench-c3d.cfg`, `m6-bench-direct.cfg` **with a line `quiet 1` appended** (the 1 Hz stats
+printing costs ~2 ms on the console: `PERF.md` "Stutter follow-up"): `debug-perf-L<N>` as `debug-perf`, the cfg as
+`debug-c3d`, `$H/m1/run.sh build-3ds-c3d-prof m6c-<sw|rb|dir>-60-L<N>`. Then one more `m6-bench-direct.cfg` run on L0
+@60 **without** `quiet 1` for G3-b's `gpu_ms … view=` (the view frame's GPU time, `C3D_GetDrawingTime`). **Record** the
+BENCH lines (`fps`, `busy`, `render`, `c3d_draw`, `present`, `c3d_wait`, `c3d_composite`, `c3d_vblank`, `bottom`) and the
+`direct final` line (`direct=` must be ≥ 95 % of the frames, `bottom_pending`). **The goal** (design 0.5): HUD + Map @60 ≥
+55 fps on all three. Azahar @60: direct 59.6-59.7 fps (SW 54.4 / 59.7 / 59.6, readback 50.3 / 50.3 / 52.0); @30 busy direct
+10.4 / 10.5 / 9.4 ms against SW 16.5 / 14.7 / 14.4 (`PERF.md` "Stage 10 M6"). G3-b (design 0.5): the view's GPU time must
+leave room for M7's 4× fill — record it, it does not decide.
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`, `/3ds/alephone/debug-c3d`, the `screen-c3d-cal-*.bmp`. **Record** in
+`PERF.md` ("Stage 10 M6 — console, short check") the step results and BENCH tables; then the design's M6 status, section 10
+(new item: M6's orientations and `c3d_wait`) and the Review log.
+
+## M8 console check (the Renderer preference; ~15 min, 4 launches; when the user is at the console)
+
+**Not run yet; deferred by the user (2026-11-08).** Written 2026-11-08 for `port-stage10-M8` (`PERF.md` "Stage 10 M8", design section 7 "M8"). Azahar passed
+everything; the console answers what it cannot: a first switch-on **without any `debug-c3d` file** (the path players take),
+the cost of `fallback sw`'s one sync + one seed per fade, and the Software figure at a non-default Brightness (Azahar: 21.9 fps
+@60, `blit` 27.4 ms). Setup, driving and the `$H/m1/run.sh` helper as in "M1 console check, short version", with
+`cmake --build build-3ds-c3d-prof` at `port-stage10-M8`. **ftpd first: make sure `/3ds/alephone/debug-c3d` is absent**
+(else the file decides and the preference is ignored: `[c3d] preference: Renderer GPU ignored`). Framerate Target 60.
+
+1. **Switch on in the dialog** (~4 min). `$H/sprint8/debug-perf-L0` as `/3ds/alephone/debug-perf`; launch, and **before**
+   BEGIN NEW GAME: Preferences > Graphics > Renderer = GPU (experimental), ACCEPT, back, then A. **Pass:** the log has
+   `[c3d] preference: Renderer GPU (renderer c3d, mode direct, fallback sw)`, the BENCH line ~60 fps, `direct final` with
+   `direct=` ≥ 95 % of `frames=`; the picture looks like Software's. Fetch the `Marathon 2 Preferences` file: `c3d_renderer="1"`.
+2. **Persisted** (~3 min). Relaunch as is (no dialog). **Pass:** the preference line again and the same BENCH (it persisted).
+3. **Brightness: obsolete** (the option was removed, `PATCHES.md` 56; skip it). Was: Graphics > Brightness = Normal (one step up), relaunch. **Record** BENCH `fps`, `blit` and
+   `direct final`'s `blocked=gamma:` (Azahar: every frame blocked, 21.9 fps, `blit` 27.4 ms). Then Renderer = Software, same
+   level, relaunch: the Software figure (expected equal). Put Brightness back to Dark.
+4. **Fades in play, `quiet 1` not needed** (~5 min). `debug-perf` removed; Renderer = GPU; play L0 for a minute, take
+   damage and pick up items (flashes), open the map, HOME and back, then HOME > Close. **Pass:** no stale or frozen picture
+   after a flash or the map, the launcher comes back. **Record** `direct final`'s `fallback_sw=`, `syncs=`, `seeds=` (one sync
+   and one seed per flash or map visit).
+
+**End:** ftpd: delete `/3ds/alephone/debug-perf`; leave the preference as the user wants it. **Record** in `PERF.md` ("Stage 10
+M8 — console") and the design's M8 status and Review log.
+
+## M6b console check (fades in direct mode; ~25 min, 4 launches; when the user is at the console)
+
+**Not run yet; console work deferred by the user (2026-11-08).** Written 2026-11-08 for `port-stage10-M6b` (`PERF.md` "Stage 10
+M6b", design section 7 "M6b" and its Review log "M6b implementation notes"). Azahar passed every gate on both backends; the
+console answers what it cannot (the M6b block's "Needs console verification"): PICA's rounding of the `CONSTANT_COLOR` blend and
+of the TEV stages (the fit's model), the blend colour's byte order, `GPU_BLEND_MIN`/`MAX`, the fit's CPU cost on the ARM11, the
+passes' GPU time, and the static's look. Setup, driving and `$H/m1/run.sh` as in "M1 console check, short version", with
+`cmake --build build-3ds-c3d-prof` at `port-stage10-M6b`; Framerate Target 60, HUD + Map.
+
+1. **Fade Test** (~6 min). `scripts/3ds/tests/plugins/Fade Test` into the card's `Marathon2/Plugins/`;
+   `scripts/3ds/tests/c3d/m6b-fade.cfg` as `/3ds/alephone/debug-c3d`; `debug-perf` for level 0 with measure 70 s
+   (`$H/sprint8/debug-perf-L0` edited). **Pass:** one `[c3d] fade: curves changed` line per `[lua] fade` line; `composite
+   final` `fade_bad=0` (every fade `direct_check` within_2 >= 99.9 %, max <= 4); `direct final` `blocked=` gamma only for the
+   `fit no` frames; a red flash looks red, not blue (byte order). **Record** `fade_fit_ms`, `fade_max`, `fade_min_within_2`,
+   the static frames' look (`fade_static=`), `gpu_ms`.
+2. **Liquid Test** (~5 min). The Liquid Test plugin instead (remove the Fade Test), same config, measure 55 s. **Pass:**
+   `blocked=-`, `fade_bad=0`, `quirk_px=0`. **Record** the blue channel's max Δ on the underwater frames (a diagnostic: water's
+   blue slope is 253/255, so a PICA that computes `d * 255 >> 8` shows a systematic 1).
+3. **Cost** (~6 min). Remove the plugin; `quiet 1` in a `debug-c3d` with `renderer c3d`, `mode direct`; play L0 for a minute
+   taking damage and picking things up. **Record** busy/fps from the BENCH line and `fade_fit_ms` against M6's console row.
+4. **`fades 0`** (~4 min). Same with `fades 0` added. **Record** `blocked=gamma:` (every flash frame readback) for the A/B.
+
+**End:** ftpd: delete `/3ds/alephone/debug-c3d`, `debug-perf` and the plugin. **Record** in `PERF.md` ("Stage 10 M6b —
+console") and the design's M6b status and Review log.
+
+## M9 console check (stereo 3D; ~60 min, 17 launches plus one per comfort value tried; when the user is at the console)
+
+**Run on the console 2026-11-13, partly** (13 of 17 launches; blocks A-E: T1, HOME/sleep/Close, the @60 bench, `gpu_ms view`, the slider and the look; **not run: F, G, H, I's own launch, J comfort tuning**, the user stopped tired; record `PERF.md` "Stage 10 M9 — console"). Result: stereo works and fill 1 holds 60 fps; **two defects found, not fixed** (sky bleed in both eyes; an edge strip, left eye at its right edge and right eye at its left). **To finish the check:** run blocks F, G, H and J from the steps below after the fix, with `m9-console.cfg`; add the sky and edge tests (low slider, one eye at a time, `stereo_gaps`). Written 2026-11-13 for `port-stage10-M9`; `PERF.md` "Stage 10 M9", design section 7 "M9", its Review log and
+section 10 item 13). Azahar passed every gate; it cannot say how the stereo looks, what the 3D slider reads, what the two passes
+cost on the PICA, whether the right target reaches the right eye, or whether the VRAM to VRAM copy is right. Setup, driving and
+`$H/m1/run.sh` as in "M1 console check, short version", with `cmake --build build-3ds-c3d-prof` at `port-stage10-M9`; the New 3DS,
+**3D slider used by hand** (up = on), HUD + Map, Framerate Target 60 unless a step says 30. **Press A at once at the menu.**
+`debug-c3d` contents are given per launch (files in `scripts/3ds/tests/c3d/`); `debug-perf-L0` = `$H/sprint8/debug-perf-L0`.
+The defaults being judged: `stereo_k 96` (6 px per eye at slider 1, 12 between the eyes at infinity), `stereo_w0 1024` (1 WU on
+the screen plane), `stereo_near 100`, `stereo_weapon -50` (weapon in front of the screen, user decision D3), `stereo_ramp 15`,
+`stereo_fill 1`.
+
+**Order of the session:** step 1, then **step 5 (HOME, sleep, Close: the hang risk, so it comes before the long steps)**, then
+2, 2b, 3 (look only), 3b, 4, 6, 7, and **the comfort tuning of step 3 last**, with whatever time is left.
+
+**1. T1 on the hardware** (1 launch, ~3 min). `debug-perf-L0` + `m9-t1.cfg` (`renderer c3d`, `mode direct`, `play 1`, `textures 1`,
+`lit 1`, `stereo 1`, `stereo_cal 1`, `stereo_fill 0`, `stereo_slider 100`). **Pass:** 30 lines `[c3d] stereo_cal: tex L 5/5 R 5/5 fb
+L 5/5 R 5/5`, `composite final` `cal_frames=30 cal_complete=30`. A `tex` 4/5 or worse = the shader's `rcp`/`max` in float24 or the
+left-edge clipping differ from Azahar (record which quad: the 4th is `kWPerspMax`, the 5th the left edge); an `fb R` short of 5/5
+with `tex R 5/5` = the right target's transfer or its eye. **Look** (slider up, while the 20 s run lasts): five squares, red,
+green, blue, yellow, magenta; green on the screen plane; red out of the screen, blue and yellow behind it. **Record which eye**
+sees red further left: close the left eye, then the right: the right eye's red is at column 92, the left's at 108 (16 px apart).
+
+**2. Bench @60, `quiet 1`** (6 launches, ~18 min; the first real figure of stereo's cost). For each of `m9-bench-mono.cfg` (stereo 0),
+`m9-bench-s0.cfg` (stereo 1, slider 0), `m9-bench-f1.cfg` (slider 100, fill 1, 4 passes), `m9-bench-f0.cfg` (fill 0, 2 passes) on
+L0, and `m9-bench-mono.cfg` and `m9-bench-f1.cfg` on L20: `debug-perf-L<N>` + the cfg (each already has `quiet 1`), Framerate Target 60,
+`$H/m1/run.sh build-3ds-c3d-prof m9c-<mono|s0|f1|f0>-L<N>`. **Record** the BENCH lines (`fps`, `busy`, `c3d_draw`, `c3d_stereo`, `c3d_wait`,
+`c3d_vblank`) and `direct final` (`direct=` must be >= 95 % of `frames=`) and `stereo final` (`stereo=` all frames on the f rows,
+0 on s0). **Reading it:** s0 against mono = the cost of 3D mode and the allocation (Azahar: nothing); f1 against f0 = the second pair
+of passes (Azahar: +1.6 / +1.6 / +0.5 ms busy @30 on L0 / L6 / L20, `c3d_stereo` 2.47 against 0.82 ms on L0, CPU only). **The question:** does f1 hold >= 55 fps @60 on L0/L20 (Azahar 59.6)? If `fps` drops
+under 55 with f1, note whether f0 holds it (D2 made fill 1 the default). The same numbers are M7's first fill-rate evidence.
+Then **2b** (4 launches, ~10 min): `m9-gms-mono.cfg` (the 1-pass baseline of this session and this binary), `m9-gms-f1.cfg` and
+`m9-gms-f0.cfg` (the bench cfgs without `quiet 1`), and `m9-gms-f1.cfg` with the line `reseed 10` added (a right-eye copy every
+10th frame: the difference of its `view=` against plain f1, times 10, is the GPU time of one VRAM to VRAM copy; if it cannot be
+told from noise, record "not measurable"), all on L0 @60 for `gpu_ms
+draw=… view=…` (the view frames' GPU time, `C3D_GetDrawingTime`: M6's console figure for 1 pass was 1.3-1.5 ms; expect about 2x and
+4x the world part). **Record** the mean and max `view=` over the samples.
+
+**3. Hardware slider and the look** (1 launch, ~8 min, played by the user). `debug-perf` removed; `m9-console.cfg` as `debug-c3d`
+(`renderer c3d`, `mode direct`, `play 1`, `textures 1`, `lit 1`, `overlays 2`, `stereo 1`; no `stereo_slider`: the hardware slider).
+Play L0 (BEGIN NEW GAME) for a few minutes, slider at rest first, then up slowly, then down. **Look at:** depth on walls, floors,
+doors; the weapon (in front of the screen: does it hurt, does it double?); the crosshair (zero parallax, on the screen plane:
+over a deep corridor and over a near wall: does it fight the scene?); the position text; sprites (monsters, items) in depth; landscapes
+(the sky at the far plane); static; the near edge of a wall or doorway (the gap fill widens it by up to the parallax difference). Move
+the slider through its range: the ramp should ease (no pop). **Record** the log's `[c3d] stereo:` lines: `slider=` at rest (**expected
+0.00**; if it is 0.01-0.02 the 1/64 floor is doing its work, record the value; if it never reaches 0 stereo never turns off) and at the
+top (expected 1.00), `P=`, `off=none`, `not3d=0`, `replay_discards` all 0. **Ghosting:** at full slider look for a ghost of the
+weapon and of bright edges (the barrier's crosstalk): record where it is worst and at which slider position it starts. **Comfort
+tuning** (the last thing of the session; edit the cfg between launches only if something is wrong; one value at a time, record the pick): `stereo_k` 64 / 96 / 128 (how
+deep before it strains), `stereo_w0` 512 / 1024 / 2048 (where the screen plane sits), `stereo_near` 50 / 100 / 200 (how far things may
+come out), `stereo_weapon` -50 / 0 / -100 (the weapon's depth; D3), `stereo_ramp` 8 / 15 / 30 (how fast the depth returns after a map, a
+flash or a pause: it must not pop, it should not feel slow).
+**3b. Fill 0** (1 launch, ~3 min): `m9-console-fill0.cfg` (the same with `stereo_fill 0`), the same corridor and doorway: **the look of
+the gap fill against `stereo_fill 0`**: fill 1 should show a slightly wider near edge with real picture; fill 0 shows what the eye's last
+frame left there (a smear or, at the very first frames, black at the view's right/left edge). Record which is better.
+
+**4. Identity, re-entries and black specks** (1 launch, ~8 min). `m9-console-identity.cfg` (`stereo 1`, `stereo_force 1`, `stereo_slider
+0`, `stereo_check 5`, `stereo_fill 0`, `overlays 1`, `renderer c3d`, `mode direct`, `play 1`, `textures 1`, `lit 1`) and the Terminal Test plugin
+(`scripts/3ds/tests/plugins/Terminal Test` into the card's `Marathon2/Plugins/`; it opens terminal 0 three seconds in): play L0 (BEGIN NEW GAME): wait for
+the terminal, leave it, open the **map** (SELECT) and close it, take damage (a flash), then **quit to the menu (START, A) and begin a new game**,
+then, **only if a saved game exists on the card** (Marathon 2 saves at pattern buffers only; else skip this part and say so),
+**load it** and open the map again. **Pass:** every `[c3d] stereo_check:` line `differ=0 ... is3d=1
+distinct=1` (a BAD line prints up to 8 pixels), `stereo final` `r_copies` rising by 1 at each of the re-entries (`stereo again after a
+frame that was not`, `collections changed ... start again`), `replay_discards` 0. **Look:** no black specks or old picture fragments in
+either eye right after the terminal, the map, the new game and the saved game (the earlier black clear left some; the copy should not).
+This also answers whether the VRAM to VRAM `GX_TextureCopy` (`GX_TRANSFER_RAW_COPY(1)`, 512 KiB, queued after the seed) copies the right
+data: a wrong copy shows as a garbled or stale right eye right after a re-entry. **Record** `stereo_check` count and any BAD.
+**The ramp after a level change and a saved-game load** (one more launch): with `m9-console.cfg` instead (hardware slider up), walk to the level's exit or
+load a save and watch the first second: the depth should ease in from flat (the ramp restarts at every level load; intended): record
+whether it feels right or too slow.
+
+**5. HOME, sleep and Close with the right target linked** (1 launch, ~5 min). `m9-console.cfg` as `debug-c3d`; play: slider up, press
+**HOME** and come back (x2), **close the lid** and reopen, open the **map**, then **HOME > Close**. **Pass:** the picture after each
+return is the live view in both eyes (no frozen frame, no one eye black), the launcher comes back, no Luma screen; `log.txt` ends
+with `release done` and `[c3d] stereo: 3D mode off (citro3d released)`, no `release abandoned`. **Also look for the single-frame mono
+flicker** (a one-frame 2D flash while walking with the slider up: the composite's stereo swap against the next view frame's
+`isTopStereo` clear) and **barrier brightness** on the frames that are mono (map, terminal, a flash): a visible brightness or
+position jump.
+
+**6. Menus in 3D mode and the preference** (1 launch, ~6 min). **No `debug-c3d` file** (ftpd: delete it first; the preference decides),
+Preferences > Graphics > Renderer = Software at the start. Look at the **menus** with the 3D slider up and 3D mode on (it is off while the
+Renderer is Software: `gfxSet3D(false)`): then flip Renderer to **GPU (experimental)**, accept, go back to the menu and look again (3D
+mode is on, one image to both eyes: **brightness of the menu, any flicker at the switch, a ghost**), begin a game (stereo with the hardware
+slider), flip back to Software while at the menu, begin a game: no stereo, the picture 2D. **Record** the log's `[c3d] stereo: 3D mode
+on / off (Renderer preference)` lines and `stereo final` (`stereo=` > 0 only in the GPU games). If the toggle is done while a game's
+stereo swap may be pending (flip at the very moment of quitting a game) expect one 2D frame, no corruption.
+
+**7. VRAM** (no extra launch): in launches 3-6 read the last `tex:` line and `vram_free_kib` of the `composite final` line: Azahar
+at the 2 944 cap: free 116 / 2 770 / 2 706 KiB on L0 / L6 / L20, L0 and L6 sample the 2 048 KiB landscape part from linear memory
+(`promo …/(land 1)`, `alloc-fail` 26 / 1). **Record** the console's figures and whether L0's sky or L6's landscape shows any
+hitch (the FCRAM-sampled landscape's cost; `c3d_draw`/`c3d_wait` in the bench lines of launch 2 are the place to see it).
+
+**End:** ftpd: delete `/3ds/alephone/debug-c3d`, `/3ds/alephone/debug-perf`, the Terminal Test plugin and any `screen-c3d-*` files. **Record** in
+`PERF.md` ("Stage 10 M9 — console"): launches 1-7's results, the BENCH table (mono / s0 / f1 / f0 @60), the comfort picks (`stereo_k`,
+`stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`: new defaults if the user prefers others, a one-line change in
+`core/config.h`/`config.cpp` plus the host test of the defaults), then the design's M9 status, section 10 item 13 and the Review log.
+
+## M9 fix console check (the two stereo defects, then M9's unfinished blocks; ~45 min, 8 launches plus comfort values; when the user is at the console)
+
+**Run partly on the console 2026-11-15** (3 launches; record `PERF.md` "Stage 10 M9 fix — console"): step 1 found the sky
+bleed's cause (the PICA draws no landscape at `w = 2^24` on stereo frames; fixed the same evening, `kWLandStereo = kWMax`), and a
+launch with `m9-console.cfg` showed both fixes right by eye. **Still to run, with the current build:** step 2's second launch
+(the edge control, `m9fix-console-edge-off.cfg`), step 3 (bench @60 L0/L20), the slider low with the fixes, then F, G, H, J.
+Step 1 needs no repeat (`m9fix-diag-gaps.cfg` with the fixed build would only confirm launch 2). Written 2026-11-15 for the M9 fix (`KICKOFF_M9_FIX.md`; design section 7 "M9 fix: the edge strip"; `PERF.md`
+"Stage 10 M9 fix"). Setup and driving as in "M9 console check" (`$H/m1/run.sh`, ftpd first for the card, then the netloader; the
+console's IP was 192.168.100.72), `cmake --build build-3ds-c3d-prof` at the M9 fix commit, the New 3DS, HUD + Map, Framerate Target 60,
+**3D slider by hand**. **Press A at once at the menu.** Tell the user before each launch which files go on the card.
+
+**1. The sky bleed: what the hardware draws** (1 launch, ~5 min; decides the sky fix). `debug-perf` removed; `m9fix-diag-gaps.cfg`
+as `debug-c3d` (`m9-console.cfg` + `stereo_gaps 1`: both eye textures cleared to magenta on every stereo frame, fill 1). Play L0
+(BEGIN NEW GAME), slider up, turn toward the sky and along the wall/sky edges, then walk. **Read it:** the **sky area magenta** (or
+magenta smears that follow the camera) = the console does not draw the landscape on stereo frames (its vertices carry `w = 2^24`;
+Azahar computes in float32, the PICA in float24); **no magenta** apart from a rare speck = everything is drawn and what the user saw
+is the fill pass's content (centre-view pixels beside the sky). **Record** the log's `[c3d] stereo_gaps: ... gap_px=N (edge columns
+E, interior I)` lines (every 30th stereo frame; a small hitch at each is expected; Azahar on the L01 film with fill 1: 792 of 798
+samples 0 px, max 6) and what the user saw, in their words. Then one look with the slider low.
+
+**2. The edge strip by eye** (2 launches, ~8 min). `m9-console.cfg` (the fix on) then `m9fix-console-edge-off.cfg` (`stereo_edge 0`,
+M9's behaviour) as `debug-c3d`. Each time on L0: line a texture change (a door frame, a wall seam, a light panel) up with the
+**right** edge of the screen, close the right eye (the left eye failed at its right edge); then the **left** edge with the left eye
+closed; slider low, then full; turn slowly so the seam crosses the edge. **Pass:** with the fix no slim strip at either edge in
+either eye, the texture continuous up to the screen edge; with `stereo_edge 0` the strip is back (the control: if it is not, the
+test did not find a seam). Expected residue (design "What it does not fix"): a very near wall a few pixels wide at the screen edge
+can still open a gap beside it, as any near depth edge does. **Record** `stereo final` `edge=N/M` (strips drawn / not drawn; M
+should be 0 or tiny) and `replay_discards` 0 from the first launch.
+
+**3. Bench re-check @60** (2 launches, ~6 min; the strips add a few vertices). `debug-perf-L0` then `debug-perf-L20`, each with
+`m9-bench-f1.cfg`. **Pass:** fps >= 55 (M9 console: 60.54 / 60.46), `direct final` >= 95 %, `stereo final` `edge=N/0`. Record the BENCH
+lines beside the M9 rows.
+
+**Then M9's unfinished blocks, with the fixed build** (from "M9 console check"):
+- **F = its step 3b** (fill 0 against fill 1 by eye, `m9-console-fill0.cfg`, 1 launch).
+- **G = its step 4** (identity and re-entries, `m9-console-identity.cfg` + the Terminal Test plugin, 1 launch; then the ramp after a
+  level change / saved game with `m9-console.cfg`, 1 launch).
+- **H = its step 6** (menus in 3D mode and the Renderer preference, no `debug-c3d`, 1 launch).
+- **J = its step 3's comfort tuning** (one key at a time: `stereo_k`, `stereo_w0`, `stereo_near`, `stereo_weapon`, `stereo_ramp`; last,
+  with whatever time is left; defaults stay unless the user prefers another value).
+
+**End:** ftpd: delete `/3ds/alephone/debug-c3d`, `/3ds/alephone/debug-perf`, the Terminal Test plugin and any `screen-c3d-*` files.
+**Record** in `PERF.md` "Stage 10 M9 fix — console": step 1's reading (it decides the sky fix: ask the user before building it), step
+2's look, step 3's figures, F/G/H/J as M9's runbook says; tag `port-stage10-M9b` only when both defects are fixed and the console agrees.

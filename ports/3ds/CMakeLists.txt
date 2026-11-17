@@ -21,6 +21,8 @@
 #                            otherwise (default Marathon2)
 #   NETLOAD_IP               3DS address for the run-3dslink target (empty:
 #                            3dslink finds the console by broadcast)
+#   A1_RENDER_C3D            citro3d back end (GPU present of the top screen;
+#                            docs/3ds/CITRO3D_DESIGN.md); OFF by default
 #   A1_PROFILE               frame profiler: per-frame timings on the bottom
 #                            screen and the debug-perf benchmark (docs/3ds/PERF.md);
 #                            OFF by default
@@ -76,6 +78,9 @@ set(A1_3DS_SMDH_DESCRIPTION "Marathon engine" CACHE STRING "SMDH short descripti
 set(A1_3DS_SMDH_AUTHOR "Aleph One developers / 3DS port by DashieLashie" CACHE STRING "SMDH author")
 set(A1_3DS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.png" CACHE FILEPATH "48x48 SMDH icon")
 option(A1_PROFILE "Frame profiler and benchmark mode (docs/3ds/PERF.md)" OFF)
+option(A1_RENDER_C3D "citro3d renderer (docs/3ds/CITRO3D_DESIGN.md)" OFF)
+# Test build for M2's orientation run only (render_c3d/core/tiling.h): textures stored without the row flip.
+option(A1_C3D_TILE_NOFLIP "citro3d renderer: store texture rows unflipped (orientation test build)" OFF)
 
 # --- Compiler flags ----------------------------------------------------------
 # The toolchain supplies -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -105,6 +110,12 @@ add_compile_options(
 add_compile_definitions(HAVE_CONFIG_H A1_PLATFORM_3DS)
 if(A1_PROFILE)
   add_compile_definitions(A1_PROFILE)
+endif()
+if(A1_RENDER_C3D)
+  add_compile_definitions(A1_RENDER_C3D)
+  if(A1_C3D_TILE_NOFLIP)
+    add_compile_definitions(A1_C3D_TILE_NOFLIP)
+  endif()
 endif()
 if(NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "-D__3DS__")
   add_compile_definitions(__3DS__)   # normally already in the toolchain flags
@@ -271,6 +282,10 @@ foreach(_u IN LISTS A1AM_UNITS)
     "${CMAKE_CURRENT_SOURCE_DIR}"
     ${A1AM_${_u}_INCLUDES}
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  if(A1_RENDER_C3D)
+    # a1_c3d.h, included by RenderMain/render.cpp (hook 1, docs/3ds/CITRO3D_DESIGN.md 1.2)
+    target_include_directories(${_t} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/render_c3d/include")
+  endif()
   target_compile_definitions(${_t} PRIVATE ${A1AM_${_u}_DEFINES})
   if(A1AM_${_u}_OPTIONS)
     target_compile_options(${_t} PRIVATE ${A1AM_${_u}_OPTIONS})
@@ -330,6 +345,54 @@ target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/bottom_3ds.c
 # Frame profiler (A1_PROFILE builds; docs/3ds/PERF.md).
 if(A1_PROFILE)
   target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/profile_3ds.cpp")
+endif()
+# citro3d back end (docs/3ds/CITRO3D_DESIGN.md): P1 = the GPU present of the top screen.
+# Shaders are .v.pica sources assembled by picasso and embedded as binaries.
+if(A1_RENDER_C3D)
+  set(_a1_c3d_dir "${CMAKE_CURRENT_SOURCE_DIR}/render_c3d")
+  target_sources(alephone PRIVATE
+    "${_a1_c3d_dir}/core/config.cpp"
+    "${_a1_c3d_dir}/core/diff.cpp"
+    "${_a1_c3d_dir}/core/bmp.cpp"
+    "${_a1_c3d_dir}/core/stats.cpp"
+    "${_a1_c3d_dir}/core/calibrate.cpp"
+    "${_a1_c3d_dir}/core/geometry.cpp"
+    "${_a1_c3d_dir}/core/tiling.cpp"
+    "${_a1_c3d_dir}/core/tex_convert.cpp"
+    "${_a1_c3d_dir}/core/texcache.cpp"
+    "${_a1_c3d_dir}/core/shade_lut.cpp"
+    "${_a1_c3d_dir}/core/rect.cpp"
+    "${_a1_c3d_dir}/core/landscape.cpp"
+    "${_a1_c3d_dir}/core/noise.cpp"
+    "${_a1_c3d_dir}/core/overlay_bands.cpp"
+    "${_a1_c3d_dir}/core/direct_state.cpp"
+    "${_a1_c3d_dir}/core/fade_fit.cpp"
+    "${_a1_c3d_dir}/core/stereo.cpp"
+    "${_a1_c3d_dir}/back/context.cpp"
+    "${_a1_c3d_dir}/back/present.cpp"
+    "${_a1_c3d_dir}/back/view.cpp"
+    "${_a1_c3d_dir}/back/draw.cpp"
+    "${_a1_c3d_dir}/back/texcache.cpp"
+    "${_a1_c3d_dir}/back/shade.cpp"
+    "${_a1_c3d_dir}/back/overlay.cpp"
+    "${_a1_c3d_dir}/back/stereo.cpp"
+    "${_a1_c3d_dir}/front/frame.cpp"
+    "${_a1_c3d_dir}/front/filter.cpp"
+    "${_a1_c3d_dir}/front/c3d_rasterizer.cpp")
+  target_include_directories(alephone PRIVATE "${_a1_c3d_dir}/include")
+  ctr_add_shader_library(a1_c3d_shaders "${_a1_c3d_dir}/shaders/present.v.pica")
+  dkp_add_embedded_binary_library(a1_c3d_shbin a1_c3d_shaders)
+  # The world vertex shader (2.1) in its own library and binary, so the present's shbin is unchanged.
+  ctr_add_shader_library(a1_c3d_world_shaders "${_a1_c3d_dir}/shaders/world.v.pica")
+  dkp_add_embedded_binary_library(a1_c3d_world_shbin a1_c3d_world_shaders)
+  target_link_libraries(alephone PRIVATE a1_c3d_shbin a1_c3d_world_shbin citro3d ctru)
+  # Every teardown path (SDL_Quit, vhalt, the error screen) reaches gfxExit(): shut
+  # citro3d down first (render_c3d/back/context.cpp).
+  target_link_options(alephone PRIVATE "LINKER:--wrap=gfxExit")
+  # The program last bound by anyone else is recorded so a view frame can restore it (back/context.cpp).
+  target_link_options(alephone PRIVATE "LINKER:--wrap=C3D_BindProgram")
+  # The same for the texture on unit 0 (the present's), which M2's textured view frames replace (back/context.cpp).
+  target_link_options(alephone PRIVATE "LINKER:--wrap=C3D_TexBind")
 endif()
 # Ogg Vorbis (Tremor) and MP3 (mpg123) decoders for Sound/Decoder.cpp.
 target_sources(alephone PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/decoders_3ds.cpp")

@@ -1,0 +1,159 @@
+# Stage 10 M9 part 2, T3 (docs/3ds/CITRO3D_DESIGN.md, M9 "Additions to the tests"): the Bottom Screen setting switched between games of
+# one run: HUD + Map -> Classic -> HUD + Map, twice (five games). Classic with the HUD is a 480x240 view on the 3DS, HUD + Map
+# 400x240: the 512x256 texture targets must be kept ("[c3d] view: 400x240 -> 480x240, the texture targets are kept" and back, never
+# "target deleted"), and the right texture cleared again on the first stereo frame after each return to HUD + Map (r_clears + 1).
+# The setting can only be changed in Preferences > Graphics > Bottom Screen (the row at y 120, between Show HUD and Renderer; the
+# engine reaches Preferences from the main menu only), so the switches happen between games. Taps as script 27.
+# Needs: the preference at HUD + Map (bottom_screen="0") when the run starts, a debug-c3d file (m9-t3-bottom.cfg or the preference
+# case's "mode direct, fallback readback, stereo 1"), or none (the Renderer preference: Classic frames are then fallback_sw and no
+# "view:" line appears for them).
+wait 1000
+log --- game 1: HUD + Map ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 3000
+circle 0 0
+wait 500
+screens bs-game1
+log --- quit, Bottom Screen -> Classic ---
+tap START
+wait 1000
+tap A                  # quit to the main menu
+wait 4000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+tap DOWN
+wait 300
+tap A                  # GRAPHICS
+wait 2000
+touch 175 120
+wait 150
+untouch
+wait 800
+screens bs-flip1
+touch 136 195          # ACCEPT
+wait 150
+untouch
+wait 2000
+tap B                  # out of Preferences
+wait 2000
+log --- game 2: Classic ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 3000
+circle 0 0
+wait 500
+screens bs-game2
+log --- quit, Bottom Screen -> HUD + Map ---
+tap START
+wait 1000
+tap A                  # quit to the main menu
+wait 4000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+tap DOWN
+wait 300
+tap A                  # GRAPHICS
+wait 2000
+touch 175 120
+wait 150
+untouch
+wait 800
+screens bs-flip2
+touch 136 195          # ACCEPT
+wait 150
+untouch
+wait 2000
+tap B                  # out of Preferences
+wait 2000
+log --- game 3: HUD + Map ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 4000
+circle 0 0
+wait 500
+screens bs-game3
+log --- quit, Bottom Screen -> Classic ---
+tap START
+wait 1000
+tap A                  # quit to the main menu
+wait 4000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+tap DOWN
+wait 300
+tap A                  # GRAPHICS
+wait 2000
+touch 175 120
+wait 150
+untouch
+wait 800
+screens bs-flip3
+touch 136 195          # ACCEPT
+wait 150
+untouch
+wait 2000
+tap B                  # out of Preferences
+wait 2000
+log --- game 4: Classic ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 3000
+circle 0 0
+wait 500
+screens bs-game4
+log --- quit, Bottom Screen -> HUD + Map ---
+tap START
+wait 1000
+tap A                  # quit to the main menu
+wait 4000
+touch 242 158          # PREFERENCES
+wait 150
+untouch
+wait 2000
+tap DOWN
+wait 300
+tap A                  # GRAPHICS
+wait 2000
+touch 175 120
+wait 150
+untouch
+wait 800
+screens bs-flip4
+touch 136 195          # ACCEPT
+wait 150
+untouch
+wait 2000
+tap B                  # out of Preferences
+wait 2000
+log --- game 5: HUD + Map ---
+tap A                  # BEGIN NEW GAME
+wait 3000
+tap A                  # past the chapter screen
+wait 10000
+circle 0 150
+wait 4000
+circle 0 0
+wait 500
+screens bs-game5
+log --- HOME > Close ---
+quit
+wait 5000

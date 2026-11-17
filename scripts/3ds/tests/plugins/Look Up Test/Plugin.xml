@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M5 test (docs/3ds/CITRO3D_DESIGN.md, section 7, M5 specification; critic, M5 code review major 2): the
+     player's view pitches up from level to near the maximum over 4 s, then sways between them, so a landscape's
+     second texture part (rows past 512) and the polygons that cross the cut are on screen. Installed by
+     run-azahar.sh --look-up-test. -->
+<plugin name="Look Up Test" version="1.0" description="3DS test: look up at the sky" solo_lua="lookup.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

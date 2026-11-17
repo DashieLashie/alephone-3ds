@@ -192,6 +192,18 @@ bool text_input(const std::string& hint, std::string& text, size_t max_chars, Te
 // bottom screen, docs/3ds/STAGE7.md) goes to the top screen 1:1.
 bool present_screen(const void* pixels, int pitch, int width, int height, uint32_t sdl_format);
 
+#ifdef A1_RENDER_C3D
+// Stage 10 B (docs/3ds/CITRO3D_DESIGN.md 5.7.2, render_c3d/back/present.cpp): the pixels for the
+// engine's main_surface, called where the screen surface is created. Returns one 512 KiB linear
+// buffer (pitch 2048 bytes, zeroed, cache-flushed) for a 400x240 surface when the citro3d back end
+// presents on the GPU with zero_copy on, so the GPU's display transfer can read the surface
+// directly; nullptr otherwise (any other size, zero_copy 0, present cpu, allocation failed), and the
+// caller then allocates the surface itself. Allocated on the first call and never freed: every
+// later call returns the same buffer (the surface made from it is SDL_PREALLOC). Makes no citro3d
+// call. Main thread.
+void* main_surface_pixels(int width, int height, int& pitch);
+#endif
+
 // A 320x240 XRGB8888 picture onto the bottom screen (RGB565), swapped at the
 // next VBlank. The bottom screen must be in game mode (bottom_game(true)).
 bool present_bottom(const void* pixels, int pitch);

@@ -493,6 +493,9 @@ void change_gamma_level(
 // LP addition: routine for displaying text
 
 // Globals for communicating with the SDL contents of DisplayText
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+#include "a1_c3d.h"	// stage 10 M6: a1_c3d::overlay_target() (PATCHES.md 47)
+#endif
 static SDL_Surface *DisplayTextDest = NULL;
 static font_info *DisplayTextFont = NULL;
 static short DisplayTextStyle = 0;
@@ -506,8 +509,15 @@ static short DisplayTextStyle = 0;
 		if (OGL_RenderText(BaseX, BaseY, Text, r, g, b)) return;
 #endif
 
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	// Stage 10 M6 (PATCHES.md 47): the overlay surface of a direct frame has alpha; map with its format.
+	SDL_PixelFormat *a1_fmt = DisplayTextDest == a1_c3d::overlay_target() ? DisplayTextDest->format : world_pixels->format;
+	draw_text(DisplayTextDest, Text, BaseX+1, BaseY+1, SDL_MapRGB(a1_fmt, 0x00, 0x00, 0x00), DisplayTextFont, DisplayTextStyle);
+	draw_text(DisplayTextDest, Text, BaseX, BaseY, SDL_MapRGB(a1_fmt, r, g, b), DisplayTextFont, DisplayTextStyle);
+#else
 	draw_text(DisplayTextDest, Text, BaseX+1, BaseY+1, SDL_MapRGB(world_pixels->format, 0x00, 0x00, 0x00), DisplayTextFont, DisplayTextStyle);
 	draw_text(DisplayTextDest, Text, BaseX, BaseY, SDL_MapRGB(world_pixels->format, r, g, b), DisplayTextFont, DisplayTextStyle);	
+#endif
 
 }
 
@@ -538,8 +548,15 @@ static short DisplayTextStyle = 0;
 		if (OGL_RenderTextCursor(cursor_rect, r, g, b)) return;
 #endif
 	
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	// Stage 10 M6 (PATCHES.md 47): as DisplayText.
+	SDL_PixelFormat *a1_fmt = s == a1_c3d::overlay_target() ? s->format : world_pixels->format;
+	SDL_FillRect(s, &shadow_rect, SDL_MapRGB(a1_fmt, 0x00, 0x00, 0x00));
+	SDL_FillRect(s, &cursor_rect, SDL_MapRGB(a1_fmt, r, g, b));
+#else
 	SDL_FillRect(s, &shadow_rect, SDL_MapRGB(world_pixels->format, 0x00, 0x00, 0x00));
 	SDL_FillRect(s, &cursor_rect, SDL_MapRGB(world_pixels->format, r, g, b));
+#endif
 }
 
 uint16 DisplayTextWidth(const char *Text)

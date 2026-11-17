@@ -18,7 +18,8 @@ entries 5-13 were added in stage 4 (boot to the main menu, `STAGE4.md`),
 23-25 in stage 5's hardware session (default focus, linear heap), 26-33 in
 stage 6 (audio, `STAGE6.md`), 34-35 in the performance stage (`PERF.md`),
 36-40 in stage 7 (the bottom screen, `STAGE7.md`), 41-42 and an update to 19
-in the sprint after it (`NEXT-SPRINT.md`).
+in the sprint after it (`NEXT-SPRINT.md`), 49, 45 and 46 in stage 10 (`CITRO3D_DESIGN.md`; 47-48 were
+reserved there for the engine hooks of M6 and M8, and are now used).
 
 ## Summary
 
@@ -68,6 +69,11 @@ in the sprint after it (`NEXT-SPRINT.md`).
 | 42 | `Source_Files/RenderMain/shapes.cpp` | a collection is read with one read and parsed from memory | none |
 | 43 | `Source_Files/Sound/SoundFile.cpp` | a sound header, and a sound's samples, read with one read each and parsed from memory | none |
 | 44 | `Source_Files/RenderOther/screen_shared.h` | the map zoom keys zoom the bottom screen's map while the main map is closed | none |
+| 45 | `Source_Files/RenderMain/render.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M0: hook 1, the world view goes through `a1_c3d::render_frame()` | none |
+| 46 | `Source_Files/RenderMain/shapes.cpp` (`A1_RENDER_C3D=ON` builds only) | stage 10 M2: hooks 2a/2b, `a1_c3d::collections_changed()` at the end of `load_collections()` and `unload_all_collections()` | none |
+| 47 | `Source_Files/RenderOther/screen.cpp`, `screen_shared.h` (`A1_RENDER_C3D=ON` builds only) | stage 10 M6: hook 3, a direct frame's overlays go to the back end's overlay surface | none |
+| 48 | `Source_Files/Misc/preferences.cpp`, `preferences.h` (`A1_RENDER_C3D=ON` builds only) | stage 10 M8: the Renderer preference (Software / GPU (experimental)) | none |
+| 49 | `ports/3ds/source/video_3ds.cpp`, `a1_3ds_platform.cpp`, `profile_3ds.cpp`, `include/a1_3ds_profile.h`, `CMakeLists.txt`, `render_c3d/` (new port files, no upstream edit; `A1_RENDER_C3D=ON` builds only) | stage 10 P1: citro3d owns the top screen, GPU present | none (the CPU present stays as `debug-c3d` `present cpu` and in the default build) |
 | 56 | `Source_Files/Misc/preferences.cpp` | Brightness removed: no dialog entry, the level pinned to the default | **Brightness** (the console's backlight replaces it) |
 
 The complete list of stubs and lost functionality, including items not tied
@@ -828,6 +834,48 @@ volumes): `screen.cpp` (for `screen_shared.h`), `marathon2.cpp` and
 `SoundFile.cpp` (2) and `preferences.cpp` (20) differ only in numbers:
 0 lines with numbers normalised. 0 diagnostics.
 
+## Stage 10: citro3d (49)
+
+Added 2026-10-16 on branch `stage10-c3d` (`CITRO3D_DESIGN.md`). **No engine
+(`Source_Files/`) file changes in P1**, so there is no `ppcheck.sh` run: the
+host build does not compile `ports/3ds/`, and the diffstat against `3ds-port`
+lists no `Source_Files/` path. Everything is behind the `A1_RENDER_C3D` CMake
+option (OFF by default; `nm` on the OFF `alephone.elf`: no `C3D_`/citro3d
+symbols).
+
+49. **P1, the GPU present** (port files only). `ports/3ds/CMakeLists.txt`:
+    option `A1_RENDER_C3D` (defines `A1_RENDER_C3D`), the sources
+    `render_c3d/{core/config.cpp,back/context.cpp,back/present.cpp}`, the
+    shader `render_c3d/shaders/present.v.pica` (picasso via
+    `ctr_add_shader_library`, embedded with `dkp_add_embedded_binary_library`),
+    `citro3d ctru` linked, `-Wl,--wrap=gfxExit`.
+    `source/video_3ds.cpp`: `present_screen()` first calls
+    `a1_c3d_present()` (citro3d, lazily initialised at the first present, owns
+    the top screen from then on); the unchanged CPU code is now
+    `present_screen_cpu()`, used when `a1_c3d_present()` returns false
+    (`debug-c3d` `present cpu`, init failed, ownership given up), and
+    `a1_c3d_note_false_return()` counts a false return while citro3d is up.
+    `source/a1_3ds_platform.cpp` `error_screen()`: `a1_c3d_release_top()`
+    first. `include/a1_3ds_profile.h`, `source/profile_3ds.cpp`: the zone
+    `c3d_wait` (`C3D_FrameBegin(0)`, A1_RENDER_C3D builds only).
+    `scripts/3ds/run-azahar.sh` `--c3d FILE` (installs `debug-c3d`),
+    `scripts/3ds/tests/perf-bench.sh` `C3D=FILE`, `scripts/3ds/tests/c3d-pixdiff.py`
+    and `scripts/3ds/tests/c3d/p1-*.cfg` (tests).
+
+    **P1 follow-ups (2026-10-17, port files only, no `Source_Files/` change):**
+    critic minor 4: `a1_c3d_release_top()` now returns whether the top screen is
+    free and is safe from any thread (`render_c3d/back/context.cpp`
+    `release_from_any_thread()`, the `gfxExit` wrapper likewise); `error_screen()`
+    keeps off the top screen when it is not, and does not re-init gfx then
+    (`PERF.md` "P1 follow-ups").
+    Critic minor 5: `render_c3d/back/present.cpp` flushes the staging's written rows
+    (`kStagingWrittenBytes`, 512x240, 480 KiB) instead of the whole 512 KiB.
+    Critic minor 1: `debug-c3d` `present_diff N` (`render_c3d/core/config.*`,
+    `back/present.cpp`); `source/video_3ds.cpp`: the 640x480 loop of
+    `present_screen_cpu()` moved into `half_rotate()` (forced inline; OFF-build
+    `video_3ds.o` disassembly identical) and `present_reference()` (A1_RENDER_C3D only);
+    `scripts/3ds/tests/c3d/p1-diff.cfg`.
+
 ## Backlog item 9: player name (50)
 
 Added 2026-10-17 on branch `3ds-port-player-name` (off `3ds-port`). Numbers
@@ -955,6 +1003,167 @@ item 14 in `NEXT-SPRINT.md`).
 "Source_Files/CSeries/csalerts_sdl.cpp"`, both volumes): DIFFER (2 lines), **0 lines with
 numbers normalised** (only `__LINE__` moved); `-fsyntax-only` exit 0, 0 diagnostics
 (167 934 and 89 269 preprocessed lines).
+
+## Stage 10 M0: the renderer seam (45)
+
+Added 2026-10-26 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` 1.2 and section 7, "M0
+specification"). The first engine edit of stage 10, fenced
+`#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)`: the default build
+(`A1_RENDER_C3D=OFF`) and every non-3DS build preprocess as before.
+
+45. **`RenderMain/render.cpp`: hook 1 in `render_view()`.** `#include "a1_c3d.h"` after
+    `screen.h`, and the block that picks the rasteriser and draws the sorted tree (upstream
+    lines 466-506) is, in the C3D build, replaced by the design's 1.2 code: the draw is wrapped
+    in a captureless lambda (`SetView`, `Begin`, `Render_Classic.render_tree()`, the viewer
+    sprite layer unless the tree draws it, `End`) and handed with `Rasterizer_SW` to
+    `a1_c3d::render_frame()`, which either does the frame itself (true: in M0 only on a
+    `debug-c3d diff` frame, where the harness records one traversal and replays it into the
+    view) or returns false, and the lambda then draws it with `Rasterizer_SW` exactly as
+    upstream. The upstream lines are kept unchanged in the `#else` branch; an `#error` guards
+    the fence against `HAVE_OPENGL`. Port side (no engine edit): `ports/3ds/render_c3d/`
+    `include/a1_c3d.h`, `front/{frame,filter}.cpp`, `back/view.cpp`, `core/{diff,bmp,stats,
+    calibrate}.cpp`, `core/classify.h`; `CMakeLists.txt` adds `render_c3d/include` to the
+    engine targets' include path in C3D builds. Without a `debug-c3d` file `render_frame()`
+    returns false after one flag test.
+
+**Non-3DS check** (2026-10-26, `ppcheck.sh Source_Files/RenderMain/render.cpp
+Source_Files/RenderMain/render.cpp`, both volumes): **IDENTICAL** (127 509 and 120 992
+preprocessed lines, stderr 0); `-fsyntax-only` exit 0, 0 diagnostics. The OFF 3DS builds
+(`build-3ds`, `build-3ds-prof`): `objdump -d` of `alephone.elf` identical to the previous commit's,
+`nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0, 0 warnings.
+
+## Stage 10 M2: the collection hooks (46)
+
+Added 2026-10-31 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M2 specification", "Hooks
+2a/2b"). Fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)` like 45.
+
+46. **`RenderMain/shapes.cpp`: hooks 2a and 2b.** `#include "a1_c3d.h"` after `SW_Texture_Extras.h`;
+    `a1_c3d::collections_changed();` as the last statement of `load_collections()` (2a, after the last
+    `time_mark`, so `SW_Texture_Extras::Load` is covered) and of `unload_all_collections()` (2b). Every
+    caller of either function is covered (`shell_misc.cpp`, `interface.cpp`, `screen.cpp`,
+    `PlayerImage_sdl.cpp`, `images.cpp`). The function bumps the C3D texture cache's generation, so a
+    bitmap or shading table reallocated at an old address can never hit an old entry (the old
+    generation's textures are freed after the next `frame_begin()`). It touches only the pure cache
+    (`render_c3d/back/texcache.cpp`), so it is safe with citro3d down and logs
+    `[c3d] tex: collections changed (gen N, M entries retire)` only when `debug-c3d` selects
+    `renderer c3d`. Port side (no engine edit): `include/a1_c3d.h` declares it, `back/texcache.{h,cpp}`
+    define it and own the cache instance (a stub allocator until M2 part 6).
+
+**Non-3DS check** (2026-10-31, `ppcheck.sh Source_Files/RenderMain/shapes.cpp
+Source_Files/RenderMain/shapes.cpp`, both volumes): **DIFFER: 2 lines, 0 with numbers normalised**
+(only `__LINE__` shifts; 145 403 and 139 138 preprocessed lines, stderr 0); `-fsyntax-only` exit 0,
+0 diagnostics.
+
+**3DS builds** (2026-11-02, on `686e5cd01`): the OFF builds (`build-3ds`, `build-3ds-prof`) compared with
+`d4dd81eb3` (before M2): `objdump -d` of `alephone.elf` differs in **one word** each, the line-number
+argument of `vassert` in `get_collection_headers` (`shapes.cpp`, 2314 → 2323: the 9 fenced lines above
+it), no instruction changed; `nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds
+(`build-3ds-c3d`, `build-3ds-c3d-prof` included).
+
+## Stage 10 M6: direct mode, hook 3 (47)
+
+Added 2026-11-07 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M6 specification", "Hook 3"). Every edit is
+fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)` (one inner `#ifdef A1_RENDER_C3D` inside an existing
+`#ifdef A1_PLATFORM_3DS`), like 45.
+
+47. **`RenderOther/screen.cpp` and `RenderOther/screen_shared.h`: a direct frame's overlays go to the back end's overlay
+    surface and the world-view blit is skipped.**
+    - `screen.cpp`:1503-1587, two static helpers, placed **after the file's last `__LINE__` user** (`logWarning` in
+      `change_screen_mode`, :1208) so the OFF build's line constants do not move: `#include "a1_c3d.h"`;
+      `a1_c3d_direct_blocks()` returns the bit mask of the eligibility conditions that fail (not native, view rect /
+      interlace / low resolution, acceleration, overhead map, terminal, `!using_default_gamma`, darken, network, Lua HUD,
+      movie recording; 0 = the frame may stay on the GPU); `a1_c3d_overlay_bands()` returns up to 3 conservative row bands
+      the overlays may write (crosshair from `GetCrosshairData()`, the top text block from `ShowPosition`, the script HUD
+      line and the unexpired `Messages`, the bottom block from FPS / the input line).
+    - **3a** (:1784-1787), just before `render_view`: `a1_c3d::direct_policy(a1_c3d_direct_blocks(...))`.
+    - **3b** (:1825-1847, :1904-1907): after `render_view`, `a1_ov = a1_c3d::overlay_begin(bands)` when
+      `a1_c3d::direct_frame()`; the crosshair renders into `a1_ov ? a1_ov : world_pixels`, `disp_pixels` starts as
+      `a1_ov ? a1_ov : world_pixels`, and the world-view `update_screen()` condition gets `&& !a1_ov`.
+    - **3c** (:1957-1968, :1979-1981): when `a1_ov`, `a1_3ds::bottom_frame(...)` runs right after the darken test and
+      before `MainScreenUpdateRect(s)` (the present), and the later call is skipped (`if (!a1_ov)`), so the bottom
+      screen's CPU work overlaps the GPU's view frame.
+    - `screen_shared.h`:496-498 `#include "a1_c3d.h"`; `DisplayText` (:512-520) and `DisplayTextCursor` (:551-560) map
+      their colours with the destination's format when the destination is `a1_c3d::overlay_target()` (the RGBA8888
+      overlay surface: with `world_pixels->format` a bitmap font and the cursor would get alpha 0), else with
+      `world_pixels->format` as before.
+    Port side (no engine edit): `include/a1_c3d.h` declares `DirectBlock`, `direct_policy`, `direct_frame`,
+    `OverlayBand`, `overlay_begin`, `overlay_target`; `front/frame.cpp` and `back/overlay.cpp` define them.
+
+**Non-3DS check** (2026-11-07, `ppcheck.sh "Source_Files/RenderOther/screen.cpp Source_Files/RenderOther/screen_shared.h"
+"Source_Files/RenderOther/screen.cpp"`, both volumes): **IDENTICAL** (197 087 and 125 183 preprocessed lines, stderr 0);
+`-fsyntax-only` exit 0, 0 diagnostics.
+
+**3DS builds** (2026-11-07): `build-3ds` and `build-3ds-prof`: `objdump -d alephone.elf | tail -n +3` **identical** to the
+copies saved at the start of M6 (`build/m6/start/`, after the `stage10-bb` merge); a first placement of the helpers before
+`change_screen_mode` moved 7 `logWarning` line constants (and one literal-pool word), hence the placement above;
+`nm | grep -ciE 'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds.
+
+## Stage 10 M8: the Renderer preference (48)
+
+Added 2026-11-08 on branch `stage10-c3d` (`CITRO3D_DESIGN.md` section 7, "M8"). Every edit is an inner
+`#ifdef A1_RENDER_C3D` inside an existing `#ifdef A1_PLATFORM_3DS` block of patch 40 (the Bottom Screen preference), so the
+preference exists only in builds that have the renderer.
+
+48. **`Misc/preferences.h` and `Misc/preferences.cpp`: Graphics > Heads-Up Display > Renderer, "Software" (0, the default) or
+    "GPU (experimental)" (1), saved as `<graphics c3d_renderer="0|1">`.**
+    - `preferences.h`:108-112: the field `int16 c3d_renderer` in `graphics_preferences_data`.
+    - `preferences.cpp`:1043-1047 the labels; :1405-1410 the `w_select` under Bottom Screen; :1559-1566 the dialog's apply
+      (`changed = true` on a change, so the file is written); :3795-3797 `root.put_attr`; :4314-4316 the default 0;
+      :4550-4553 the validate step (anything but 0 or 1 becomes 0); :4851-4853 `root.read_attr`.
+    Port side (no engine edit): `render_c3d/front/frame.cpp` reads `graphics_preferences->c3d_renderer` before each frame's
+    first decision (hook 3a, then `render_frame`) and passes it to `back::config_preference()`, which applies the bundle
+    (`core/config.cpp` `config_apply_preference`: `renderer c3d`, `mode direct`, `fallback sw`) **only when there is no
+    `debug-c3d` file** (the file decides everything when present, so tests and runbooks are unchanged). The switch takes
+    effect at the next frame. An OFF build that rewrites the preferences file drops the attribute (its writer does not know
+    the field), so the setting falls back to Software there and the next ON build reads the default.
+
+**Non-3DS check** (2026-11-08, `ppcheck.sh "Source_Files/Misc/preferences.cpp Source_Files/Misc/preferences.h"
+"Source_Files/Misc/preferences.cpp Source_Files/RenderOther/screen.cpp"`, both volumes): `preferences.cpp` **DIFFER: 20 lines,
+0 with numbers normalised** (only `__LINE__` shifts; 235 000 and 164 364 preprocessed lines, stderr 0); `screen.cpp`
+(includes `preferences.h`) **IDENTICAL**; `-fsyntax-only` exit 0, 0 diagnostics.
+
+**3DS builds** (2026-11-08): the OFF builds (`build-3ds`, `build-3ds-prof`) compared with HEAD's `preferences.*` built in the
+same trees: `objdump -d alephone.elf` differs in **10 data words** each, all `__LINE__` constants of `logWarning` / `logError`
+in the preferences reader and writer (3 667-3 698 move by 19, 4 244-4 246 by 22: the fenced lines above them); no instruction
+changed. The dialog and save sites sit above those calls, so this cannot be placed like 47. `nm | grep -ciE
+'citro|C3D_|a1_c3d'` = 0; 0 warnings in all four builds.
+
+## Stage 10 B: the zero-copy present (55)
+
+Added 2026-10-26 on branch `stage10-bb`, merged into `stage10-c3d` 2026-11-07 before M6 (user decision) (stage 10 plan B-b, `CITRO3D_DESIGN.md` 5.7.2; built on the
+user's decision of 2026-10-26 although B-a's console saving was below the 0.5 ms rule, and kept off
+`stage10-c3d` until it is re-measured at 60 fps with the renderer).
+
+55. **`RenderOther/screen.cpp`: the 400x240 `main_surface` can live in a linear buffer the GPU
+    reads.** At the one creation site (`change_screen_mode`, `if (!main_surface)`, now :1140-1149),
+    fenced `#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)`, the engine first asks
+    `a1_3ds::main_surface_pixels(vmode_width, vmode_height, pitch)` (declared in `a1_3ds_platform.h`
+    under `#ifdef A1_RENDER_C3D`, which `screen.cpp` already includes under `A1_PLATFORM_3DS`;
+    defined in `render_c3d/back/present.cpp`). It returns `nullptr` unless the surface is 400x240
+    (HUD + Map in game) and `debug-c3d` says `present gpu` and `zero_copy 1` (the default); then one
+    512 KiB `linearAlloc` buffer, pitch 2048 bytes (the present staging's shape), zeroed, flushed,
+    allocated once and never freed, and the surface is made with `SDL_CreateRGBSurfaceFrom` (same
+    masks, so the same `SDL_PIXELFORMAT_RGB888`). Otherwise, or if that fails, upstream's
+    `SDL_CreateRGBSurface` line runs unchanged. `SDL_CreateRGBSurfaceFrom` marks the surface
+    `SDL_PREALLOC`, so the two free sites (:864-867, :975-978) leave the buffer alone and the next
+    400x240 surface gets the same one (one live `main_surface` at a time: one creation site guarded by
+    `!main_surface`). Every user of the surface goes through SDL or its `->pitch` (critic B-b review:
+    `screen.cpp` `quadruple_surface`, `draw_pattern_rect`, the present seam and SDL fallback;
+    `screen_drawing.cpp`; `interface.cpp`, `sdl_dialogs.cpp` blits and fills; `HUDRenderer_Lua`;
+    `shell.cpp` screenshots; `video_3ds.cpp` `rotate_copy`, `half_rotate`, `present_reference`), so
+    the 2048-byte pitch (not `w * 4`) changes nothing for them, and after a release the CPU present
+    shows the same buffer. Port side: the GPU present uploads straight from the surface (no CPU copy
+    into the staging) as two C3D frames and fixes the channel order with three one-channel draws
+    (design 5.7.3-5.7.5); `debug-c3d zero_copy 0` turns it off at run time. Not in the default build
+    (`A1_RENDER_C3D=OFF`): the fenced lines and the declaration compile to nothing there.
+
+**Non-3DS check** (2026-10-26, `ppcheck.sh "Source_Files/RenderOther/screen.cpp"
+"Source_Files/RenderOther/screen.cpp"`, both volumes): **IDENTICAL** (197 086 and 125 182
+preprocessed lines), `-fsyntax-only` exit 0, 0 diagnostics. **3DS OFF builds** (the check
+`ppcheck.sh` cannot make, design 5.7.7): `arm-none-eabi-objdump -d` of `build-3ds/alephone.elf` and
+`build-3ds-prof/alephone.elf` byte-identical to the parent commit's (`cb40b9db9`); `arm-none-eabi-nm
+... | grep -ciE 'citro|C3D_|a1_c3d|main_surface_pixels'` = 0 in both; 0 warnings. (`screen.cpp` has
+no `__LINE__` user after the edit, so not even line constants move.)
 
 ## Brightness removed (56)
 

@@ -1,0 +1,42 @@
+; Aleph One 3DS, citro3d back end (docs/3ds/CITRO3D_DESIGN.md, 2.1): the world vertex shader.
+; v0 = (sx, sy, w) in view pixels, v1/v2 = texcoord0/1, v3 = colour (ubyte4, 0..255).
+; Clip is scaled by w, so NDC stays at the integer vertex positions and the interpolation is
+; perspective-correct. Assembled by picasso through ports/3ds/CMakeLists.txt (its own library).
+
+; Uniforms
+.fvec proj[4]            ; Mtx_Ortho/Mtx_OrthoTilt of the target, pixels -> clip
+.fvec stereo             ; M9: x = e*P (pixels, e = -1 left / +1 right), y = w0, z = -near; (0, 1, 0, 0) when flat
+
+; Constants
+.constf k(0.5, 1.0, 0.00392156862, 0.0)   ; 1/255
+
+; Outputs
+.out opos position
+.out otc0 texcoord0
+.out otc1 texcoord1
+.out oclr color
+
+; M9 (design 7, "M9 specification", "Vertex shader"): the vertex moves horizontally by
+;   e * P * max(1 - w0/w, -near) pixels, w the eye depth (v0.z). With stereo.x = 0 the product is 0 for every finite
+;   w >= 1, so r0.x = v0.x exactly: a flat frame is unchanged. rcp reads the .x of its source (swizzled here);
+;   the float24 error of rcp/max is under 0.02 pixel at 512 (UNVERIFIED on hardware: calibration T1).
+.proc main
+	rcp r2.x, v0.z           ; 1/w
+	mul r2.x, stereo.y, r2.x ; w0/w
+	add r2.x, k.y, -r2.x     ; 1 - w0/w            (k.y = 1.0)
+	max r2.x, stereo.z, r2.x ; >= -near
+	mul r2.x, stereo.x, r2.x ; pixels
+	mov r0.xy, v0.xy
+	add r0.x, r0.x, r2.x
+	mov r0.z, k.x            ; z = 0.5: inside the ortho volume by construction
+	mov r0.w, k.y
+	dp4 r1.x, proj[0], r0
+	dp4 r1.y, proj[1], r0
+	dp4 r1.z, proj[2], r0
+	dp4 r1.w, proj[3], r0
+	mul opos, r1, v0.zzzz    ; clip *= w: same NDC, perspective-correct interpolation
+	mov otc0, v1
+	mov otc1, v2
+	mul oclr, k.zzzz, v3     ; ubyte attributes are 0..255 (0.3)
+	end
+.end

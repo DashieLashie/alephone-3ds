@@ -105,6 +105,11 @@ struct graphics_preferences_data
 	// What the bottom screen shows in game: a1_3ds::BottomMode (0 HUD + Map,
 	// 2 Classic = HUD on the top screen). docs/3ds/STAGE7.md.
 	int16 bottom_screen;
+#ifdef A1_RENDER_C3D
+	// The Renderer preference: 0 Software, 1 GPU (experimental), the citro3d
+	// renderer (docs/3ds/CITRO3D_DESIGN.md, M8). Builds with A1_RENDER_C3D only.
+	int16 c3d_renderer;
+#endif
 #endif
 };
 

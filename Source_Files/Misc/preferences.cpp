@@ -1040,6 +1040,11 @@ static const char *sw_sdl_driver_labels[5] = {
 static const char* bottom_screen_labels[] = {
 	"HUD + Map", "Classic (HUD on Top)", NULL
 };
+#ifdef A1_RENDER_C3D
+static const char* c3d_renderer_labels[] = {
+	"Software", "GPU (experimental)", NULL
+};
+#endif
 #endif
 
 static const char* ephemera_quality_labels[] = {
@@ -1400,6 +1405,12 @@ static void graphics_dialog(void *arg)
 	w_select *bottom_screen_w = new w_select(graphics_preferences->bottom_screen == 2 ? 1 : 0, bottom_screen_labels);
 	table->dual_add(bottom_screen_w->label("Bottom Screen"), d);
 	table->dual_add(bottom_screen_w, d);
+#ifdef A1_RENDER_C3D
+	// docs/3ds/CITRO3D_DESIGN.md, M8: the citro3d renderer, from the next frame.
+	w_select *c3d_renderer_w = new w_select(graphics_preferences->c3d_renderer, c3d_renderer_labels);
+	table->dual_add(c3d_renderer_w->label("Renderer"), d);
+	table->dual_add(c3d_renderer_w, d);
+#endif
 #endif
 	
 	std::vector<Plugin*> hud_plugins;
@@ -1548,6 +1559,14 @@ static void graphics_dialog(void *arg)
 		    graphics_preferences->bottom_screen = bottom_screen;
 		    changed = true;
 	    }
+#ifdef A1_RENDER_C3D
+	    const int16 c3d_renderer = static_cast<int16>(c3d_renderer_w->get_selection());
+	    if (c3d_renderer != graphics_preferences->c3d_renderer)
+	    {
+		    graphics_preferences->c3d_renderer = c3d_renderer;
+		    changed = true;
+	    }
+#endif
 #endif
 
 		auto hud_plugin = static_cast<int>(hud_plugin_w->get_selection());
@@ -3776,6 +3795,9 @@ InfoTree graphics_preferences_tree()
 	root.put_attr("scripted_effects_quality", graphics_preferences->ephemera_quality);
 #ifdef A1_PLATFORM_3DS
 	root.put_attr("bottom_screen", graphics_preferences->bottom_screen);
+#ifdef A1_RENDER_C3D
+	root.put_attr("c3d_renderer", graphics_preferences->c3d_renderer);
+#endif
 #endif
 	
 	root.add_color("void.color", graphics_preferences->OGL_Configure.VoidColor);
@@ -4292,6 +4314,9 @@ static void default_graphics_preferences(graphics_preferences_data *preferences)
 	preferences->ephemera_quality = _ephemera_medium;
 #ifdef A1_PLATFORM_3DS
 	preferences->bottom_screen = 0;   // a1_3ds::BottomHudMap
+#ifdef A1_RENDER_C3D
+	preferences->c3d_renderer = 0;    // Software
+#endif
 #endif
 }
 
@@ -4528,6 +4553,10 @@ static bool validate_graphics_preferences(graphics_preferences_data *preferences
 	// 0 HUD + Map, 2 Classic; 1 was a Map-only mode (stage 7's first version).
 	if (preferences->bottom_screen != 0 && preferences->bottom_screen != 2)
 		clamp(preferences->bottom_screen, static_cast<int16>(0));
+#ifdef A1_RENDER_C3D
+	if (preferences->c3d_renderer != 0 && preferences->c3d_renderer != 1)
+		clamp(preferences->c3d_renderer, static_cast<int16>(0));
+#endif
 #endif
 
 	return changed;
@@ -4825,6 +4854,9 @@ void parse_graphics_preferences(InfoTree root, std::string version)
 	root.read_attr("scripted_effects_quality", graphics_preferences->ephemera_quality);
 #ifdef A1_PLATFORM_3DS
 	root.read_attr("bottom_screen", graphics_preferences->bottom_screen);
+#ifdef A1_RENDER_C3D
+	root.read_attr("c3d_renderer", graphics_preferences->c3d_renderer);
+#endif
 #endif
 	
 	for (const InfoTree &vtree : root.children_named("void"))

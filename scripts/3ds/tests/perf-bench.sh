@@ -19,6 +19,9 @@
 # "bottom_screen=2" for Classic, docs/3ds/STAGE7.md); missing attributes are
 # added. The file is restored afterwards. The game must have written its
 # preferences once.
+#
+# C3D=FILE installs FILE as debug-c3d for every run (run-azahar.sh --c3d; a
+# -DA1_RENDER_C3D=ON build, docs/3ds/CITRO3D_DESIGN.md section 7).
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 label=${1:?usage: perf-bench.sh LABEL [3dsx]}
@@ -31,6 +34,8 @@ results="$out/$label.txt"
 : > "$results"
 dsp=(--no-dspfirm)
 [ "${AUDIO:-0}" = 1 ] && dsp=()
+c3d=()
+[ -n "${C3D:-}" ] && c3d=(--c3d "$C3D")
 
 if [ -n "${PREFS:-}" ]; then
 	prefs="$HOME/Applications/Azahar-2126.2/user/sdmc/3ds/alephone/Marathon 2 Preferences"
@@ -54,7 +59,7 @@ for level in $levels; do
 	for run in $(seq 1 "$runs"); do
 		log="$out/$label-L$level-r$run.log"
 		echo "perf-bench: $label level $level run $run"
-		"$repo/scripts/3ds/run-azahar.sh" --perf "$level" ${dsp[@]+"${dsp[@]}"} "$threedsx" > "$log" 2>&1 || true
+		"$repo/scripts/3ds/run-azahar.sh" --perf "$level" ${dsp[@]+"${dsp[@]}"} ${c3d[@]+"${c3d[@]}"} "$threedsx" > "$log" 2>&1 || true
 		line=$(grep -a '^\[prof\] BENCH' "$log" | tail -n 1 || true)
 		if [ -z "$line" ]; then
 			echo "perf-bench: no BENCH line; see $log" >&2

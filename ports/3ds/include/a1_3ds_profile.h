@@ -35,6 +35,20 @@ enum Zone
 	Bottom,     // the bottom screen in game: HUD/map, buttons, present (bottom_3ds.cpp)
 	Idle,       // in-game frame pacing sleep (shell.cpp)
 	Overlay,    // this profiler's overlay, once a second; not in the frame times
+#ifdef A1_RENDER_C3D
+	C3dWait,    // C3D_FrameBegin(0): waiting for the previous citro3d frame (inside Present)
+	C3dFill,    // the present's staging fill (inside Present; design 5.7.11)
+	C3dUpload,  // two_frame: frame D's C3D_FrameBegin(0), the wait for the upload (inside Present)
+	C3dVblank,  // the present's gspWaitForVBlank() (inside Present)
+	C3dNull,    // M0 null mode: the traversal with a counting rasteriser (nested in Render)
+	C3dDiff,    // M0 diff harness, the whole of a diff frame (nested in Render; diff frames are not benchmark frames)
+	C3dReadback, // M0 view readback: out-of-frame transfer + cache invalidate + conversion (nested in Render)
+	C3dDraw,    // M1 view frame: the C3D side's draw submission, ring writes and flush (nested in c3d_diff)
+	C3dTex,     // M2 texture uploads: conversion into a linear texture, its flush, VRAM promotions issued (nested in c3d_draw)
+	C3dOverlay, // M6 hook 3b: the overlay bands (rounding, merging) and the dirty-tile clear of the overlay surface
+	C3dComposite, // M6 the composite frame's CPU part: band uploads, quads, restore (inside Present; its wait is c3d_wait)
+	C3dStereo,  // M9 the replayed passes of a stereo view frame (nested in c3d_draw)
+#endif
 	kZoneCount
 };
 

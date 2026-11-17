@@ -1,0 +1,849 @@
+/*
+	Aleph One for the Nintendo 3DS, citro3d back end: lazy init, the frame, the GX
+	queue budget, release/fini, and the gfxExit wrapper
+	(docs/3ds/CITRO3D_DESIGN.md, 1.3, 2.4 and 5.1).
+
+	citro3d is brought up at the first present, not at boot: the scenario chooser
+	writes the top screen through SDL before that. From then on citro3d is the only
+	writer of the top framebuffer until release_and_fini() (HOME > Close, vhalt(),
+	the error screen), which is idempotent and also runs from __wrap_gfxExit.
+
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation; either version 3 of the License, or
+	(at your option) any later version.
+*/
+#include "context.h"
+#include "overlay.h"
+
+#include "../core/gate.h"
+#include "../core/gx_queue.h"
+#include "../core/landscape.h"
+#include "../include/a1_c3d_port.h"
+#include "draw.h"
+#include "shade.h"
+#include "stereo.h"
+#include "texcache.h"
+#include "view.h"
+#include "../core/geometry.h"
+#include "a1_3ds_platform.h"
+#include "a1_3ds_profile.h"
+
+#include <3ds.h>
+#include <citro3d.h>
+
+#include <stdio.h>
+
+#include <algorithm>
+#include <atomic>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+extern "C" void __real_gfxExit(void);
+extern "C" void __real_C3D_BindProgram(shaderProgram_s* program);
+
+namespace a1_c3d {
+namespace back {
+
+namespace {
+
+// How long a thread other than main waits for the main thread to release citro3d
+// (release_from_any_thread). The main thread presents every 33 ms in menus and in game;
+// whether it presents during a level load (3-4 s on the console) is not established, so the
+// wait covers a few seconds of not presenting: assumed, not measured. Past it the main thread
+// is taken to be blocked (e.g. on a lock the dying thread holds); the process is exiting.
+constexpr int kHandoffWaitMs = 2000;
+
+Config s_cfg;
+bool s_cfg_loaded = false;
+bool s_cfg_file = false;    // the debug-c3d file exists: the Renderer preference is ignored (M8)
+bool s_pref_logged = false; // the "ignored" line was printed
+// citro3d and its GX queue are used only by the main thread (citro3d is not thread-safe).
+// s_up and s_release_requested are also read or set from other threads (the hand-off
+// below); everything else here is main-thread state.
+std::atomic<bool> s_up{false};                  // set after a successful init, cleared by release_and_fini()
+std::atomic<bool> s_release_requested{false};   // another thread asked the main thread to release
+u32 s_main_thread_id = 0;                       // kernel thread id of the thread that brought citro3d up
+bool s_off = false;         // not in use for the rest of the run (cpu present, init failed, released)
+bool s_surrendered = false; // released for another thread: the top screen is left alone from then on
+bool s_in_frame = false;    // a C3D frame of ours is open
+bool s_abandoned = false;   // release() gave up on a queue that did not retire (design 5.6.1 b)
+bool s_releasing = false;   // release_and_fini() is running (a fatal error inside it must not re-enter)
+GxQueue s_gx;
+GateTracker s_gate;
+// C3D frames ended while the gate condition held: with suspend_gate 0 every such frame (two per
+// present of a two-frame present: U and D); with suspend_gate 1 only two_frame's re-check frame (design 5.7.6).
+unsigned s_frames_gate_closed = 0;
+uint64_t s_last_frame_end = 0;       // system tick of the last frame_end()
+bool s_view_frame_ran = false;       // a view frame ran since the present's last sample (note_view_frame)
+
+// M1: the program record (-Wl,--wrap=C3D_BindProgram) and the command-buffer measurements.
+shaderProgram_s* s_last_program = nullptr;
+unsigned s_program_binds = 0;
+// M2: the texture record (-Wl,--wrap=C3D_TexBind), unit 0.
+C3D_Tex* s_last_tex0 = nullptr;
+unsigned s_tex_binds = 0;
+unsigned s_tex1_foreign_binds = 0;   // M3: units 1-2 bound by anyone but back/
+const uint32_t* s_p0 = nullptr;      // gpuCmdBuf + gpuCmdBufOffset right after frame_begin() returned Ok
+struct CmdBufMax
+{
+	uint32_t frame_words[2] = {0, 0};   // by FrameKind: P1 - P0
+	uint32_t end_words[2] = {0, 0};     // C3D_FrameEnd's own words (only where the buffer was not empty)
+	uint32_t draw_words = 0;            // one C3D_DrawElements, citro3d's lazy state flush included
+	uint32_t readback_words = 0;        // the flushing split + the transfer
+	float usage = 0.0f;                 // C3D_GetCmdBufUsage() after any C3D_FrameEnd
+	unsigned frames[2] = {0, 0};
+} s_cb;
+unsigned s_cb_views_logged = 0;   // s_cb.frames[1] at the previous "[c3d] cmdbuf" stats line
+
+unsigned s_presents = 0, s_odd = 0, s_false_returns = 0, s_releases = 0, s_gfx_exits = 0;
+unsigned s_stats_presents = 0;   // presents at the previous stats line
+double s_gpu_ms[3] = {0, 0, 0};  // C3D_GetDrawingTime() sums since the previous stats line, by GpuTime
+unsigned s_gpu_n[3] = {0, 0, 0};
+uint64_t s_stats_tick = 0;
+
+constexpr uint64_t kTicksPerSecond = SYSCLOCK_ARM11;
+
+// The null-mode, diff, play and direct summaries on the normal exit path too; idempotent with release_and_fini()'s call.
+void register_final_stats()
+{
+	static bool registered = false;
+	if (registered)
+		return;
+	registered = true;
+	atexit([] { frame_final_stats(); });
+}
+
+void load_config()
+{
+	if (s_cfg_loaded)
+		return;
+	s_cfg_loaded = true;
+	std::ifstream in(a1_3ds::user_dir() + "/debug-c3d");
+	if (!in)
+		return;
+	s_cfg_file = true;
+	std::stringstream text;
+	text << in.rdbuf();
+	std::vector<std::string> problems;
+	config_parse(s_cfg, text.str(), problems);
+	landscape_set_part_rows(static_cast<int>(s_cfg.land_cut));   // before any landscape texture (M5 test key)
+	printf("[c3d] debug-c3d: present %s, calibrate %d, alt_load %d, odd_surface %d, test_vhalt %d, "
+	       "present_diff %u, suspend_gate %d, retire_wait_ms %u, force_abandon %d, close_frame %d, "
+	       "two_frame %d, zero_copy %d, renderer %s, mode %s, diff %u, diff_frames %u, classes 0x%lx, fullbright %d, "
+	       "dump %d, readback_cal %d, readback_cal_resize %d, cmdbuf_kib %u, gxq_budget %u, ring_vertices %u, "
+	       "ring_indices %u, reserve_extra %u, textures %d, uv_half %d, diff_tol %u, vram_cap %u, "
+	       "linear_cap %u, promote_max %u, lit %d, alpha_x2 %d, play %d, play_check %u, rect_bias %u, fail_every %u, landscape_tol %u, land_cut %u, overlays %u, direct_check %u, overlay_audit %u, seed_check %d, band_from_end %d, view_v_flip %d, g3a %d, sw_every %u, fallback %s, stereo %d, stereo_k %u, stereo_w0 %u, stereo_near %u, stereo_weapon %d, stereo_ramp %u, stereo_fill %d, stereo_slider %d, stereo_force %d, stereo_cal %d, stereo_check %u, stereo_gaps %d, stereo_edge %d, stereo_land_w %u, stereo_fail %d, vram_cap_set %d, film \"%s\"\n",
+	       s_cfg.present_gpu ? "gpu" : "cpu", s_cfg.calibrate, s_cfg.alt_load, s_cfg.odd_surface,
+	       s_cfg.test_vhalt, s_cfg.present_diff, s_cfg.suspend_gate, s_cfg.retire_wait_ms,
+	       s_cfg.force_abandon, s_cfg.close_frame, s_cfg.two_frame, s_cfg.zero_copy, s_cfg.renderer_c3d ? "c3d" : "sw",
+	       s_cfg.mode == Mode::Null ? "null" : s_cfg.mode == Mode::Direct ? "direct" : "readback",
+	       s_cfg.diff, s_cfg.diff_frames, static_cast<unsigned long>(s_cfg.classes), s_cfg.fullbright,
+	       s_cfg.dump, s_cfg.readback_cal, s_cfg.readback_cal_resize, s_cfg.cmdbuf_kib, s_cfg.gxq_budget,
+	       s_cfg.ring_vertices, s_cfg.ring_indices, s_cfg.reserve_extra, s_cfg.textures, s_cfg.uv_half,
+	       s_cfg.diff_tol, s_cfg.vram_cap, s_cfg.linear_cap, s_cfg.promote_max, s_cfg.lit, s_cfg.alpha_x2, s_cfg.play,
+	       s_cfg.play_check, s_cfg.rect_bias, s_cfg.fail_every, s_cfg.landscape_tol, s_cfg.land_cut, s_cfg.overlays, s_cfg.direct_check, s_cfg.overlay_audit, s_cfg.seed_check, s_cfg.band_from_end, s_cfg.view_v_flip, s_cfg.g3a, s_cfg.sw_every, s_cfg.fallback_sw ? "sw" : "readback", s_cfg.stereo, s_cfg.stereo_k, s_cfg.stereo_w0, s_cfg.stereo_near, s_cfg.stereo_weapon, s_cfg.stereo_ramp, s_cfg.stereo_fill, s_cfg.stereo_slider, s_cfg.stereo_force, s_cfg.stereo_cal, s_cfg.stereo_check, s_cfg.stereo_gaps, s_cfg.stereo_edge, s_cfg.stereo_land_w, s_cfg.stereo_fail, s_cfg.vram_cap_set, s_cfg.film.c_str());
+	// The null-mode and diff summaries on the normal exit path too (citro3d never up, a CPU present, an
+	// abandoned release); idempotent with release_and_fini()'s call. Registered after the platform's
+	// own atexit handlers, so it runs before close_outputs flushes the log.
+	register_final_stats();
+	if (s_cfg.present_diff && s_cfg.calibrate)
+		printf("[c3d] debug-c3d: present_diff ignored with calibrate (the target holds a flat colour)\n");
+	for (const std::string& p : problems)
+		printf("[c3d] debug-c3d: %s\n", p.c_str());
+}
+
+unsigned long kib(u32 bytes)
+{
+	return static_cast<unsigned long>(bytes / 1024);
+}
+
+void log_final_stats()
+{
+	cmdbuf_log("final");
+	printf("[c3d] final: presents=%u odd_surface=%u gx_high_water=%d gx_refused=%u "
+	       "present_screen_false_returns=%u gate_skipped=%u gate_episodes=%u frames_gate_closed=%u%s\n",
+	       s_presents, s_odd, s_gx.high_water(), s_gx.refused(), s_false_returns, s_gate.total_skipped(),
+	       s_gate.episodes(), s_frames_gate_closed, s_abandoned ? " abandoned=1" : "");
+}
+
+u32 current_thread_id()
+{
+	u32 id = 0;
+	if (R_FAILED(svcGetThreadId(&id, CUR_THREAD_HANDLE)))   // svc.h:913, CUR_THREAD_HANDLE svc.h:133
+		return 0xFFFFFFFF;                                  // matches no thread: treated as "not main"
+	return id;
+}
+
+GateInputs gate_inputs()
+{
+	GateInputs g;
+	g.gpu_right = gspHasGpuRight();            // gspgpu.h:122: a cached flag, cleared by GSPGPU_ReleaseRight
+	g.should_close = aptShouldClose();         // apt.h:155
+	g.suspended = a1_3ds::app_suspended();     // input_3ds.cpp: s_in_home || s_asleep
+	return g;
+}
+
+uint64_t now_ms()
+{
+	return svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000);
+}
+
+// Design 5.6.1 b: poll C3D_FrameBegin(C3D_FRAME_NONBLOCK) (renderqueue.h:24, "Return false instead of
+// waiting if the GPU is busy"), sleeping 1 ms between the tries, up to `limit_ms` (> 0). True =
+// retired and now inside a frame. Never gxCmdQueueWait(q, N > 0): gx.h:125, any positive timeout
+// blocks in gspWaitForAnyEvent, which after a Close may never be signalled.
+bool wait_retired(uint32_t limit_ms, uint32_t& waited_ms)
+{
+	return retire_wait([] { return C3D_FrameBegin(C3D_FRAME_NONBLOCK); },
+	                   [](int ms) { svcSleepThread(1000000LL * ms); }, now_ms, limit_ms,
+	                   waited_ms) == RetireResult::Retired;
+}
+
+// Design 5.6.1 b: give up on a queue that does not retire. C3D_Fini (unbounded wait) and
+// present_free (the GPU might still read the staging image and texture if it ever ran the work)
+// are skipped; the top screen is surrendered for good, so no CPU present writes into the
+// framebuffer the abandoned transfer targets. s_up goes false last (a thread waiting in
+// release_from_any_thread goes on only when this one is done). The real gfxExit() still runs
+// (__wrap_gfxExit): without gspExit the GSP event thread outlives the heap (STAGE5.md).
+void abandon(const char* where, uint32_t waited_ms, const char* why)
+{
+	printf("[c3d] release abandoned (%s): %s after %u ms (retire_wait_ms %u); C3D_Fini and the buffers are "
+	       "left alone, the top screen is surrendered\n",
+	       where, why, waited_ms, s_cfg.retire_wait_ms);
+	s_in_frame = false;
+	s_off = true;
+	s_surrendered = true;
+	s_abandoned = true;
+	stereo_end();   // M9: 3D mode off (a mode byte, no citro3d call): the surrendered top screen is not left in 3D mode
+	log_final_stats();
+	fflush(stdout);
+	s_up = false;
+	s_releasing = false;
+}
+
+} // namespace
+
+bool on_main_thread()
+{
+	return current_thread_id() == s_main_thread_id;
+}
+
+bool release_from_any_thread(const char* who)
+{
+	if (!s_up)
+	{
+		// Not up (yet): make sure it never comes up after a fatal error elsewhere (ensure_up).
+		s_release_requested = true;
+		return true;
+	}
+	if (on_main_thread())
+	{
+		release_and_fini();
+		return true;
+	}
+	// Critic P1 minor 4: error_screen() (on_abort/on_terminate, alert_user) and SDL_Quit's
+	// gfxExit() can run on another thread, e.g. an assertion on the audio thread, while the
+	// main thread is inside a C3D frame. citro3d is not thread-safe, so this thread makes no
+	// citro3d call: it asks the main thread, whose next present (ensure_up) releases, and
+	// sleeps until then (never spins: Horizon threads are cooperative). The wait is bounded:
+	// a main thread that does not present again (blocked) leaves citro3d up, and the caller
+	// then keeps off the top screen. The process exits afterwards in every case.
+	printf("[c3d] %s on a thread other than main (thread %lu, main %lu): asking the main thread to release\n",
+	       who, static_cast<unsigned long>(current_thread_id()), static_cast<unsigned long>(s_main_thread_id));
+	fflush(stdout);
+	s_release_requested = true;
+	for (int ms = 0; ms < kHandoffWaitMs && s_up; ++ms)
+		svcSleepThread(1000000);
+	if (!s_up)
+	{
+		printf("[c3d] %s: released by the main thread\n", who);
+		fflush(stdout);
+		return true;
+	}
+	printf("[c3d] %s: the main thread did not release within %d ms; citro3d left alone (still owns the top "
+	       "screen)\n", who, kHandoffWaitMs);
+	fflush(stdout);
+	return false;
+}
+
+void release_and_fini()
+{
+	// s_up is cleared only at the end (after the logs); a fatal error raised on this thread
+	// while releasing (e.g. by a failing printf) must not release a second time.
+	if (!s_up || s_releasing)
+		return;
+	s_releasing = true;
+	++s_releases;
+	const Config& cfg = config();
+	const GateInputs g = gate_inputs();
+	const uint64_t since_ms =
+		s_last_frame_end ? (svcGetSystemTick() - s_last_frame_end) / (SYSCLOCK_ARM11 / 1000) : 0;
+	// d2: the state first, then one line after each step.
+	printf("[c3d] release #%u: in_frame %d, gate %s (gpu_right %d, should_close %d, suspended %d), "
+	       "suspend_gate %d, frames ended with the gate closed %u, skipped presents %u, %llu ms since the "
+	       "last frame end\n",
+	       s_releases, s_in_frame, g.closed() ? "closed" : "open", g.gpu_right, g.should_close, g.suspended,
+	       cfg.suspend_gate, s_frames_gate_closed, s_gate.total_skipped(),
+	       static_cast<unsigned long long>(since_ms));
+	fflush(stdout);
+	// Design 1.3 / 5.1: end any open frame; an empty frame (the queue has retired); detach;
+	// C3D_Fini (which waits for the queue and destroys the targets); then the top screen is the
+	// console's again. 5.6.1 b: the wait for the queue is bounded, and gives up (abandon).
+	if (s_in_frame)
+	{
+		C3D_FrameEnd(0);
+		s_in_frame = false;
+		printf("[c3d] release: open frame ended\n");
+		fflush(stdout);
+	}
+	if (cfg.force_abandon)
+	{
+		abandon("release", 0, "force_abandon 1, not polling");
+		return;
+	}
+	if (cfg.close_frame && g.closed())
+	{
+		printf("[c3d] release: close_frame 1: one forced present frame (gate condition holds)\n");
+		fflush(stdout);
+		if (!present_close_frame())
+			return;   // abandoned inside (frame_begin)
+	}
+	uint32_t waited = 0;
+	bool retired;
+	if (cfg.retire_wait_ms == 0)
+	{
+		printf("[c3d] release: waiting for the queue (unbounded: retire_wait_ms 0)\n");
+		fflush(stdout);
+		const uint64_t t0 = now_ms();
+		retired = C3D_FrameBegin(0);
+		waited = static_cast<uint32_t>(now_ms() - t0);
+	}
+	else
+	{
+		printf("[c3d] release: waiting for the queue (up to %u ms)\n", cfg.retire_wait_ms);
+		fflush(stdout);
+		retired = wait_retired(cfg.retire_wait_ms, waited);
+	}
+	if (!retired)
+	{
+		abandon("release", waited, "the GPU queue did not retire");
+		return;
+	}
+	printf("[c3d] release: queue retired after %u ms\n", waited);
+	C3D_FrameEnd(0);   // the empty frame: no GPU work, one whole-heap GSPGPU_FlushDataCache (design 5.6.1 b)
+	printf("[c3d] release: empty frame ended\n");
+	present_detach();
+	printf("[c3d] release: detached; calling C3D_Fini\n");
+	fflush(stdout);
+	C3D_Fini();
+	present_free();
+	view_free();   // the view target went with C3D_Fini; the readback staging and the VBO are ours
+	overlay_free();   // M6: the overlay texture, surface and buffer (overlay_target() is nullptr from now on)
+	texcache_log("final");
+	texcache_release_all();   // every texture slot and its C3D_Tex (C3D_TexDelete only frees memory)
+	shade_free();   // the shade LUT (unit 1 keeps it until C3D_Fini, M3)
+	draw_free();   // the world program and the rings (not on the abandon path, which returns above)
+	s_off = true;
+	printf("[c3d] release done: C3D_Fini returned; linear free %lu KiB, VRAM free %lu KiB\n",
+	       kib(linearSpaceFree()), kib(vramSpaceFree()));
+	frame_final_stats();   // front/frame.cpp: the null-mode and diff summaries
+	log_final_stats();
+	fflush(stdout);
+	// Last: a thread waiting in release_from_any_thread() goes on (and may take the console
+	// over) only when this thread is done, logging included.
+	s_up = false;
+	s_releasing = false;
+}
+
+bool release_pending()
+{
+	return s_release_requested;
+}
+
+bool top_surrendered()
+{
+	return s_surrendered;
+}
+
+bool is_up()
+{
+	return s_up;
+}
+
+const Config& config()
+{
+	load_config();
+	return s_cfg;
+}
+
+// Main thread only (hook 3a, render_frame). s_cfg changes at run time only here, and only without a debug-c3d file, so the
+// test keys read from other threads (test_vhalt, the error-screen hand-off) never see a change.
+void config_preference(bool gpu)
+{
+	load_config();
+	if (s_cfg_file)
+	{
+		if (gpu && !s_pref_logged)
+		{
+			s_pref_logged = true;
+			printf("[c3d] preference: Renderer GPU ignored (debug-c3d decides)\n");
+		}
+		return;
+	}
+	const bool was_stereo = s_cfg.stereo;
+	if (config_apply_preference(s_cfg, gpu))
+	{
+		if (gpu)
+			register_final_stats();
+		printf("[c3d] preference: Renderer %s\n", gpu ? "GPU (renderer c3d, mode direct, fallback sw)" : "Software");
+		fflush(stdout);
+	}
+	// M9: 3D mode follows enabled (a mode byte only; it takes effect at the next top swap). Before citro3d is up the
+	// objects are not decided yet: present_init reads cfg.stereo itself.
+	if (s_cfg.stereo != was_stereo && s_up)
+		stereo_follow(s_cfg);
+}
+
+bool config_has_file()
+{
+	load_config();
+	return s_cfg_file;
+}
+
+bool ensure_up()
+{
+	if (s_up)
+		return !serve_release();
+	if (s_off || s_release_requested)
+		return false;
+	load_config();
+	if (!s_cfg.present_gpu)
+	{
+		s_off = true;
+		printf("[c3d] present cpu: citro3d not started\n");
+		return false;
+	}
+	if (gfxGetScreenFormat(GFX_TOP) != GSP_RGBA8_OES)
+	{
+		s_off = true;
+		printf("[c3d] top screen format is not RGBA8: citro3d not started\n");
+		return false;
+	}
+	if (gate_closed())   // design 5.6.1 a: init only ever happens with the gate open
+		return false;
+	const u32 linear0 = linearSpaceFree(), vram0 = vramSpaceFree();
+	const size_t cmdbuf_bytes = static_cast<size_t>(s_cfg.cmdbuf_kib) * 1024;
+	if (!C3D_Init(cmdbuf_bytes))
+	{
+		s_off = true;
+		printf("[c3d] C3D_Init failed: CPU present\n");
+		return false;
+	}
+	if (!present_init())
+	{
+		present_detach();
+		C3D_Fini();
+		present_free();
+		s_off = true;
+		printf("[c3d] present setup failed: CPU present\n");
+		return false;
+	}
+	// Presents come only from the main thread (present_screen()), so this is its id.
+	s_main_thread_id = current_thread_id();
+	s_up = true;
+	s_gx = GxQueue();
+	s_gx.set_budget(static_cast<int>(s_cfg.gxq_budget));
+	s_stats_tick = svcGetSystemTick();
+	printf("[c3d] init ok: command buffer %lu KiB; linear free %lu -> %lu KiB, VRAM free %lu -> %lu KiB\n",
+	       kib(static_cast<u32>(cmdbuf_bytes)), kib(linear0), kib(linearSpaceFree()), kib(vram0), kib(vramSpaceFree()));
+	fflush(stdout);
+	return true;
+}
+
+bool gate_closed()
+{
+	return gate_inputs().closed();
+}
+
+bool serve_release()
+{
+	if (!s_up || !s_release_requested)
+		return false;
+	// The other half of release_from_any_thread(): this is the main thread. From now on
+	// the top screen is left alone (top_surrendered()): the requester goes on to the real
+	// gfxExit(), and a CPU present would write into framebuffers being freed.
+	printf("[c3d] release requested by another thread: releasing on the main thread; the top screen "
+	       "is left alone from now on\n");
+	s_surrendered = true;
+	release_and_fini();
+	return true;
+}
+
+GatePresent gate_present()
+{
+	const Config& cfg = config();
+	const GateInputs g = gate_inputs();
+	const bool closed = g.closed();
+	const bool have_citro = s_up || s_surrendered;
+	const bool skip = closed && cfg.suspend_gate && have_citro;
+	if (have_citro)
+	{
+		// d5: transitions, once each; the pure logic is core/gate.h (host-tested).
+		const unsigned n = s_presents + s_gate.total_skipped() + (skip ? 0 : 1);
+		switch (s_gate.on_present(closed, skip))
+		{
+		case GateTracker::Event::Closed:
+			printf("[c3d] gate closed at present %u (gpu_right %d, should_close %d, suspended %d)%s\n", n,
+			       g.gpu_right, g.should_close, g.suspended,
+			       cfg.suspend_gate ? "" : "; suspend_gate 0: presenting anyway");
+			fflush(stdout);
+			break;
+		case GateTracker::Event::Reopened:
+			printf("[c3d] gate open again after %u skipped presents\n", s_gate.episode_skipped());
+			fflush(stdout);
+			break;
+		case GateTracker::Event::None:
+			break;
+		}
+	}
+	if (!closed || !cfg.suspend_gate)
+		return GatePresent::Open;
+	return have_citro ? GatePresent::Skip : GatePresent::Cpu;
+}
+
+void crumb(const char* what)
+{
+	printf("[c3d] d3 %s\n", what);
+	fflush(stdout);
+}
+
+FrameStart frame_begin(FrameZone zone)
+{
+	if (!s_up || s_in_frame)
+		return FrameStart::AlreadyInFrame;
+	const Config& cfg = config();
+	bool ok;
+	{
+#ifdef A1_PROFILE
+		::a1_3ds::prof::Scope prof_scope(zone == FrameZone::Upload ? ::a1_3ds::prof::C3dUpload
+		                                                          : ::a1_3ds::prof::C3dWait);
+#else
+		(void)zone;
+#endif
+		// With the gate open this is the measured path, unchanged (never C3D_FRAME_SYNCDRAW, design
+		// 2.4). With the gate condition true (only reachable with suspend_gate 0, or from
+		// release's close_frame) the wait is bounded (design 5.6.1 b).
+		if (cfg.retire_wait_ms != 0 && gate_closed())
+		{
+			char line[96];
+			snprintf(line, sizeof line, "frame_begin: before (bounded, up to %u ms)", cfg.retire_wait_ms);
+			crumb(line);
+			uint32_t waited = 0;
+			ok = wait_retired(cfg.retire_wait_ms, waited);
+			if (!ok)
+			{
+				abandon("frame_begin", waited, "the GPU queue did not retire");
+				return FrameStart::Abandoned;
+			}
+			snprintf(line, sizeof line, "frame_begin: after, retired in %u ms", waited);
+			crumb(line);
+		}
+		else
+			ok = C3D_FrameBegin(0);
+	}
+	if (!ok)
+		return FrameStart::AlreadyInFrame;
+	s_in_frame = true;
+	s_gx.begin_frame();
+	// P0: the rewound start of this frame's command buffer (M1 "Reserves and the command buffer, measured").
+	s_p0 = gpuCmdBuf + gpuCmdBufOffset;
+	return FrameStart::Ok;
+}
+
+constexpr int kMaxBandsForWarning = 4;   // core/overlay_bands.h kMaxBands
+
+void frame_end(int drawn_linked_targets, bool gate_was_closed, FrameKind kind)
+{
+	const int total = s_gx.end_frame(drawn_linked_targets);
+	if (kind == FrameKind::Present && total > 4)
+		printf("[c3d] warning: %d GX queue entries in one present frame (design: <= 4)\n", total);
+	else if (kind == FrameKind::Composite && total > kMaxBandsForWarning + 1 + drawn_linked_targets)
+		printf("[c3d] warning: %d GX queue entries in one composite frame (M6: <= %d, M9 with two eyes: <= 7)\n", total,
+		       kMaxBandsForWarning + 1 + drawn_linked_targets);
+	else if (kind == FrameKind::View && total > 27)
+		printf("[c3d] warning: %d GX queue entries in one view frame (design 2.4: <= 27)\n", total);
+	if (gate_was_closed)
+		++s_frames_gate_closed;
+	// P1, right before C3D_FrameEnd, inside the frame where gpuCmdBuf/Size/Offset are valid
+	// (C3D_FrameEnd zeroes them: libcitro3d.a renderqueue.o C3D_FrameEnd+0x44-0x5c).
+	const uint32_t* const p1 = gpuCmdBuf + gpuCmdBufOffset;
+	const bool offset_nonzero = gpuCmdBufOffset != 0;
+	C3D_FrameEnd(GX_CMDLIST_FLUSH);
+	s_in_frame = false;
+	s_last_frame_end = svcGetSystemTick();
+	// C3D_GetCmdBufUsage() is the end of the last split over the buffer (stale when the buffer was empty
+	// at P1; cmdbuf_words then records 0 for C3D_FrameEnd's words).
+	const float usage = C3D_GetCmdBufUsage();
+	const int k = kind == FrameKind::View ? 1 : 0;
+	const CmdBufWords w = cmdbuf_words(s_p0, p1, offset_nonzero, usage, cmdbuf_size_words());
+	s_cb.frame_words[k] = std::max(s_cb.frame_words[k], w.frame_words);
+	s_cb.end_words[k] = std::max(s_cb.end_words[k], w.end_words);
+	s_cb.usage = std::max(s_cb.usage, usage);
+	++s_cb.frames[k];
+}
+
+void note_view_frame()
+{
+	s_view_frame_ran = true;
+}
+
+bool gx_take()
+{
+	return s_gx.take(gpuCmdBufOffset != 0);
+}
+
+bool gx_take_split()
+{
+	return s_gx.take_split();
+}
+
+GxQueue& gx_queue()
+{
+	return s_gx;
+}
+
+void* tex_recorded()
+{
+	return s_last_tex0;
+}
+
+unsigned tex_binds()
+{
+	return s_tex_binds;
+}
+
+unsigned tex1_foreign_binds()
+{
+	return s_tex1_foreign_binds;
+}
+
+void* program_recorded()
+{
+	return s_last_program;
+}
+
+unsigned program_binds()
+{
+	return s_program_binds;
+}
+
+uint32_t cmdbuf_size_words()
+{
+	return static_cast<uint32_t>(s_cfg.cmdbuf_kib) * 256u;
+}
+
+void cmdbuf_note_draw(uint32_t words)
+{
+	s_cb.draw_words = std::max(s_cb.draw_words, words);
+}
+
+void cmdbuf_note_readback(uint32_t words)
+{
+	s_cb.readback_words = std::max(s_cb.readback_words, words);
+}
+
+void cmdbuf_log(const char* tag)
+{
+	if (s_cb.frames[0] + s_cb.frames[1] == 0)
+		return;
+	char draw[768];
+	draw_stats_text(draw, sizeof draw);
+	printf("[c3d] cmdbuf %s: size_words=%lu view_frame_words=%lu view_end_words=%lu present_frame_words=%lu "
+	       "present_end_words=%lu draw_words=%lu readback_words=%lu usage_max=%.4f binds=%u reserves=%lu+%lu%s\n",
+	       tag, static_cast<unsigned long>(cmdbuf_size_words()),
+	       static_cast<unsigned long>(s_cb.frame_words[1]), static_cast<unsigned long>(s_cb.end_words[1]),
+	       static_cast<unsigned long>(s_cb.frame_words[0]), static_cast<unsigned long>(s_cb.end_words[0]),
+	       static_cast<unsigned long>(s_cb.draw_words), static_cast<unsigned long>(s_cb.readback_words),
+	       static_cast<double>(s_cb.usage), s_program_binds, static_cast<unsigned long>(kDrawReserveWords),
+	       static_cast<unsigned long>(kEndReserveWords), draw);
+}
+
+void note_false_return()
+{
+	if (!s_up)
+		return;
+	if (++s_false_returns == 1)
+		printf("[c3d] warning: present_screen() returned false while citro3d is up\n");
+}
+
+bool gfx_exit_hook()
+{
+	++s_gfx_exits;
+	printf("[c3d] gfxExit call #%u (citro3d %s)\n", s_gfx_exits, s_up ? "up: release first" : "down");
+	fflush(stdout);
+	return release_from_any_thread("gfxExit");
+}
+
+void count_present()
+{
+	++s_presents;
+}
+
+void count_odd_surface()
+{
+	++s_odd;
+}
+
+void sample_drawing_time(GpuTime which)
+{
+	if (which == GpuTime::Draw && s_view_frame_ran)
+	{
+		// The last finished queue is a view frame's (and its readback's), not the previous present's.
+		s_view_frame_ran = false;
+		return;
+	}
+	if (which == GpuTime::View)
+		s_view_frame_ran = false;   // this sample is the view frame's, on purpose
+	const int i = which == GpuTime::Upload ? 1 : which == GpuTime::View ? 2 : 0;
+	s_gpu_ms[i] += static_cast<double>(C3D_GetDrawingTime());
+	++s_gpu_n[i];
+}
+
+void stats_tick()
+{
+	if (s_cfg.quiet)
+		return;
+	const uint64_t now = svcGetSystemTick();
+	if (now - s_stats_tick < kTicksPerSecond)
+		return;
+	s_stats_tick = now;
+	// gpu_ms: C3D_GetDrawingTime() averaged over the period (design 5.7.3). a two-frame present
+	// (two_frame 1 or zero-copy): `draw` = frame D (draw + framebuffer transfer), `upload` = frame U
+	// (printed when the period had such samples). One-frame presents: `draw` = the whole present
+	// (upload + draw + transfer), so across the modes compare it with draw + upload.
+	char gpu[96];
+	int n = snprintf(gpu, sizeof gpu, " gpu_ms draw=%.2f", s_gpu_n[0] ? s_gpu_ms[0] / s_gpu_n[0] : 0.0);
+	if (s_gpu_n[1] > 0)
+		n += snprintf(gpu + n, sizeof gpu - n, " upload=%.2f", s_gpu_n[1] ? s_gpu_ms[1] / s_gpu_n[1] : 0.0);
+	if (s_gpu_n[2] > 0)
+		snprintf(gpu + n, sizeof gpu - n, " view=%.2f", s_gpu_ms[2] / s_gpu_n[2]);
+	printf("[c3d] stats presents=%u (+%u) odd_surface=%u gx_high_water=%d gx_refused=%u "
+	       "cmdbuf_usage=%.4f present_screen_false_returns=%u gate_skipped=%u%s\n",
+	       s_presents, s_presents - s_stats_presents, s_odd, s_gx.high_water(), s_gx.refused(),
+	       static_cast<double>(C3D_GetCmdBufUsage()), s_false_returns, s_gate.total_skipped(), gpu);
+	s_stats_presents = s_presents;
+	if (s_cb.frames[1] != s_cb_views_logged)   // a view frame ran since the previous line
+	{
+		s_cb_views_logged = s_cb.frames[1];
+		cmdbuf_log("stats");
+		texcache_log("stats");
+	}
+	s_gpu_ms[0] = s_gpu_ms[1] = s_gpu_ms[2] = 0;
+	s_gpu_n[0] = s_gpu_n[1] = s_gpu_n[2] = 0;
+}
+
+} // namespace back
+} // namespace a1_c3d
+
+// -Wl,--wrap=C3D_BindProgram (CMakeLists.txt): records the program last bound by anyone but
+// back/draw.cpp, which binds through __real_C3D_BindProgram (M1 specification, "State save and restore
+// around a view frame"), so a view frame can put the present's program back. Logs the first pointer
+// (the present's, at present_init); later binds are counted in the cmdbuf line.
+extern "C" void __wrap_C3D_BindProgram(shaderProgram_s* program)
+{
+	namespace b = a1_c3d::back;
+	b::s_last_program = program;
+	if (++b::s_program_binds == 1)
+		printf("[c3d] program: first C3D_BindProgram recorded %p (the present's, at present_init)\n",
+		       static_cast<void*>(program));
+	__real_C3D_BindProgram(program);
+}
+
+// -Wl,--wrap=C3D_TexBind (CMakeLists.txt): records the texture last bound to unit 0 by anyone but
+// back/draw.cpp, which binds through __real_C3D_TexBind, so a textured view frame can put the present's
+// back (M2 specification, "Texture binding and its restore"; citro3d has no getter: texture.o C3D_TexBind
+// only stores the pointer in the context and sets a dirty bit). Logs the first unit-0 pointer.
+extern "C" void __real_C3D_TexBind(int unitId, C3D_Tex* tex);
+extern "C" void __wrap_C3D_TexBind(int unitId, C3D_Tex* tex)
+{
+	namespace b = a1_c3d::back;
+	++b::s_tex_binds;
+	if (unitId == 0)
+	{
+		if (!b::s_last_tex0)
+			printf("[c3d] texture: first C3D_TexBind(0) recorded %p (the present's, at present_init)\n",
+			       static_cast<void*>(tex));
+		b::s_last_tex0 = tex;
+	}
+	else if (b::s_tex1_foreign_binds++ == 0)
+		printf("[c3d] texture: C3D_TexBind(%d) from outside back/: unit 1 holds the shade LUT (M3)\n", unitId);
+	__real_C3D_TexBind(unitId, tex);
+}
+
+// --- the port-internal API (a1_c3d_port.h) -------------------------------------
+
+bool a1_c3d_release_top()
+{
+	return a1_c3d::back::release_from_any_thread("release_top");
+}
+
+bool a1_c3d_owns_top()
+{
+	return a1_c3d::back::s_up.load();
+}
+
+void a1_c3d_note_false_return()
+{
+	a1_c3d::back::note_false_return();
+}
+
+// -Wl,--wrap=gfxExit: every teardown path (HOME > Close, vhalt(), the error screen)
+// reaches libctru's gfxExit() through here, so citro3d is shut down before the
+// framebuffers go away. Idempotent: with citro3d down it only calls the real one
+// (design 1.3). Called on a thread other than main while citro3d stays up (the hand-off
+// timed out), the real gfxExit() is skipped: freeing the framebuffers and closing GSP
+// under the main thread's GPU frames is worse than leaving them to the process exit
+// that follows every caller.
+extern "C" void __wrap_gfxExit(void)
+{
+	if (a1_c3d::back::gfx_exit_hook())
+	{
+		__real_gfxExit();
+		printf("[c3d] real gfxExit returned\n");   // d4
+		fflush(stdout);
+	}
+	else
+	{
+		printf("[c3d] gfxExit skipped: citro3d is still up on the main thread\n");
+		fflush(stdout);
+	}
+}
+
+// Film for the command line (design 7 "Film"): see a1_c3d_port.h.
+const char* a1_c3d_boot_film()
+{
+	static std::string path;
+	static bool done = false;
+	if (!done)
+	{
+		done = true;
+		const std::string& f = a1_c3d::back::config().film;
+		if (!f.empty())
+		{
+			std::string p = f;
+			if (p.compare(0, 6, "sdmc:/") != 0 && p[0] != '/')
+				p = a1_3ds::user_dir() + "/" + p;
+			if (FILE* fp = fopen(p.c_str(), "rb"))
+			{
+				fclose(fp);
+				printf("[c3d] film: %s (handed to the engine as a command-line file)\n", p.c_str());
+				path = p;
+			}
+			else
+				printf("[c3d] film: %s not found: ignored\n", p.c_str());
+		}
+	}
+	return path.empty() ? nullptr : path.c_str();
+}

@@ -110,6 +110,9 @@ Jan 17, 2001 (Loren Petrich):
 
 #include "Packing.h"
 #include "SW_Texture_Extras.h"
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+#include "a1_c3d.h"
+#endif
 
 #include <SDL2/SDL_rwops.h>
 #include <memory>
@@ -1190,6 +1193,9 @@ void unload_all_collections(
 		}
 		OGL_UnloadModelsImages(collection_index);
 	}
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	a1_c3d::collections_changed();   // hook 2b (PATCHES.md 46)
+#endif
 }
 
 void mark_collection(
@@ -1507,6 +1513,9 @@ void load_collections(
 	}
 #ifdef A1_PLATFORM_3DS
 	a1_3ds::time_mark("load_collections: software texture extras");
+#endif
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+	a1_c3d::collections_changed();   // hook 2a (PATCHES.md 46): bitmaps and shading tables may have moved
 #endif
 //	if (with_progress_bar)
 //		close_progress_dialog();

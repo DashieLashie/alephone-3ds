@@ -23,6 +23,12 @@
 #   --script FILE  run FILE as sdmc:/3ds/alephone/debug-input-script once the main menu is
 #                  up (scripted buttons, sticks, touches, HOME/sleep; see
 #                  ports/3ds/source/input_3ds.cpp and scripts/3ds/tests/input/)
+#   --c3d FILE     install FILE as sdmc:/3ds/alephone/debug-c3d for this run (settings of the
+#                  citro3d back end, a -DA1_RENDER_C3D=ON build: ports/3ds/render_c3d/core/config.h;
+#                  docs/3ds/CITRO3D_DESIGN.md section 7); without it the file is removed
+#   --film FILE    install FILE as sdmc:/3ds/alephone/c3d-film.filA for this run (a debug-c3d config
+#                  says "film c3d-film.filA" to replay it from the command line); without it the
+#                  file is removed
 #   --reset-prefs  move the game's preferences aside first (to <file>.bak), so it starts
 #                  with the defaults
 #   --audio-debug  audio statistics on the bottom screen and in the log every 5 s, plus a
@@ -35,6 +41,20 @@
 #                  without this option it is removed
 #   --terminal-test  install scripts/3ds/tests/plugins/Terminal Test (solo Lua: opens the
 #                  level's first terminal 3 s in; docs/3ds/STAGE7.md); without it it is removed
+#   --infravision-test  install scripts/3ds/tests/plugins/Infravision Test (solo Lua: infravision
+#                  from the level's start; docs/3ds/CITRO3D_DESIGN.md, M3); without it it is removed
+#   --invisibility-test  install scripts/3ds/tests/plugins/Invisibility Test (solo Lua: the player
+#                  invisible, two invisible compilers ahead; CITRO3D_DESIGN.md, M4); without it it is removed
+#   --level-hop-test  install scripts/3ds/tests/plugins/Level Hop Test (solo Lua: the next level 10 s
+#                  into an even-numbered one; CITRO3D_DESIGN.md, M4 m4-off.cfg); without it it is removed
+#   --look-up-test  install scripts/3ds/tests/plugins/Look Up Test (solo Lua: the view pitches up and
+#                  sways near the maximum; CITRO3D_DESIGN.md, M5 m5-lookup.cfg); without it it is removed
+#   --negative-light-test  install scripts/3ds/tests/plugins/Negative Light Test (solo Lua: every light
+#                  state at intensity -0.5; CITRO3D_DESIGN.md, M3); without it it is removed
+#   --fade-test    install scripts/3ds/tests/plugins/Fade Test (solo Lua: every fade type in turn from 3 s in;
+#                  CITRO3D_DESIGN.md, M6b); without it it is removed
+#   --liquid-test  install scripts/3ds/tests/plugins/Liquid Test (solo Lua: the player under water 3 s in, a
+#                  red flash every 2 s, negative flashes after 33 s; CITRO3D_DESIGN.md, M6b); without it it is removed
 #   --load-test    install scripts/3ds/tests/plugins/Load Test (solo Lua: saves 5 s into
 #                  level 0, teleports to level 1 at 10 s, saves again 5 s into level 1;
 #                  docs/3ds/NEXT-SPRINT.md B1); without it it is removed
@@ -60,6 +80,10 @@
 #                  portable install (a "user" folder next to the app), else
 #                  ~/Library/Application Support/Azahar/sdmc
 #   SCENARIO_SRC   scenario folder to copy (default: <repo>/data/Scenarios/Marathon 2)
+#   AZAHAR_GRAPHICS_API  unset = leave Azahar's setting alone. 0 = software rasteriser, 1 = OpenGL, 2 = Vulkan:
+#                  for this run qt-config.ini gets graphics_api=N and graphics_api\default=false; the original
+#                  file is restored on every exit path (the host-GPU backend can differ from the software one
+#                  in what a citro3d frame reads back)
 #   SCENARIO_NAME  folder name on the SD card (default: Marathon2, the game's default)
 set -euo pipefail
 
@@ -71,12 +95,21 @@ timeout=0
 screens=0
 input_debug=0
 script=
+c3d_cfg=
+film_file=
 reset_prefs=0
 audio_debug=0
 no_dspfirm=0
 decoders=0
 level_music=0
 terminal_test=0
+infravision_test=0
+negative_light_test=0
+fade_test=0
+liquid_test=0
+invisibility_test=0
+level_hop_test=0
+look_up_test=0
 load_test=0
 perf_level=
 fatal_file=
@@ -89,12 +122,21 @@ while [ $# -gt 0 ]; do
 		--screens) screens=1 ;;
 		--input-debug) input_debug=1 ;;
 		--script) shift; script=${1:?--script needs a file} ;;
+		--c3d) shift; c3d_cfg=${1:?--c3d needs a file} ;;
+		--film) shift; film_file=${1:?--film needs a file} ;;
 		--reset-prefs) reset_prefs=1 ;;
 		--audio-debug) audio_debug=1 ;;
 		--no-dspfirm) no_dspfirm=1 ;;
 		--decoders) decoders=1 ;;
 		--level-music) level_music=1 ;;
 		--terminal-test) terminal_test=1 ;;
+		--infravision-test) infravision_test=1 ;;
+		--negative-light-test) negative_light_test=1 ;;
+		--fade-test) fade_test=1 ;;
+		--liquid-test) liquid_test=1 ;;
+		--invisibility-test) invisibility_test=1 ;;
+		--level-hop-test) level_hop_test=1 ;;
+		--look-up-test) look_up_test=1 ;;
 		--load-test) load_test=1 ;;
 		--fatal) shift; fatal_file=${1:?--fatal needs a file} ;;
 		--perf) shift; perf_level=${1:?--perf needs a level number} ;;
@@ -186,6 +228,7 @@ else
 	rm -f "$userdir/debug-audio"
 fi
 rm -f "$userdir"/screen-*.bmp
+rm -f "$userdir"/c3d-*.bmp   # the citro3d harness dumps (c3d-diff-*, c3d-rbcal-*)
 if [ -n "$perf_level" ]; then
 	printf 'level %s\nsettle %s\nmeasure %s\nquit 1\nlog 1\n' "$perf_level" \
 		"${PERF_SETTLE:-8}" "${PERF_MEASURE:-20}" > "$userdir/debug-perf"
@@ -219,6 +262,18 @@ if [ -n "$script" ]; then
 else
 	rm -f "$userdir/debug-input-script"
 fi
+if [ -n "$c3d_cfg" ]; then
+	[ -f "$c3d_cfg" ] || die "c3d config $c3d_cfg not found"
+	cp "$c3d_cfg" "$userdir/debug-c3d"
+else
+	rm -f "$userdir/debug-c3d"
+fi
+if [ -n "$film_file" ]; then
+	[ -f "$film_file" ] || die "film $film_file not found"
+	cp "$film_file" "$userdir/c3d-film.filA"
+else
+	rm -f "$userdir/c3d-film.filA"
+fi
 if [ "$reset_prefs" = 1 ]; then
 	for prefs in "$userdir"/*Preferences; do
 		[ -f "$prefs" ] || continue
@@ -247,12 +302,85 @@ if [ "$copy_data" = 1 ]; then
 		cp -R "$repo/scripts/3ds/tests/plugins/Terminal Test" "$plugin"
 		echo "run-azahar: installed the Terminal Test plugin"
 	fi
+	plugin="$userdir/$name/Plugins/Infravision Test"
+	rm -rf "$plugin"
+	if [ "$infravision_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Infravision Test" "$plugin"
+		echo "run-azahar: installed the Infravision Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Negative Light Test"
+	rm -rf "$plugin"
+	if [ "$negative_light_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Negative Light Test" "$plugin"
+		echo "run-azahar: installed the Negative Light Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Fade Test"
+	rm -rf "$plugin"
+	if [ "$fade_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Fade Test" "$plugin"
+		echo "run-azahar: installed the Fade Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Liquid Test"
+	rm -rf "$plugin"
+	if [ "$liquid_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Liquid Test" "$plugin"
+		echo "run-azahar: installed the Liquid Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Invisibility Test"
+	rm -rf "$plugin"
+	if [ "$invisibility_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Invisibility Test" "$plugin"
+		echo "run-azahar: installed the Invisibility Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Level Hop Test"
+	rm -rf "$plugin"
+	if [ "$level_hop_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Level Hop Test" "$plugin"
+		echo "run-azahar: installed the Level Hop Test plugin"
+	fi
+	plugin="$userdir/$name/Plugins/Look Up Test"
+	rm -rf "$plugin"
+	if [ "$look_up_test" = 1 ]; then
+		cp -R "$repo/scripts/3ds/tests/plugins/Look Up Test" "$plugin"
+		echo "run-azahar: installed the Look Up Test plugin"
+	fi
 	plugin="$userdir/$name/Plugins/Load Test"
 	rm -rf "$plugin"
 	if [ "$load_test" = 1 ]; then
 		cp -R "$repo/scripts/3ds/tests/plugins/Load Test" "$plugin"
 		echo "run-azahar: installed the Load Test plugin"
 	fi
+fi
+
+# AZAHAR_GRAPHICS_API: switch Azahar's backend for this run only; qt-config.ini is put back on every exit path.
+config_saved=
+if [ -f "$config.run-azahar-orig" ]; then   # a run killed with -9 left the original behind: put it back first
+	cp "$config.run-azahar-orig" "$config" && rm -f "$config.run-azahar-orig"
+	echo "run-azahar: restored $config from an earlier killed run"
+fi
+restore_config() {
+	if [ -n "$config_saved" ] && [ -f "$config_saved" ]; then
+		cp "$config_saved" "$config" && rm -f "$config_saved"
+		config_saved=
+		echo "run-azahar: restored $config"
+	fi
+}
+if [ -n "${AZAHAR_GRAPHICS_API:-}" ]; then
+	case "$AZAHAR_GRAPHICS_API" in
+		0) gname="software rasteriser" ;;
+		1) gname="OpenGL" ;;
+		2) gname="Vulkan" ;;
+		*) die "AZAHAR_GRAPHICS_API must be 0 (software), 1 (OpenGL) or 2 (Vulkan), not '$AZAHAR_GRAPHICS_API'" ;;
+	esac
+	[ -f "$config" ] || die "AZAHAR_GRAPHICS_API set but $config does not exist (start Azahar once)"
+	grep -q '^graphics_api=' "$config" && grep -q '^graphics_api\\default=' "$config" ||
+		die "$config has no graphics_api / graphics_api\\default lines"
+	config_saved="$config.run-azahar-orig"
+	cp "$config" "$config_saved"
+	trap restore_config EXIT
+	sed -e "s/^graphics_api=.*/graphics_api=$AZAHAR_GRAPHICS_API/" -e 's/^graphics_api\\default=.*/graphics_api\\default=false/' \
+		"$config_saved" > "$config"
+	echo "run-azahar: Azahar graphics backend $AZAHAR_GRAPHICS_API ($gname) for this run"
 fi
 
 echo "run-azahar: SD card $sdmc"
@@ -300,7 +428,7 @@ if [ "$screens" = 1 ] || [ -n "$script" ]; then
 	out="$repo/build-3ds/azahar-screens"
 	rm -rf "$out"
 	mkdir -p "$out"
-	for bmp in "$userdir"/screen-*.bmp; do
+	for bmp in "$userdir"/screen-*.bmp "$userdir"/c3d-*.bmp; do
 		[ -f "$bmp" ] || continue
 		png="$out/$(basename "${bmp%.bmp}").png"
 		sips -s format png "$bmp" --out "$png" >/dev/null && echo "run-azahar: $png"

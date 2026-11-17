@@ -1,0 +1,154 @@
+/*
+	Aleph One for the Nintendo 3DS, citro3d back end: the C3D view frame (docs/3ds/CITRO3D_DESIGN.md,
+	section 7, M1 specification, "Back end"). A view frame draws into the unlinked view target and reads
+	it back keeping alpha; the front end (front/C3dRasterizer, M1 piece 3) feeds it polygons. Plain
+	header: no <3ds.h>, no <citro3d.h>, no engine headers. Main thread only.
+
+	Call order of one view frame:
+	  view_begin(w, h)                      Ok -> a frame is open; Skipped / Discarded -> nothing is open
+	  view_polygon(...) | view_discard(...) any number of times
+	  view_end(...)                         only after view_begin() returned Ok; always closes the frame
+
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation; either version 3 of the License, or
+	(at your option) any later version.
+*/
+#ifndef A1_C3D_BACK_DRAW_H
+#define A1_C3D_BACK_DRAW_H
+
+#include "../core/geometry.h"
+#include "texcache.h"
+
+#include <cstddef>
+#include <cstdint>
+
+namespace a1_c3d {
+namespace back {
+
+// Nothing was drawn and nothing is open: the check is "skipped (down|gate|size|pref)". Down also covers a
+// release pending and citro3d off for the run (a failed ring or BufInfo check); Size also covers no memory
+// for the view target and staging (view_ensure); Pref is software_alpha_blending not off (SW blends walls
+// and floors then, M2 specification), decided by the front end before view_begin.
+enum class SkipReason : uint8_t { Down, Gate, Size, Pref, kCount };
+// The frame was started and is given up: no more draws, C3D_FrameEnd normally, no readback. The check
+// is "discarded (unsupported|ring|cmdbuf|gx|begin|tex)" and not compared. Tex: a texture found no room
+// in its pool even after eviction (M2 "Pools, caps, allocation").
+enum class DiscardReason : uint8_t { Unsupported, Ring, Cmdbuf, Gx, Begin, Tex, kCount };
+
+const char* skip_name(SkipReason r);
+const char* discard_name(DiscardReason r);
+
+struct ViewBegin
+{
+	enum class Kind : uint8_t { Ok, Skipped, Discarded };
+	Kind kind;
+	SkipReason skip;        // Skipped
+	DiscardReason discard;  // Discarded (frame_begin or C3D_FrameDrawOn failed, or the GX budget refused the clear:
+	                        // the frame is already closed)
+	bool stereo = false;    // M9, Ok: the frame was begun for two eyes (ViewOptions::stereo, and the right-eye objects exist)
+};
+
+// Starts one C3D view frame for a w x h view (the harness's replay of one recording): the gates and the
+// size, the target and staging out of frame, the sentinel fill, frame_begin, the texture cache's frame start
+// (retired frees, VRAM promotions), the clear (before the first draw), C3D_FrameDrawOn, the state save, the
+// world program, attributes, buffers and GPU state; TEV stage 0 = texture 0 with `textures 1`, else the
+// vertex colour. The target is cleared to `clear_rgba` (0xRRGGBBAA; M4: the tinted check's grey, 8.1).
+// M6 (design 7, M6 specification "No clear in direct mode"): `clear` false = the target keeps what it holds (mode direct's
+// texture target); `seed_rows` (dest's row addresses, w x h ARGB) = the target is first seeded from them (the frame's
+// first GX operation); `sentinel` false = no sentinel fill of the staging (a direct frame reads nothing back; a seeded one
+// holds the seed there).
+// M9 (design 7, "M9 specification"; direct frames only): `stereo` = a frame for two eyes. P is the parallax strength in
+// pixels (0 allowed), w0 the convergence depth, near the pop-out limit; `fill` = each eye is drawn unshifted first, then
+// shifted (4 passes), else shifted only (2). The first pass is the streamed one (the left eye); the others replay the draw
+// list in view_end_direct. `init_right`: the right texture is first copied from the left (the previous world frame
+// was not a stereo frame); a just-created one is copied whatever this says (design 7, "What the two textures hold"). View_begin turns `stereo` off when the
+// right-eye objects do not exist (ViewBegin::stereo says what it did).
+struct ViewOptions
+{
+	bool clear = true;
+	const uint8_t* const* seed_rows = nullptr;
+	bool sentinel = true;
+	bool stereo = false;
+	float P = 0.0f, w0 = 1024.0f, near = 1.0f;
+	bool fill = true;
+	bool init_right = false;
+	// M9 part 2, test only. flat: the lit/textured TEV is not built, stage 0 is the vertex colour (stereo_cal's quads).
+	// gaps (stereo_gaps): on a stereo frame both eye textures are cleared to opaque magenta before the first draw (the
+	// right one on every frame, the left whatever `clear` says), so a pixel no draw covered is recognisable.
+	bool flat = false;
+	bool gaps = false;
+};
+ViewBegin view_begin(int w, int h, uint32_t clear_rgba = 0, const ViewOptions& opt = ViewOptions());
+// The result of a check the front end refuses to start (SkipReason::Pref): counted like view_begin's skips.
+ViewBegin view_skip(SkipReason reason);
+// M4 play frames (design 7, M4 specification "Play mode" (0)): view_begin's cheap refusals, tested before the
+// front end records anything: false and *why = Down (C3D side off, citro3d not up, a release pending, no program
+// recorded), Gate (the gate is closed) or Size (view_size_supported refuses w x h, or view_ensure failed for it
+// before). Counts nothing.
+bool view_play_ready(int w, int h, SkipReason* why);
+
+// Appends one accepted polygon (3..16 vertices, already through core's accept_polygon, positions in view
+// pixels, w clamped, colour set) to the current ring half, fans it, and extends the pending draw when
+// `key` equals the previous polygon's, else issues the pending draw and starts a new one; a new draw with
+// `tex` looks its texture up (or converts it, texcache_get) and binds it to unit 0 when it changes. False
+// once the frame is discarded (ring full, command-buffer reserve, no room for a texture, or an earlier
+// view_discard); the polygon is then not drawn. M4: a new draw also sets the blend of its class (kTinted: the
+// tinted blend with the key's transfer_data; else 2.4's world blend). Equal keys imply equal textures (the key holds the bitmap,
+// the tables and the class, which fix the kind).
+bool view_polygon(const Vertex* v, int n, const DrawKey& key, const TexSource* tex = nullptr);
+
+// True if `vertices` vertices and `indices` indices still fit in the current ring half (an open, undiscarded
+// frame): the front end asks before drawing a polygon as many span quads (M2 commit review, minor 1).
+bool view_ring_room(unsigned vertices, unsigned indices);
+
+// Gives the frame up (first reason wins): the pending draw is dropped, nothing more is drawn. view_end()
+// still closes the frame.
+void view_discard(DiscardReason reason);
+
+struct ViewEnd
+{
+	bool ok;                // the readback is in out_argb
+	DiscardReason discard;  // !ok: why (the frame is closed either way)
+};
+
+// Issues the pending draw, restores program, AttrInfo, BufInfo and (if one was bound) the texture of unit 0
+// (the present's, through the record of context.cpp), flushes exactly the ring bytes written,
+// then reads the target back (keeping alpha: ARGB with the alpha byte of the target) into out_argb
+// (w x h, `pitch` pixels per row) and counts the pixels still holding the frame's sentinel into
+// *sentinel_count (if non-null). A discarded frame is ended without a readback (ok false).
+ViewEnd view_end(uint32_t* out_argb, int pitch, unsigned* sentinel_count);
+// M4 play frames (design 7, M4 specification "Play mode" (3)): as view_end, then only the pixels C3D covered
+// (alpha != 0) are copied into the 32-bit rows `rows[0..h)` (dest's row_addresses) as ARGB with alpha 0xFF; a
+// pixel no primitive wrote keeps what dest held (SW never clears world_pixels), a sentinel pixel is counted
+// (*sentinel_count) and not copied; *copied = the pixels written.
+ViewEnd view_end_play(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied);
+// M6: as view_end_play, but every pixel is copied (a texture target in mode direct holds the whole view, 5.2's form).
+ViewEnd view_end_play_full(uint8_t* const* rows, unsigned* sentinel_count, unsigned* copied);
+// M6 direct frames: the pending draw, the restore, the ranged flushes, C3D_FrameEnd: no readback, no retirement wait
+// (the composite frame's frame_begin waits for it). A discarded frame ends the same way and returns !ok.
+ViewEnd view_end_direct();
+// M9 part 2, stereo_cal (T1; design 7, "M9 specification", "Tests"): a stereo frame without the world: both eye textures cleared to
+// opaque black, then the five calibration quads (core/stereo.h) drawn through the world program with stage 0 = the vertex
+// colour, P = opt.P, w0 = opt.w0, near = opt.near, no fill; closed as view_end_direct. `opt` must have stereo and flat
+// set and fill false (the front end does; the flat frame clears both textures to black). Returns view_begin's result; *ve is the end (valid when Ok).
+ViewBegin view_stereo_calibrate(int w, int h, const ViewOptions& opt, ViewEnd* ve);
+// M6 sync (M6 specification): the texture target read back into `rows` (every pixel) without drawing: its own C3D frame,
+// the readback and the retirement pair. !ok: not done (citro3d down, the gate, no texture target, or the GX budget).
+ViewEnd view_sync(uint8_t* const* rows);
+// M6 seed_check: `rows` seeded into the texture target and read straight back; *differ = pixels whose RGB differs.
+// False: not done.
+bool view_seed_check(const uint8_t* const* rows, unsigned* differ);
+
+// After C3D_Fini (release_and_fini): frees the world program and the rings. Idempotent.
+void draw_free();
+
+// For the "[c3d] cmdbuf ..." line (context.cpp): the counters of this file as text.
+int draw_stats_text(char* buf, size_t size);
+// M9: this file's share of the "[c3d] stereo:" lines (passes, recs_max, replay_discards, r_clears = test clears of the right texture, r_copies = copies from the left).
+int draw_stereo_text(char* buf, size_t size);
+
+} // namespace back
+} // namespace a1_c3d
+
+#endif

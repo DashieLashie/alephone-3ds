@@ -1,0 +1,5747 @@
+// Host tests for render_c3d/core: the debug-c3d parser (P1, piece 5, B-a and M0 keys), core/gate.h
+// (docs/3ds/CITRO3D_DESIGN.md 5.6.1, 8.4), and the M0 pieces (7, "M0 specification"): classify.h
+// (class mapping, class list), diff.* (the 8.1 metric and its log line), bmp.* (32-bit BMP),
+// gx_queue.h (2.4's worst case with the readback's +1), stats.* (nearest-rank percentile, the
+// bounded sample array, the pair table) and calibrate.* (the readback calibration's check); and the M1
+// pieces (7, "M1 specification"): geometry.* (the w gates (a)-(c) against a transliteration of the SW
+// mapper's world_x, the coverage model against a transliteration of SW's per-column coverage, the
+// acceptance test, fan indices, batching key, colour hash, command-buffer arithmetic, reserve test),
+// the alpha quad of the calibration, GxQueue's split and runtime budget, and the M1 config keys; and the M2
+// pieces (7, "M2 specification", parts 1-2): tex_convert.* (every kind with shapes.cpp-style 32-bit
+// tables), tiling.* (against tex3ds, byte for byte), texcache.* (a fake allocator) and the M2 config keys;
+// parts 3-4: the horizontal coverage model, the M2 support predicate, the texcoords against transliterations
+// of SW's wall and floor mappers (the 98 % reachability gate), and the keys textures / uv_half / diff_tol.
+#include "bmp.h"
+#include "calibrate.h"
+#include "classify.h"
+#include "config.h"
+#include "diff.h"
+#include "gate.h"
+#include "geometry.h"
+#include "gx_queue.h"
+#include "landscape.h"
+#include "noise.h"
+#include "rect.h"
+#include "ring.h"
+#include "shade_lut.h"
+#include "stats.h"
+#include "tex_convert.h"
+#include "texcache.h"
+#include "tiling.h"
+#include "overlay_bands.h"
+#include "direct_state.h"
+#include "fade_fit.h"
+#include "stereo.h"
+#include "a1_c3d.h"
+
+#include <algorithm>
+#include <chrono>
+#include <climits>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <random>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
+
+using namespace a1_c3d;
+
+static int s_fail = 0, s_checks = 0;
+#define CHECK(c)                                                              \
+	do                                                                        \
+	{                                                                         \
+		++s_checks;                                                           \
+		if (!(c))                                                             \
+		{                                                                     \
+			++s_fail;                                                         \
+			std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);          \
+		}                                                                     \
+	} while (0)
+
+static void test_config()
+{
+	Config d;
+	CHECK(d.suspend_gate && d.retire_wait_ms == 500 && !d.force_abandon && !d.close_frame);
+	CHECK(d.present_gpu && d.test_vhalt == 0);
+	CHECK(!d.two_frame);   // plan B-a: off by default
+
+	CHECK(d.zero_copy);    // plan B-b: on by default (design 5.7.7)
+	{
+		Config z;
+		std::vector<std::string> zp;
+		config_parse(z, "present gpu\nzero_copy 0   # P1 present\n", zp);
+		CHECK(zp.empty() && !z.zero_copy);
+		CHECK(config_apply(z, "zero_copy", "1") && z.zero_copy);
+		CHECK(!config_apply(z, "zero_copy", "2") && z.zero_copy);
+		CHECK(!config_apply(z, "zero_copy", "yes") && !config_apply(z, "zero_copy", "") && z.zero_copy);
+	}
+
+	// two_frame (design 5.7.11)
+	Config t;
+	std::vector<std::string> tproblems;
+	config_parse(t, "present gpu\ntwo_frame 1   # frames U and D\npresent_diff 30\n", tproblems);
+	CHECK(tproblems.empty() && t.two_frame && t.present_gpu && t.present_diff == 30);
+	CHECK(config_apply(t, "two_frame", "0") && !t.two_frame);
+	CHECK(!config_apply(t, "two_frame", "2") && !t.two_frame);
+	CHECK(!config_apply(t, "two_frame", "yes") && !config_apply(t, "two_frame", ""));
+
+	Config c;
+	std::vector<std::string> problems;
+	config_parse(c,
+	             "# diag\n"
+	             "present gpu\n"
+	             "suspend_gate 0   # off\n"
+	             "retire_wait_ms 5000\n"
+	             "close_frame 1\n"
+	             "force_abandon 1\n"
+	             "\n",
+	             problems);
+	CHECK(problems.empty());
+	CHECK(!c.suspend_gate && c.retire_wait_ms == 5000 && c.close_frame && c.force_abandon);
+
+	// Bad values leave the setting alone and are reported.
+	Config b;
+	problems.clear();
+	config_parse(b, "suspend_gate 2\nretire_wait_ms -1\nretire_wait_ms 600001\nretire_wait_ms abc\n"
+	                "close_frame\nforce_abandon yes\nsuspend_gates 1\n", problems);
+	CHECK(problems.size() == 7);
+	CHECK(b.suspend_gate && b.retire_wait_ms == 500 && !b.close_frame && !b.force_abandon);
+
+	Config z;
+	CHECK(config_apply(z, "retire_wait_ms", "0") && z.retire_wait_ms == 0);   // 0 = unbounded
+	CHECK(config_apply(z, "retire_wait_ms", "600000") && z.retire_wait_ms == 600000);
+
+	// The P1 keys still parse.
+	Config p;
+	problems.clear();
+	config_parse(p, "present cpu\ncalibrate 1\nalt_load 1\nodd_surface 1\ntest_vhalt 4\npresent_diff 30\n", problems);
+	CHECK(problems.empty() && !p.present_gpu && p.calibrate && p.alt_load && p.odd_surface && p.test_vhalt == 4 &&
+	      p.present_diff == 30);
+}
+
+static void test_gate_inputs()
+{
+	GateInputs g;
+	CHECK(!g.closed());
+	g.gpu_right = false;
+	CHECK(g.closed());
+	g = GateInputs();
+	g.should_close = true;
+	CHECK(g.closed());
+	g = GateInputs();
+	g.suspended = true;
+	CHECK(g.closed());
+	g.gpu_right = false;
+	g.should_close = true;
+	CHECK(g.closed());
+}
+
+static void test_tracker()
+{
+	GateTracker t;
+	using E = GateTracker::Event;
+	CHECK(t.on_present(false, false) == E::None);
+	CHECK(t.total_skipped() == 0 && !t.is_closed());
+	// A closing: the event once, then counts.
+	CHECK(t.on_present(true, true) == E::Closed);
+	CHECK(t.on_present(true, true) == E::None);
+	CHECK(t.on_present(true, true) == E::None);
+	CHECK(t.is_closed() && t.episode_skipped() == 3 && t.total_skipped() == 3 && t.episodes() == 1);
+	CHECK(t.on_present(false, false) == E::Reopened);
+	CHECK(t.episode_skipped() == 3 && !t.is_closed());
+	CHECK(t.on_present(false, false) == E::None);   // only once
+	// A second episode restarts the episode count, not the total.
+	CHECK(t.on_present(true, true) == E::Closed);
+	CHECK(t.episode_skipped() == 1 && t.total_skipped() == 4 && t.episodes() == 2);
+	CHECK(t.on_present(false, false) == E::Reopened && t.episode_skipped() == 1);
+
+	// suspend_gate 0: the condition is watched, nothing is skipped.
+	GateTracker w;
+	CHECK(w.on_present(true, false) == E::Closed);
+	CHECK(w.on_present(true, false) == E::None);
+	CHECK(w.total_skipped() == 0 && w.episode_skipped() == 0);
+	CHECK(w.on_present(false, false) == E::Reopened);
+}
+
+// A scripted fake queue and clock: retires after `busy_tries` failed tries.
+struct Fake
+{
+	uint64_t now = 100;
+	int tries = 0, sleeps = 0, busy_tries;
+	explicit Fake(int b) : busy_tries(b) {}
+	bool try_once() { return ++tries > busy_tries; }
+	void sleep_ms(int ms) { now += ms; ++sleeps; }
+	uint64_t clock() { return now; }
+};
+
+static RetireResult run(Fake& f, uint32_t limit, uint32_t& waited)
+{
+	return retire_wait([&] { return f.try_once(); }, [&](int ms) { f.sleep_ms(ms); }, [&] { return f.clock(); },
+	                   limit, waited);
+}
+
+static void test_retire_wait()
+{
+	uint32_t w = 99;
+	Fake a(0);   // retires at once: one try, no sleep
+	CHECK(run(a, 500, w) == RetireResult::Retired && a.tries == 1 && a.sleeps == 0 && w == 0);
+
+	Fake b(7);   // 7 busy tries: 7 sleeps of 1 ms, retired at 7 ms
+	CHECK(run(b, 500, w) == RetireResult::Retired && b.tries == 8 && b.sleeps == 7 && w == 7);
+
+	Fake c(100000);   // never: gives up at the bound, having slept (never spun)
+	CHECK(run(c, 500, w) == RetireResult::TimedOut && w >= 500 && c.sleeps >= 499 && c.sleeps <= 501);
+	CHECK(c.tries == c.sleeps + 1);   // exactly one sleep between two tries
+
+	Fake d(100000);   // a bound of 1 ms still tries once
+	CHECK(run(d, 1, w) == RetireResult::TimedOut && d.tries >= 1 && d.sleeps <= 1);
+
+	Fake e(499);   // retires on the last try before the bound
+	CHECK(run(e, 500, w) == RetireResult::Retired && w == 499);
+}
+
+static void test_config_m0()
+{
+	Config d;
+	CHECK(!d.renderer_c3d && d.mode == Mode::Readback && d.diff == 0 && d.diff_frames == 20);
+	CHECK(d.classes == kAllClassesMask && !d.fullbright && !d.dump && !d.readback_cal && !d.readback_cal_resize);
+
+	Config c;
+	std::vector<std::string> problems;
+	config_parse(c,
+	             "renderer c3d\nmode null\ndiff 5   # every fifth\ndiff_frames 0\n"
+	             "classes walls,floors,frame\nfullbright 1\ndump 1\nreadback_cal 1\nreadback_cal_resize 1\n",
+	             problems);
+	CHECK(problems.empty());
+	CHECK(c.renderer_c3d && c.mode == Mode::Null && c.diff == 5 && c.diff_frames == 0);
+	CHECK(c.classes == ((1u << kWalls) | (1u << kFloors) | (1u << kFrame)));
+	CHECK(c.fullbright && c.dump && c.readback_cal && c.readback_cal_resize);
+	CHECK(config_apply(c, "readback_cal_resize", "0") && !c.readback_cal_resize);
+	CHECK(config_apply(c, "mode", "direct") && c.mode == Mode::Direct);
+	CHECK(config_apply(c, "mode", "readback") && c.mode == Mode::Readback);
+	CHECK(config_apply(c, "renderer", "sw") && !c.renderer_c3d);
+	CHECK(config_apply(c, "classes", "all") && c.classes == kAllClassesMask);
+	CHECK(config_apply(c, "diff", "100000") && c.diff == 100000);
+	CHECK(config_apply(c, "diff_frames", "1000000") && c.diff_frames == 1000000);
+
+	// Bad values reject and leave the setting alone.
+	Config b;
+	CHECK(!config_apply(b, "renderer", "gpu") && !b.renderer_c3d);
+	CHECK(!config_apply(b, "mode", "fast") && b.mode == Mode::Readback);
+	CHECK(!config_apply(b, "diff", "100001") && b.diff == 0);
+	CHECK(!config_apply(b, "diff", "-1") && !config_apply(b, "diff", ""));
+	CHECK(!config_apply(b, "diff_frames", "1000001") && b.diff_frames == 20);
+	CHECK(!config_apply(b, "fullbright", "2") && !b.fullbright);
+	CHECK(!config_apply(b, "dump", "yes") && !b.dump);
+	CHECK(!config_apply(b, "readback_cal", "") && !b.readback_cal);
+	CHECK(!config_apply(b, "readback_cal_resize", "2") && !b.readback_cal_resize);
+	CHECK(config_apply(b, "classes", "walls"));
+	const uint32_t only_walls = b.classes;
+	CHECK(only_walls == (1u << kWalls));
+	CHECK(!config_apply(b, "classes", "walls,bogus") && b.classes == only_walls);
+	CHECK(!config_apply(b, "classes", "walls,,floors") && b.classes == only_walls);
+	CHECK(!config_apply(b, "classes", "walls,") && !config_apply(b, "classes", ",walls"));
+	CHECK(!config_apply(b, "classes", "") && !config_apply(b, "classes", "Walls"));
+	CHECK(!config_apply(b, "classes", "walls floors") && b.classes == only_walls);
+}
+
+static void test_classify()
+{
+	CHECK(kAllClassesMask == 0x1FFu);
+	CHECK(classify(Entry::Vertical, Transfer::Textured, false) == kWalls);
+	CHECK(classify(Entry::Vertical, Transfer::BigLandscaped, false) == kLandscape);
+	CHECK(classify(Entry::Vertical, Transfer::Static, false) == kStatic);
+	CHECK(classify(Entry::Horizontal, Transfer::Textured, false) == kFloors);
+	CHECK(classify(Entry::Horizontal, Transfer::BigLandscaped, false) == kLandscape);
+	CHECK(classify(Entry::Horizontal, Transfer::Static, false) == kStatic);
+	CHECK(classify(Entry::Rectangle, Transfer::Tinted, false) == kTinted);
+	CHECK(classify(Entry::Rectangle, Transfer::Tinted, true) == kTinted);
+	CHECK(classify(Entry::Rectangle, Transfer::Static, true) == kStatic);
+	CHECK(classify(Entry::Rectangle, Transfer::Textured, false) == kSprites);
+	CHECK(classify(Entry::Rectangle, Transfer::Textured, true) == kWeapons);
+	CHECK(classify(Entry::Rectangle, Transfer::Other, false) == kSprites);
+	CHECK(classify(Entry::Rectangle, Transfer::Other, true) == kWeapons);
+	CHECK(classify(Entry::Vertical, Transfer::Other, false) == kOther);
+	CHECK(classify(Entry::Horizontal, Transfer::Other, true) == kOther);
+	CHECK(classify(Entry::Vertical, Transfer::Tinted, false) == kOther);
+	CHECK(classify(Entry::Horizontal, Transfer::Tinted, false) == kOther);
+
+	CHECK(std::strcmp(class_name(kWalls), "walls") == 0 && std::strcmp(class_name(kFloors), "floors") == 0);
+	CHECK(std::strcmp(class_name(kLandscape), "landscape") == 0 && std::strcmp(class_name(kStatic), "static") == 0);
+	CHECK(std::strcmp(class_name(kSprites), "sprites") == 0 && std::strcmp(class_name(kWeapons), "weapons") == 0);
+	CHECK(std::strcmp(class_name(kTinted), "tinted") == 0 && std::strcmp(class_name(kOther), "other") == 0);
+	CHECK(std::strcmp(class_name(kFrame), "frame") == 0);
+
+	uint32_t m = 0;
+	CHECK(parse_classes("all", m) && m == kAllClassesMask);
+	CHECK(parse_classes("sprites,weapons", m) && m == ((1u << kSprites) | (1u << kWeapons)));
+	CHECK(parse_classes("frame", m) && m == (1u << kFrame));
+	m = 7;
+	CHECK(!parse_classes("walls,nope", m) && m == 7);
+	CHECK(!parse_classes("", m) && m == 7);
+}
+
+// A 16x8 image, `v` everywhere.
+static std::vector<uint32_t> flat(int w, int h, uint32_t v) { return std::vector<uint32_t>(static_cast<size_t>(w) * h, v); }
+
+static void test_diff()
+{
+	const int w = 16, h = 8;
+	// Identical images: everything covered is common except the edge band.
+	std::vector<uint32_t> a = flat(w, h, 0);
+	for (int y = 2; y < 6; ++y)
+		for (int x = 4; x < 12; ++x)
+			a[y * w + x] = 0xFF102030u;   // an 8x4 block: 32 covered, 2 x 6 = 12 interior pixels
+	std::vector<uint32_t> b = a;
+	Image32 ia{a.data(), w, h, w}, ib{b.data(), w, h, w};
+	DiffResult r = diff_images(ia, ib, Coverage::TopByte, 0, 0);
+	CHECK(r.covered_a == 32 && r.covered_b == 32);
+	CHECK(r.cov_mismatch_edge == 0 && r.cov_mismatch_nonedge == 0);
+	CHECK(r.common == 12 && r.within_tol == 12 && r.sum_delta == 0 && r.max_delta == 0 && r.differ == 0);
+	CHECK(r.mean() == 0.0 && r.within_pct() == 100.0);
+
+	// Deltas: max over channels; a change in an interior pixel counts, one on the edge does not.
+	b[3 * w + 6] = 0xFF102030u + 0x000500u - 0x000000u + 0x070000u;   // R +7, G +5: delta 7
+	b[3 * w + 7] = 0xFF102030u + 0x2;                                   // B +2
+	b[2 * w + 4] = 0xFF000000u;                                         // edge pixel: differs, not common
+	r = diff_images(ia, ib, Coverage::TopByte, 0, 2);
+	CHECK(r.common == 12 && r.differ == 3);
+	CHECK(r.sum_delta == 9 && r.max_delta == 7 && r.within_tol == 11);
+	CHECK(r.mean() == 9.0 / 12.0);
+	CHECK(r.within_pct() == 100.0 * 11 / 12);
+	r = diff_images(ia, ib, Coverage::TopByte, 0, 7);
+	CHECK(r.within_tol == 12);
+
+	// Coverage mismatches: B missing an interior pixel (non-edge for A) and an edge pixel.
+	std::vector<uint32_t> c = a;
+	c[3 * w + 6] = 0;     // interior in A
+	c[2 * w + 4] = 0;     // corner of the block, an edge pixel in A
+	Image32 ic{c.data(), w, h, w};
+	r = diff_images(ia, ic, Coverage::TopByte, 0, 0);
+	CHECK(r.covered_a == 32 && r.covered_b == 30);
+	CHECK(r.cov_mismatch_nonedge == 1 && r.cov_mismatch_edge == 1);
+	CHECK(r.common == 11 && r.differ == 2);
+
+	// B covers a pixel A does not: far from the block (non-edge), and next to it (edge).
+	std::vector<uint32_t> d = a;
+	d[0] = 0xFF000001u;       // A uncovered, neighbours uncovered
+	d[2 * w + 3] = 0xFF000001u;   // A uncovered, neighbour covered
+	Image32 id{d.data(), w, h, w};
+	r = diff_images(ia, id, Coverage::TopByte, 0, 0);
+	CHECK(r.covered_b == 34 && r.cov_mismatch_nonedge == 1 && r.cov_mismatch_edge == 1);
+
+	// NotClear: coverage is "not the clear value", alpha plays no part.
+	const uint32_t clear = 0xFF808080u;
+	std::vector<uint32_t> e = flat(w, h, clear), f = flat(w, h, clear);
+	e[4 * w + 4] = f[4 * w + 4] = 0xFF123456u;
+	f[4 * w + 5] = 0xFF123456u;
+	Image32 ie{e.data(), w, h, w}, iff{f.data(), w, h, w};
+	r = diff_images(ie, iff, Coverage::NotClear, clear, 0);
+	CHECK(r.covered_a == 1 && r.covered_b == 2 && r.cov_mismatch_edge == 1 && r.cov_mismatch_nonedge == 0);
+	CHECK(r.common == 0 && r.differ == 1 && r.mean() == 0.0 && r.within_pct() == 100.0);
+	r = diff_images(ie, iff, Coverage::TopByte, 0, 0);   // all alpha 0xFF: everything covered in both
+	CHECK(r.covered_a == static_cast<unsigned>(w * h) && r.common == static_cast<unsigned>(w * h));   // no edge in A: nothing differs in coverage
+
+	// A pitch larger than the width, and different pitches for the two images.
+	std::vector<uint32_t> g(static_cast<size_t>(20) * h, 0xDEADBEEFu), k(static_cast<size_t>(w) * h, 0xFF000000u);
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+			g[y * 20 + x] = 0xFF000000u;
+	Image32 ig{g.data(), w, h, 20}, ik{k.data(), w, h, w};
+	r = diff_images(ig, ik, Coverage::TopByte, 0, 0);
+	CHECK(r.differ == 0 && r.covered_a == static_cast<unsigned>(w * h));
+
+	// The log line, exactly.
+	DiffResult l;
+	l.covered_a = 100; l.covered_b = 98; l.cov_mismatch_edge = 4; l.cov_mismatch_nonedge = 1;
+	l.common = 80; l.within_tol = 60; l.sum_delta = 120; l.max_delta = 9; l.differ = 17; l.band = 64;
+	CHECK(diff_line(12, "walls", l, 4) ==
+	      "[c3d] DIFF frame=12 class=walls covered=100/98 cov_mismatch=4/1 common=80 within_tol=75.00% (tol 4) "
+	      "mean=1.50 max=9 differ=17 band=64");
+	CHECK(diff_line(0, "frame", DiffResult(), 0) ==
+	      "[c3d] DIFF frame=0 class=frame covered=0/0 cov_mismatch=0/0 common=0 within_tol=100.00% (tol 0) "
+	      "mean=0.00 max=0 differ=0 band=0");
+	// M1: the C3D fields are appended after band, so an M0 parser (key=value pairs) still reads the rest.
+	l.within_nb = 76; l.sum_nb = 40; l.max_nb = 3;
+	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0) ==
+	      "[c3d] DIFF frame=12 class=walls covered=100/98 cov_mismatch=4/1 common=80 within_tol=75.00% (tol 4) "
+	      "mean=1.50 max=9 differ=17 band=64 b=c3d excluded=3 sentinel=0 ties=0 tie_mismatch=0 "
+	      "within_nb=95.00% mean_nb=0.50 max_nb=3 empty=0");
+	l.ties = 5; l.tie_mismatch = 2;
+	CHECK(diff_line_c3d(12, "walls", l, 4, 3, 0).find(" sentinel=0 ties=5 tie_mismatch=2") != std::string::npos);
+	CHECK(diff_line_c3d(1, "walls", DiffResult(), 0, 0, 7).find(" band=0 b=c3d excluded=0 sentinel=7 ties=0 tie_mismatch=0") !=
+	      std::string::npos);
+
+	// M2 colour gate: the neighbourhood metric. A is a dithered 2-pixel-period pattern (columns alternate 10 / 200,
+	// grey), covered everywhere (alpha 0xFF); an edge band is skipped, so the interior is judged.
+	{
+		const int nw = 12, nh = 8;
+		std::vector<uint32_t> pa(nw * nh), same(nw * nh), shifted(nw * nh), bad(nw * nh);
+		for (int y = 0; y < nh; ++y)
+			for (int x = 0; x < nw; ++x)
+			{
+				auto grey = [](int v) { return 0xFF000000u | (v << 16) | (v << 8) | v; };
+				const int v = (x & 1) ? 200 : 10;
+				pa[y * nw + x] = grey(v);
+				same[y * nw + x] = grey(v);
+				shifted[y * nw + x] = grey(((x + 1) & 1) ? 200 : 10);   // 1-pixel shift: strict Delta 190 everywhere
+				bad[y * nw + x] = grey(100);                             // matches neither 10 nor 200
+			}
+		Image32 ia{pa.data(), nw, nh, nw};
+		auto run = [&](const std::vector<uint32_t>& b) {
+			Image32 ib{b.data(), nw, nh, nw};
+			return diff_images(ia, ib, Coverage::TopByte, 0, 2);
+		};
+		DiffResult rs = run(same), rh = run(shifted), rb = run(bad);
+		const unsigned inner = (nw - 2) * (nh - 2);
+		CHECK(rs.common == inner || rs.common == static_cast<unsigned>(nw * nh));   // fully covered: no edge at all
+		CHECK(rs.within_tol == rs.common && rs.within_nb == rs.common && rs.sum_nb == 0 && rs.max_nb == 0);
+		CHECK(rh.common > 0 && rh.within_tol == 0 && rh.max_delta == 190 && rh.mean() == 190.0);
+		CHECK(rh.within_nb == rh.common && rh.sum_nb == 0 && rh.max_nb == 0 && rh.within_nb_pct() == 100.0);
+		CHECK(rb.within_tol == 0 && rb.within_nb == 0 && rb.max_nb == 90 && rb.mean_nb() == 90.0);
+		// The C3D line carries the new fields after tie_mismatch.
+		CHECK(diff_line_c3d(1, "floors", rh, 2, 0, 0).find(" tie_mismatch=0 within_nb=100.00% mean_nb=0.00 max_nb=0") !=
+		      std::string::npos);
+	}
+
+	// The tie mask (M1 piece 5): a one-pixel hole in A's coverage that B fills is a non-edge mismatch... except
+	// that the hole's neighbours differ in coverage so it is edge anyway; use a pixel deep inside a covered
+	// block instead: B lacks it. Without a mask it is non-edge; with the mask it is an edge and a tie mismatch.
+	{
+		const int tw = 8, th = 8;
+		std::vector<uint32_t> ta = flat(tw, th, 0xFF000000u), tb = ta;
+		tb[3 * tw + 4] = 0;   // B does not cover (4,3); A covers all
+		std::vector<uint8_t> mask(static_cast<size_t>(tw) * th, 0);
+		const Image32 ita{ta.data(), tw, th, tw}, itb{tb.data(), tw, th, tw};
+		DiffResult t0 = diff_images(ita, itb, Coverage::TopByte, 0, 0);
+		CHECK(t0.cov_mismatch_nonedge == 1 && t0.cov_mismatch_edge == 0 && t0.ties == 0 && t0.tie_mismatch == 0);
+		DiffResult t1 = diff_images(ita, itb, Coverage::TopByte, 0, 0, mask.data());   // an all-zero mask = no ties
+		CHECK(t1.cov_mismatch_nonedge == 1 && t1.ties == 0 && t1.band == t0.band);
+		mask[3 * tw + 4] = 1;
+		mask[5 * tw + 5] = 1;   // a tie pixel where A and B agree
+		DiffResult t2 = diff_images(ita, itb, Coverage::TopByte, 0, 0, mask.data());
+		CHECK(t2.cov_mismatch_nonedge == 0 && t2.cov_mismatch_edge == 1 && t2.ties == 2 && t2.tie_mismatch == 1);
+		CHECK(t2.band == t0.band + 2);
+		CHECK(t2.common == t0.common - 1);   // the agreeing tie pixel leaves the common set
+	}
+
+	// The band: the 8x4 block of `a` in a 16x8 image has a ring of 10x6 - 8x4 = 28 outside pixels with a
+	// covered neighbour, plus its 20 own border pixels (every one but the 12 interior ones): 48.
+	{
+		const int bw = 16, bh = 8;
+		std::vector<uint32_t> ba = flat(bw, bh, 0);
+		for (int y = 2; y < 6; ++y)
+			for (int x = 4; x < 12; ++x)
+				ba[y * bw + x] = 0xFF102030u;
+		Image32 iba{ba.data(), bw, bh, bw};
+		const DiffResult br = diff_images(iba, iba, Coverage::TopByte, 0, 0);
+		CHECK(br.band == 48 && br.common == 12);
+		std::vector<uint32_t> none = flat(bw, bh, 0);
+		Image32 inone{none.data(), bw, bh, bw};
+		CHECK(diff_images(inone, inone, Coverage::TopByte, 0, 0).band == 0);   // nothing covered: no edge
+	}
+}
+
+static void test_bmp()
+{
+	const int w = 3, h = 2, pitch = 5;
+	std::vector<uint32_t> px(static_cast<size_t>(pitch) * h, 0xCCCCCCCCu);
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+			px[y * pitch + x] = 0x80000000u | (static_cast<uint32_t>(x) << 16) | (static_cast<uint32_t>(y) << 8) | 0x11;
+	px[0] = 0xAA112233u;                          // top-left
+	px[(h - 1) * pitch + (w - 1)] = 0x44556677u;  // bottom-right
+	const std::vector<uint8_t> b = bmp_encode(px.data(), w, h, pitch);
+	auto u16 = [&](size_t o) { return static_cast<unsigned>(b[o] | (b[o + 1] << 8)); };
+	auto u32 = [&](size_t o) { return u16(o) | (u16(o + 2) << 16); };
+	CHECK(b.size() == 54u + w * h * 4);
+	CHECK(b[0] == 'B' && b[1] == 'M');
+	CHECK(u32(2) == b.size() && u32(10) == 54);
+	CHECK(u32(14) == 40 && u32(18) == static_cast<unsigned>(w) && u32(22) == static_cast<unsigned>(h));
+	CHECK(u16(26) == 1 && u16(28) == 32 && u32(30) == 0);
+	CHECK(u32(34) == static_cast<unsigned>(w * h * 4));
+	// The first file row is the image's last row; pixel (0,0) is the first of the last file row.
+	const size_t last_row = 54 + static_cast<size_t>(h - 1) * w * 4;
+	CHECK(b[last_row + 0] == 0x33 && b[last_row + 1] == 0x22 && b[last_row + 2] == 0x11 && b[last_row + 3] == 0xAA);
+	const size_t last_px = 54 + static_cast<size_t>(w - 1) * 4;   // (w-1, h-1): last pixel of the first file row
+	CHECK(b[last_px + 0] == 0x77 && b[last_px + 1] == 0x66 && b[last_px + 2] == 0x55 && b[last_px + 3] == 0x44);
+	// A middle pixel (1, 0): x=1 y=0 -> 0x80010011: A 0x80, R 0x01, G 0x00, B 0x11, in the last file row.
+	CHECK(b[last_row + 4] == 0x11 && b[last_row + 5] == 0x00 && b[last_row + 6] == 0x01 && b[last_row + 7] == 0x80);
+	CHECK(bmp_encode(px.data(), 0, 2, pitch).empty() && bmp_encode(px.data(), 2, 0, pitch).empty());
+}
+
+static void test_gx_queue_readback()
+{
+	// The readback transfer is inside the view frame since revise 1: it is one more take() (two with a
+	// non-empty command buffer) and the frame's total counts it.
+	GxQueue q;
+	q.begin_frame();
+	for (int i = 0; i < GxQueue::kMaxBudget - 2; ++i)
+		CHECK(q.take(false));
+	CHECK(q.take(true));   // the readback transfer, splitting the command list
+	CHECK(!q.take(false) && q.refused() == 1);
+	CHECK(q.end_frame(0) == GxQueue::kMaxBudget + 1);
+	CHECK(q.last_total() == 25 && q.high_water() == 25 && q.high_water() < 32);
+
+	// A later, smaller frame does not lower the high-water mark.
+	q.begin_frame();
+	CHECK(q.take(true));
+	CHECK(q.end_frame(0) == 3 && q.last_total() == 3 && q.high_water() == 25);
+}
+
+static void test_gx_queue_m1()
+{
+	// The flushing split is exactly 1 whatever the buffer holds; the transfer after it costs 1: a C3D view
+	// frame is clear 1 + split 1 + transfer 1 = 3 entries (M1 specification, "GX queue").
+	GxQueue q;
+	q.begin_frame();
+	CHECK(q.budget() == 24 && GxQueue::kMaxBudget == 24);
+	CHECK(q.take(false));        // the clear, before the first draw
+	CHECK(q.take_split());       // the flushing split (the buffer holds draws)
+	CHECK(q.take(false));        // the transfer finds an empty buffer
+	CHECK(q.used() == 3 && q.refused() == 0);
+	CHECK(q.end_frame(0) == 3 + GxQueue::kFrameEndEntries && q.high_water() == 4);
+
+	// A non-empty buffer at a plain take still costs 2, the split never does.
+	q.begin_frame();
+	CHECK(q.take(true) && q.used() == 2);
+	CHECK(q.take_split() && q.used() == 3);
+
+	// Runtime budget: 4 passes the view frame, 2 refuses the transfer (clear, split, then no room).
+	GxQueue q4;
+	q4.set_budget(4);
+	q4.begin_frame();
+	CHECK(q4.take(false) && q4.take_split() && q4.take(false) && q4.refused() == 0);
+	GxQueue q2;
+	q2.set_budget(2);
+	q2.begin_frame();
+	CHECK(q2.take(false) && q2.take_split() && !q2.take(false) && q2.refused() == 1 && q2.used() == 2);
+	// Never above 24, never below 1; set_budget keeps the count of the frame in progress.
+	GxQueue qc;
+	qc.set_budget(100);
+	CHECK(qc.budget() == 24);
+	qc.set_budget(0);
+	CHECK(qc.budget() == 1);
+	qc.set_budget(-5);
+	CHECK(qc.budget() == 1);
+	qc.begin_frame();
+	CHECK(qc.take(false) && !qc.take_split() && !qc.take(false) && qc.refused() == 2);
+
+	// The worst case with the split at 1: 24 + 1 for C3D_FrameEnd = 25 < 32; 24 entries then a split is refused.
+	GxQueue qw;
+	qw.begin_frame();
+	for (int i = 0; i < 23; ++i)
+		CHECK(qw.take(false));
+	CHECK(qw.take_split() && !qw.take_split() && qw.used() == 24);
+	CHECK(qw.end_frame(0) == 25 && qw.high_water() == 25 && qw.high_water() < 32);
+}
+
+static void test_stats()
+{
+	Samples s;
+	CHECK(s.percentile(99) == 0 && s.max() == 0 && s.count() == 0);
+	s.add(42);
+	CHECK(s.percentile(1) == 42 && s.percentile(99) == 42 && s.percentile(100) == 42 && s.max() == 42);
+
+	Samples h;
+	for (uint32_t v = 100; v >= 1; --v)   // 1..100, added in descending order
+		h.add(v);
+	CHECK(h.count() == 100 && h.max() == 100);
+	CHECK(h.percentile(99) == 99 && h.percentile(100) == 100 && h.percentile(50) == 50);
+	CHECK(h.percentile(1) == 1 && h.percentile(0) == 1);
+
+	Samples five;
+	for (uint32_t v : {10u, 50u, 20u, 40u, 30u})
+		five.add(v);
+	CHECK(five.percentile(50) == 30 && five.percentile(99) == 50 && five.percentile(20) == 10 &&
+	      five.percentile(21) == 20);
+
+	// The cap: values beyond the capacity update max and count, not the stored set.
+	Samples cap(4);
+	for (uint32_t v : {1u, 2u, 3u, 4u, 1000u})
+		cap.add(v);
+	CHECK(cap.count() == 5 && cap.stored() == 4 && cap.max() == 1000);
+	CHECK(cap.percentile(100) == 4);
+
+	// PairTable.
+	PairTable t;
+	t.begin_frame();
+	CHECK(t.count() == 0 && !t.full());
+	CHECK(t.insert(1, 2) && t.insert(2, 1) && t.insert(1, 3));
+	CHECK(!t.insert(1, 2) && !t.insert(2, 1));   // repeats
+	CHECK(t.count() == 3 && !t.full());
+	t.begin_frame();   // a new frame forgets everything
+	CHECK(t.count() == 0);
+	CHECK(t.insert(1, 2) && t.count() == 1);
+
+	t.begin_frame();   // fill it
+	for (uintptr_t i = 0; i < PairTable::kSlots; ++i)
+		CHECK(t.insert(i, i * 7 + 1));
+	CHECK(t.count() == 1024 && !t.full());
+	CHECK(!t.insert(5, 5 * 7 + 1) && !t.full());   // a repeat is not "full"
+	CHECK(!t.insert(99999, 1) && t.full() && t.count() == 1024);
+	t.begin_frame();
+	CHECK(!t.full() && t.count() == 0 && t.insert(99999, 1));
+
+	// Many frames (the generation advances; stale entries from earlier frames never match).
+	PairTable m;
+	bool ok = true;
+	for (int f = 0; f < 5000; ++f)
+	{
+		m.begin_frame();
+		ok = ok && m.insert(7, 8) && !m.insert(7, 8) && m.count() == 1;
+	}
+	CHECK(ok);
+}
+
+static void test_calibrate()
+{
+	CHECK(rgba_to_argb(0xFF0000FFu) == 0xFFFF0000u);   // red RGBA -> red ARGB
+	CHECK(rgba_to_argb(0x12345600u) == 0xFF123456u);
+	CHECK(cal_clear_argb(0x1234) == 0xFF344080u);
+	CHECK(cal_clear_rgba(0x34) == 0x344080FFu);
+	CHECK(rgba_to_argb(cal_clear_rgba(77)) == cal_clear_argb(77));
+	for (unsigned k = 0; k < 256; ++k)
+	{
+		const uint32_t c = cal_clear_argb(k);
+		CHECK(c != kCalTopLeft && c != kCalTopRight && c != kCalBottomLeft && c != kCalBottomRight);
+	}
+	CHECK(kCalQuad == 16);
+	CHECK(std::strcmp(orientation_name(Orientation::Ok), "ok") == 0);
+	CHECK(std::strcmp(orientation_name(Orientation::RowsFlipped), "rows flipped") == 0);
+	CHECK(std::strcmp(orientation_name(Orientation::ColsFlipped), "columns flipped") == 0);
+	CHECK(std::strcmp(orientation_name(Orientation::Rotated180), "rotated 180") == 0);
+	CHECK(std::strcmp(orientation_name(Orientation::Transposed), "transposed") == 0);
+	CHECK(std::strcmp(orientation_name(Orientation::Unknown), "unknown") == 0);
+
+	const int sizes[2][2] = {{400, 240}, {480, 240}};
+	for (const auto& sz : sizes)
+	{
+		const int w = sz[0], h = sz[1];
+		const uint32_t R = kCalTopLeft, G = kCalTopRight, B = kCalBottomLeft, W = kCalBottomRight;
+		struct Case { uint32_t tl, tr, bl, br; Orientation o; };
+		const Case cases[] = {
+			{R, G, B, W, Orientation::Ok},          {B, W, R, G, Orientation::RowsFlipped},
+			{G, R, W, B, Orientation::ColsFlipped}, {W, B, G, R, Orientation::Rotated180},
+			{R, B, G, W, Orientation::Transposed},  {R, R, R, R, Orientation::Unknown},
+		};
+		for (const Case& cs : cases)
+		{
+			const unsigned k = 17;
+			std::vector<uint32_t> img = flat(w, h, cal_clear_argb(k));
+			auto quad = [&](int x0, int y0, uint32_t v) {
+				for (int y = y0; y < y0 + kCalQuad; ++y)
+					for (int x = x0; x < x0 + kCalQuad; ++x)
+						img[static_cast<size_t>(y) * w + x] = v;
+			};
+			quad(0, 0, cs.tl);
+			quad(w - kCalQuad, 0, cs.tr);
+			quad(0, h - kCalQuad, cs.bl);
+			quad(w - kCalQuad, h - kCalQuad, cs.br);
+			// The alpha quad where this orientation puts it (top centre for the unknown one).
+			const int ax = cs.o == Orientation::Transposed ? 0 : w / 2 - 8;
+			const int ay = (cs.o == Orientation::RowsFlipped || cs.o == Orientation::Rotated180) ? h - kCalQuad
+			               : cs.o == Orientation::Transposed ? h / 2 - 8 : 0;
+			quad(ax, ay, kCalAlphaQuad);
+			const CalResult r = cal_check(img.data(), w, h, w, k);
+			CHECK(r.alpha_ok);
+			CHECK(r.orientation == cs.o);
+			CHECK(r.observed_k == 17 && r.current_frame_ok == (cs.o != Orientation::Unknown));   // unknown: corners mismatch
+			CHECK(r.corner[0] == cs.tl && r.corner[1] == cs.tr && r.corner[2] == cs.bl && r.corner[3] == cs.br);
+			CHECK(r.centre == cal_clear_argb(k));
+			CHECK(r.channels_ok == (cs.o != Orientation::Unknown));
+			if (cs.o == Orientation::Ok)
+				CHECK(cal_line(k, r) ==
+				      "[c3d] readback_cal k=17 orientation ok current frame ok mismatched 0 (sentinel 0) "
+				      "channels ok alpha ok corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+		}
+	}
+
+	// A perfect image: every pixel accounted for, nothing stale, nothing left of the sentinel.
+	const int w = 400, h = 240;
+	auto perfect = [&](unsigned k) {
+		std::vector<uint32_t> im = flat(w, h, cal_clear_argb(k));
+		auto quad = [&](int x0, int y0, uint32_t v) {
+			for (int y = y0; y < y0 + kCalQuad; ++y)
+				for (int x = x0; x < x0 + kCalQuad; ++x)
+					im[static_cast<size_t>(y) * w + x] = v;
+		};
+		quad(0, 0, kCalTopLeft);
+		quad(w - kCalQuad, 0, kCalTopRight);
+		quad(0, h - kCalQuad, kCalBottomLeft);
+		quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+		quad(w / 2 - 8, 0, kCalAlphaQuad);
+		return im;
+	};
+	{
+		std::vector<uint32_t> im = perfect(17);
+		CalResult p = cal_check(im.data(), w, h, w, 17);
+		CHECK(p.current_frame_ok && p.mismatched == 0 && p.sentinel == 0 && p.orientation == Orientation::Ok);
+		CHECK(cal_line(17, p) ==
+		      "[c3d] readback_cal k=17 orientation ok current frame ok mismatched 0 (sentinel 0) channels ok "
+		      "alpha ok corners 0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+
+		// One stale pixel (the previous frame's clear) away from every sample point.
+		im[100 * w + 100] = cal_clear_argb(16);
+		p = cal_check(im.data(), w, h, w, 17);
+		CHECK(!p.current_frame_ok && p.mismatched == 1 && p.sentinel == 0);
+		CHECK(p.orientation == Orientation::Ok && p.observed_k == 17);   // the five samples are fine
+
+		// A row the transfer never wrote: the sentinel (also 0xRRGGBB of another k than 17's) is left in it.
+		im = perfect(17);
+		for (int x = 0; x < w; ++x)
+			im[50 * w + x] = cal_sentinel_argb(17);
+		p = cal_check(im.data(), w, h, w, 17);
+		CHECK(!p.current_frame_ok && p.mismatched == static_cast<unsigned>(w) && p.sentinel == static_cast<unsigned>(w));
+		CHECK(cal_line(17, p).find("mismatched 400 (sentinel 400)") != std::string::npos);
+		// ... in a quad, and in a row that is also stale: only the sentinel pixels count as sentinel.
+		im[3 * w + 3] = cal_sentinel_argb(17);
+		im[60 * w + 60] = cal_clear_argb(16);
+		p = cal_check(im.data(), w, h, w, 17);
+		CHECK(p.mismatched == static_cast<unsigned>(w) + 2 && p.sentinel == static_cast<unsigned>(w) + 1);
+
+		// The sentinel is no clear and no corner colour for any k, and differs from k to k.
+		for (unsigned k = 0; k < 256; ++k)
+		{
+			const uint32_t sn = cal_sentinel_argb(k);
+			CHECK(sn != cal_clear_argb(k) && sn != kCalTopLeft && sn != kCalTopRight && sn != kCalBottomLeft &&
+			      sn != kCalBottomRight);
+			CHECK(rgba_to_argb(cal_sentinel_rgba(k)) == sn && sn != cal_sentinel_argb(k + 1));
+		}
+
+		// Rows flipped: still reported as an orientation, and the image is current (0 mismatched against
+		// the flipped layout); the orientation, not the mismatch count, tells it apart.
+		std::vector<uint32_t> fl = perfect(17);
+		for (int y = 0; y < h / 2; ++y)
+			for (int x = 0; x < w; ++x)
+				std::swap(fl[static_cast<size_t>(y) * w + x], fl[static_cast<size_t>(h - 1 - y) * w + x]);
+		p = cal_check(fl.data(), w, h, w, 17);
+		CHECK(p.orientation == Orientation::RowsFlipped && p.channels_ok && p.mismatched == 0 && p.current_frame_ok);
+		fl[100 * w + 100] = cal_sentinel_argb(17);
+		p = cal_check(fl.data(), w, h, w, 17);
+		CHECK(p.orientation == Orientation::RowsFlipped && p.mismatched == 1 && p.sentinel == 1);
+	}
+
+	// Current frame wrong: a stale frame's k, or something that is no clear at all.
+	std::vector<uint32_t> img = perfect(16);
+	CalResult r = cal_check(img.data(), w, h, w, 17);
+	CHECK(r.orientation == Orientation::Ok && !r.current_frame_ok && r.observed_k == 16);
+	CHECK(cal_line(17, r) ==
+	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre k=16) mismatched 94720 (sentinel 0) "
+	      "channels ok alpha ok corners "
+	      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+	img[(h / 2) * w + w / 2] = 0xFF123456u;
+	r = cal_check(img.data(), w, h, w, 17);
+	CHECK(!r.current_frame_ok && r.observed_k == -1);
+	CHECK(cal_line(17, r) ==
+	      "[c3d] readback_cal k=17 orientation ok current frame NO (centre 0xFF123456) mismatched 94720 "
+	      "(sentinel 0) channels ok alpha ok corners "
+	      "0xFFFF0000 0xFF00FF00 0xFF0000FF 0xFFFFFFFF");
+	CHECK(cal_check(img.data(), w, h, w, 0x111).observed_k == -1);   // k is taken mod 256 by the clear
+	img = perfect(0x111);   // k is taken mod 256 by the clear
+	CHECK(cal_check(img.data(), w, h, w, 0x111).current_frame_ok);
+
+	// Channels swapped (R and B exchanged): the corners are no longer the expected colours.
+	auto swap_rb = [](uint32_t c) { return (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); };
+	img = perfect(17);
+	for (uint32_t& p : img)
+		if (p != cal_clear_argb(17))
+			p = swap_rb(p);
+	r = cal_check(img.data(), w, h, w, 17);
+	CHECK(!r.channels_ok && r.orientation == Orientation::Unknown);
+	CHECK(cal_line(17, r).find("channels NO") != std::string::npos);
+
+	// A pitch wider than the image.
+	std::vector<uint32_t> wide(static_cast<size_t>(512) * h, 0xDEADBEEFu);
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+			wide[static_cast<size_t>(y) * 512 + x] = cal_clear_argb(3);
+	for (int y = 0; y < kCalQuad; ++y)
+		for (int x = 0; x < kCalQuad; ++x)
+		{
+			wide[static_cast<size_t>(y) * 512 + x] = kCalTopLeft;
+			wide[static_cast<size_t>(y) * 512 + (w - 1 - x)] = kCalTopRight;
+			wide[static_cast<size_t>(h - 1 - y) * 512 + x] = kCalBottomLeft;
+			wide[static_cast<size_t>(h - 1 - y) * 512 + (w - 1 - x)] = kCalBottomRight;
+			wide[static_cast<size_t>(y) * 512 + (w / 2 - 8 + x)] = kCalAlphaQuad;
+		}
+	r = cal_check(wide.data(), w, h, 512, 3);
+	CHECK(r.orientation == Orientation::Ok && r.current_frame_ok && r.channels_ok && r.mismatched == 0);
+}
+
+static void test_calibrate_m1()
+{
+	// The keeping conversion: 0xRRGGBBAA -> 0xAARRGGBB, alpha untouched (the forcing one sets it to 0xFF).
+	CHECK(rgba_to_argb_keep(0x20609080u) == kCalAlphaQuad);
+	CHECK(rgba_to_argb_keep(0x12345678u) == 0x78123456u);
+	CHECK(rgba_to_argb_keep(0xFF0000FFu) == 0xFFFF0000u && rgba_to_argb_keep(0x00000000u) == 0u);
+	CHECK(rgba_to_argb_keep(0xAABBCC00u) == 0x00AABBCCu && rgba_to_argb(0xAABBCC00u) == 0xFFAABBCCu);
+	for (unsigned k = 0; k < 256; ++k)   // the sentinel has alpha 0xFF: both forms agree
+		CHECK(rgba_to_argb_keep(cal_sentinel_rgba(k)) == cal_sentinel_argb(k));
+	// M2: the view-frame sentinel is the same RGB with alpha byte 0x01 (RGBA word: low byte), distinct per k.
+	for (unsigned k = 0; k < 256; ++k)
+	{
+		CHECK((view_sentinel_rgba(k) & 0xFFu) == 0x01u && (view_sentinel_rgba(k) >> 8) == (cal_sentinel_rgba(k) >> 8));
+		CHECK((rgba_to_argb_keep(view_sentinel_rgba(k)) >> 24) == 0x01u);
+		CHECK((rgba_to_argb_keep(view_sentinel_rgba(k)) & 0xFFFFFFu) == (cal_sentinel_argb(k) & 0xFFFFFFu));
+		CHECK(view_sentinel_rgba(k) != view_sentinel_rgba(k + 1));
+	}
+
+	// A wrong alpha quad is a mismatch and alpha NO; a perfect image (alpha 0xFF elsewhere) is alpha ok.
+	const int w = 400, h = 240;
+	const unsigned k = 9;
+	std::vector<uint32_t> im = flat(w, h, cal_clear_argb(k));
+	auto quad = [&](int x0, int y0, uint32_t v) {
+		for (int y = y0; y < y0 + kCalQuad; ++y)
+			for (int x = x0; x < x0 + kCalQuad; ++x)
+				im[static_cast<size_t>(y) * w + x] = v;
+	};
+	quad(0, 0, kCalTopLeft);
+	quad(w - kCalQuad, 0, kCalTopRight);
+	quad(0, h - kCalQuad, kCalBottomLeft);
+	quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+	CalResult r = cal_check(im.data(), w, h, w, k);   // no alpha quad drawn (M0's image)
+	CHECK(!r.alpha_ok && r.mismatched == 256 && !r.current_frame_ok && r.orientation == Orientation::Ok);
+	CHECK(cal_line(k, r).find("channels ok alpha NO corners") != std::string::npos);
+	quad(w / 2 - 8, 0, kCalAlphaQuad);
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(r.alpha_ok && r.mismatched == 0 && r.current_frame_ok);
+	im[3 * w + w / 2] = 0xFF206090u;   // alpha forced to 0xFF: the forcing conversion's signature
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(!r.alpha_ok && r.mismatched == 1 && !r.current_frame_ok);
+	im[3 * w + w / 2] = kCalAlphaQuad;
+	im[5 * w + 5 + 100] = 0x80123456u;   // alpha elsewhere is wrong too: a mismatch, alpha still ok
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(r.alpha_ok && r.mismatched == 1);
+	// The quad's edges: x in [192, 208), y in [0, 16), so (191, 0) and (208, 0) and (192, 16) are clear.
+	im = flat(w, h, cal_clear_argb(k));
+	quad(0, 0, kCalTopLeft);
+	quad(w - kCalQuad, 0, kCalTopRight);
+	quad(0, h - kCalQuad, kCalBottomLeft);
+	quad(w - kCalQuad, h - kCalQuad, kCalBottomRight);
+	quad(w / 2 - 8, 1, kCalAlphaQuad);   // one row too low
+	r = cal_check(im.data(), w, h, w, k);
+	CHECK(!r.alpha_ok && r.mismatched == 2 * 16);
+
+	// All four orientations (and the unknown one, top centre): the quad follows the orientation.
+	const uint32_t R = kCalTopLeft, G = kCalTopRight, B = kCalBottomLeft, W = kCalBottomRight;
+	struct Case { uint32_t c[4]; Orientation o; int qx, qy; };
+	const Case cases[] = {
+		{{R, G, B, W}, Orientation::Ok, w / 2 - 8, 0},
+		{{B, W, R, G}, Orientation::RowsFlipped, w / 2 - 8, h - 16},
+		{{G, R, W, B}, Orientation::ColsFlipped, w / 2 - 8, 0},
+		{{W, B, G, R}, Orientation::Rotated180, w / 2 - 8, h - 16},
+		{{R, B, G, W}, Orientation::Transposed, 0, h / 2 - 8},
+	};
+	for (const Case& cs : cases)
+	{
+		im = flat(w, h, cal_clear_argb(k));
+		quad(0, 0, cs.c[0]);
+		quad(w - kCalQuad, 0, cs.c[1]);
+		quad(0, h - kCalQuad, cs.c[2]);
+		quad(w - kCalQuad, h - kCalQuad, cs.c[3]);
+		quad(cs.qx, cs.qy, kCalAlphaQuad);
+		r = cal_check(im.data(), w, h, w, k);
+		CHECK(r.orientation == cs.o && r.alpha_ok && r.mismatched == 0 && r.current_frame_ok && r.channels_ok);
+		// The quad on the other side (the wrong place for this orientation) is alpha NO with 2 x 256 mismatches
+		// (a quad missing where it belongs, one where it does not) unless both sides coincide.
+		im = flat(w, h, cal_clear_argb(k));
+		quad(0, 0, cs.c[0]);
+		quad(w - kCalQuad, 0, cs.c[1]);
+		quad(0, h - kCalQuad, cs.c[2]);
+		quad(w - kCalQuad, h - kCalQuad, cs.c[3]);
+		quad(cs.qx, cs.qy == 0 ? h - kCalQuad : 0, kCalAlphaQuad);
+		if (cs.o != Orientation::Transposed)
+		{
+			r = cal_check(im.data(), w, h, w, k);
+			CHECK(r.orientation == cs.o && !r.alpha_ok && r.mismatched == 512);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transliterations of the software mapper (Source_Files/RenderMain/scottish_textures.cpp) for the
+// geometry tests. They live here, not in core/.
+
+namespace sw
+{
+// scottish_textures.cpp:906-954 (_pretexture_vertical_polygon_lines), the part that yields world_x, for
+// the column x0 (screen_x = x0 - hw), TEXBITS 7. int32 arithmetic as in the original; the one product that
+// can leave int32 (:954) is done in 64 bits and reported, not wrapped.
+struct WorldX
+{
+	int32_t world_x;       // after the negation of :955
+	int32_t tx;            // fixed point 16.16
+	int32_t n_r, d_r;      // the shifted numerator and denominator that tx was divided from
+	int64_t product;       // tx * vector.i, whose int32 truncation :954 shifts
+};
+
+static WorldX world_x(int world_to_screen_x, int hw, int x0, int ox, int oy, int vi, int vj)
+{
+	const int32_t screen_x = x0 - hw;
+	int32_t tx_numerator = world_to_screen_x * oy - screen_x * ox;
+	int32_t tx_denominator = screen_x * vi - world_to_screen_x * vj;
+	int32_t an = tx_numerator, ad = tx_denominator;
+	const int bits = 7;   // VERTICAL_TEXTURE_WIDTH_BITS
+	while (an > ((1 << (31 - bits)) - 1) || an < -(1 << (31 - bits)))
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	while (an > INT16_MAX || an < INT16_MIN)
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	WorldX r;
+	r.n_r = an;
+	r.d_r = ad;
+	r.tx = static_cast<int32_t>((static_cast<int64_t>(an) * 65536) / ad);   // INTEGER_TO_FIXED(an) / ad
+	r.product = static_cast<int64_t>(r.tx) * vi;
+	r.world_x = ox + (static_cast<int32_t>(r.product) >> 16);
+	if (r.world_x < 0)
+		r.world_x = -r.world_x;
+	return r;
+}
+
+// scottish_textures.cpp:1231-1290 (build_y_table), on shorts as in the original. NULL = refused.
+static short* build_y_table(short* table, short x0, short y0, short x1, short y1)
+{
+	short dx, dy, adx, ady;
+	short x, y;
+	short d, delta_d, d_max;
+	short* record;
+	auto sgn = [](short v) -> short { return v < 0 ? -1 : (v > 0 ? 1 : 0); };
+
+	dx = x1 - x0, adx = std::abs(dx), dx = sgn(dx);
+	dy = y1 - y0, ady = std::abs(dy), dy = sgn(dy);
+	if (dx >= 0)
+	{
+		if (dy >= 0)
+		{
+			x = x0, y = y0;
+			record = table;
+		}
+		else
+		{
+			x = x1, y = y1;
+			record = table + adx;
+		}
+		if (adx >= ady)
+		{
+			d = adx - ady, delta_d = -2 * ady, d_max = 2 * adx;
+			while ((adx -= 1) >= 0)
+			{
+				if (d < 0)
+					y += 1, d += d_max;
+				if (dy >= 0)
+					*record++ = y;
+				else
+					*--record = y;
+				x += dx, d += delta_d;
+			}
+		}
+		else
+		{
+			d = ady - adx, delta_d = -2 * adx, d_max = 2 * ady;
+			while ((ady -= 1) >= 0)
+			{
+				if (d < 0)
+				{
+					x += dx, d += d_max, adx -= 1;
+					if (dy >= 0)
+						*record++ = y;
+					else
+						*--record = y;
+				}
+				y += 1, d += delta_d;
+			}
+			if (adx == 1)
+			{
+				if (dy >= 0)
+					*record++ = y;
+				else
+					*--record = y;
+			}
+		}
+	}
+	else
+		return nullptr;
+	(void)x;   // the original tracks x without reading it
+	return table;
+}
+
+enum Result { Drawn, RefusedBounds, RefusedDegenerate, RefusedWalk };
+
+// scottish_textures.cpp:429-520 (texture_vertical_polygon) down to the tables, then the row loop of
+// low_level_textures.h:322-326: `cov` (w x h, zeroed by the caller) gets 1 for every written pixel.
+// `wrote_outside` counts rows the original would write outside [0, h).
+static Result polygon_coverage(const std::vector<Point2>& pts, int w, int h, std::vector<uint8_t>& cov,
+                               unsigned& wrote_outside)
+{
+	const int n = static_cast<int>(pts.size());
+	int highest = 0, lowest = 0;
+	for (int v = 1; v < n; ++v)
+	{
+		if (pts[v].x < pts[highest].x)
+			highest = v;
+		if (pts[v].x > pts[lowest].x)
+			lowest = v;
+	}
+	for (int v = 0; v < n; ++v)
+		if (!(pts[v].x >= 0 && pts[v].x <= w && pts[v].y >= 0 && pts[v].y <= h))
+			return RefusedBounds;
+	if (highest == lowest)
+		return RefusedDegenerate;
+
+	std::vector<short> left_table(8192, -1), right_table(8192, -1);
+	short left_line_count = 0, right_line_count = 0, total_line_count;
+	short aggregate_left = 0, aggregate_right = 0;
+	short left_vertex = static_cast<short>(highest), right_vertex = static_cast<short>(highest), vertex;
+	total_line_count = static_cast<short>(pts[lowest].x - pts[highest].x);
+	const short aggregate_total = total_line_count;
+	while (total_line_count > 0)
+	{
+		if (left_line_count <= 0)
+		{
+			do
+			{
+				vertex = (left_vertex == n - 1) ? 0 : static_cast<short>(left_vertex + 1);
+				left_line_count = static_cast<short>(pts[vertex].x - pts[left_vertex].x);
+				if (!build_y_table(left_table.data() + aggregate_left, static_cast<short>(pts[left_vertex].x),
+				                   static_cast<short>(pts[left_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_left = static_cast<short>(aggregate_left + left_line_count);
+				left_vertex = vertex;
+			} while (!left_line_count);
+		}
+		if (right_line_count <= 0)
+		{
+			do
+			{
+				vertex = right_vertex ? static_cast<short>(right_vertex - 1) : static_cast<short>(n - 1);
+				right_line_count = static_cast<short>(pts[vertex].x - pts[right_vertex].x);
+				if (!build_y_table(right_table.data() + aggregate_right, static_cast<short>(pts[right_vertex].x),
+				                   static_cast<short>(pts[right_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_right = static_cast<short>(aggregate_right + right_line_count);
+				right_vertex = vertex;
+			} while (!right_line_count);
+		}
+		const short delta = std::min(left_line_count, right_line_count);
+		total_line_count = static_cast<short>(total_line_count - delta);
+		left_line_count = static_cast<short>(left_line_count - delta);
+		right_line_count = static_cast<short>(right_line_count - delta);
+	}
+	for (int k = 0; k < aggregate_total; ++k)
+	{
+		const int x = pts[highest].x + k;
+		const int y0 = left_table[k], y1 = right_table[k];
+		for (int y = y0; y < y1; ++y)
+		{
+			if (y < 0 || y >= h || x >= w)
+				++wrote_outside;
+			else
+				cov[static_cast<size_t>(y) * w + x] = 1;
+		}
+	}
+	return Drawn;
+}
+} // namespace sw
+
+static void test_wall_w()
+{
+	// Basics: a wall in the plane x = 1000 (v.i = 0) is at w = 1000 in every column.
+	for (int sx = 0; sx <= 400; sx += 50)
+		CHECK(wall_w(200, 256, 1000, 0, 0, 1000, sx) == 1000.0f);
+	// |w|: a negative world x is negated (:955).
+	CHECK(wall_w(200, 256, -1000, 0, 0, 1000, 123) == 1000.0f);
+	// The denominator guard (:943, 950): column sx = hw, vector.j = 0 -> denominator 0 -> 1, no inf / NaN.
+	const float g = wall_w(200, 256, 1000, 5000, 7, 0, 200);
+	CHECK(std::isfinite(g) && g == std::fabs(1000.0f + static_cast<float>(256 * 5000) * 7.0f));
+	// The clamp, apart: [16, 32767].
+	CHECK(clamp_w(0.0f) == 16.0f && clamp_w(15.9f) == 16.0f && clamp_w(16.0f) == 16.0f);
+	CHECK(clamp_w(500.5f) == 500.5f && clamp_w(32767.0f) == 32767.0f && clamp_w(32768.0f) == 32767.0f);
+	CHECK(clamp_w(1e30f) == 32767.0f && clamp_w(-5.0f) == 16.0f);
+	CHECK(wall_w_clamped(200, 256, 10, 0, 0, 1000, 123) == 16.0f && wall_w_clamped(200, 256, 40000, 0, 0, 1000, 5) == 32767.0f);
+
+	// The three gates over generated walls and columns (design 7, M1 "Host tests"). hw = 200 (a 400-px view),
+	// wx 160-320, |o| <= 40 000, t <= 64; three profiles of the vector's size. Restricted to SW's domain:
+	// samples with |tx * v.i| >= 2^31 or |o.x + t * v.i| > 32 767 are excluded and counted.
+	std::mt19937_64 rng(0xC3D001u);
+	auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	const int hw = 200;
+	unsigned long generated = 0, out_t = 0, excl_wrap = 0, excl_range = 0, judged_a = 0, judged_b = 0, judged_c = 0;
+	unsigned fail_a = 0, fail_b = 0, fail_c = 0;
+	double worst_a = 0, worst_b = 0;
+	const int o_max[3] = {12000, 40000, 40000}, v_max[3] = {2000, 8000, 32767};
+	for (int i = 0; i < 900000; ++i)
+	{
+		const int pr = i % 3;
+		const int wx = uni(160, 320);
+		const int ox = uni(-o_max[pr], o_max[pr]), oy = uni(-o_max[pr], o_max[pr]);
+		const int vi = uni(-v_max[pr], v_max[pr]), vj = uni(-v_max[pr], v_max[pr]);
+		const int sx = uni(0, 400);
+		++generated;
+		// Double-precision 2.2 (the reference for gate (a)).
+		const double s = sx - hw;
+		const double num = static_cast<double>(wx) * oy - s * ox;
+		double den = s * vi - static_cast<double>(wx) * vj;
+		if (den == 0)
+			den = 1;
+		const double t_d = num / den;
+		const double x_d = ox + t_d * vi;
+		if (std::fabs(t_d) > 64)
+		{
+			++out_t;
+			continue;
+		}
+		const sw::WorldX sw = sw::world_x(wx, hw, sx, ox, oy, vi, vj);
+		if (std::llabs(sw.product) >= (1LL << 31))
+		{
+			++excl_wrap;
+			continue;
+		}
+		if (std::fabs(x_d) > 32767.0)
+		{
+			++excl_range;
+			continue;
+		}
+		const double w_f = wall_w(hw, wx, ox, oy, vi, vj, sx);
+		const double w_d = std::fabs(x_d);
+		const double sw_w = sw.world_x;
+		// (a) the accuracy gate.
+		++judged_a;
+		const double err_a = std::fabs(w_f - w_d);
+		worst_a = std::max(worst_a, err_a / (1e-4 * w_d + 0.05));
+		if (err_a > 1e-4 * w_d + 0.05)
+		{
+			if (fail_a++ < 5)
+				std::printf("  gate (a): wx %d o (%d,%d) v (%d,%d) sx %d: w_f %.4f w_d %.4f\n", wx, ox, oy, vi, vj, sx, w_f, w_d);
+		}
+		// SW's own quantisation bound.
+		const double t_sw = std::fabs(t_d);
+		const double q = 1.0 + std::abs(vi) * (t_sw * ((sw.n_r ? 1.0 / std::abs(sw.n_r) : 0.0) + 1.0 / std::abs(sw.d_r)) + 1.0 / 65536);
+		if (q <= 0.5e-3 * sw_w)
+		{
+			// (b) the kickoff's rel <= 1e-3 vs SW world_x, where SW is precise enough to be judged.
+			++judged_b;
+			worst_b = std::max(worst_b, std::fabs(w_f - sw_w) / (1e-3 * sw_w));
+			if (std::fabs(w_f - sw_w) > 1e-3 * sw_w)
+			{
+				if (fail_b++ < 5)
+					std::printf("  gate (b): wx %d o (%d,%d) v (%d,%d) sx %d: w_f %.4f sw %d q %.3f\n", wx, ox, oy, vi, vj, sx, w_f, sw.world_x, q);
+			}
+		}
+		else
+		{
+			// (c) elsewhere within SW's own bound plus the float error.
+			++judged_c;
+			if (std::fabs(w_f - sw_w) > q + err_a)
+			{
+				if (fail_c++ < 5)
+					std::printf("  gate (c): wx %d o (%d,%d) v (%d,%d) sx %d: w_f %.4f sw %d q %.3f\n", wx, ox, oy, vi, vj, sx, w_f, sw.world_x, q);
+			}
+		}
+	}
+	std::printf("w gates: %lu samples generated; %lu outside the generator's t <= 64, %lu excluded (|tx*v.i| >= 2^31), "
+	            "%lu excluded (|world x| > 32767); judged: (a) %lu, (b) %lu, (c) %lu (a + b + c = %lu)\n",
+	            generated, out_t, excl_wrap, excl_range, judged_a, judged_b, judged_c, judged_b + judged_c);
+	std::printf("w gates: failures (a) %u (worst %.3f of the bound), (b) %u (worst %.3f of the bound), (c) %u\n",
+	            fail_a, worst_a, fail_b, worst_b, fail_c);
+	CHECK(judged_a > 100000 && judged_b > 10000 && judged_c > 10000 && judged_b + judged_c == judged_a);
+	CHECK(fail_a == 0 && fail_b == 0 && fail_c == 0);
+}
+
+static void test_fan_and_key()
+{
+	uint16_t idx[48];
+	std::memset(idx, 0xFF, sizeof idx);
+	CHECK(fan_indices(idx, 2, 5) == 0 && fan_indices(idx, 0, 5) == 0 && idx[0] == 0xFFFF);
+	CHECK(fan_indices(idx, 3, 10) == 3 && idx[0] == 10 && idx[1] == 11 && idx[2] == 12 && idx[3] == 0xFFFF);
+	CHECK(fan_indices(idx, 4, 0) == 6);
+	const uint16_t quad[6] = {0, 1, 2, 0, 2, 3};
+	CHECK(std::memcmp(idx, quad, sizeof quad) == 0 && idx[6] == 0xFFFF);
+	for (int n = 3; n <= 16; ++n)   // 3(n-2) indices, every triangle (base, base+i, base+i+1), all inside [base, base+n)
+	{
+		const unsigned base = 1000 + n;
+		CHECK(fan_indices(idx, n, base) == 3 * (n - 2));
+		bool ok = true;
+		for (int i = 0; i < n - 2; ++i)
+			ok = ok && idx[3 * i] == base && idx[3 * i + 1] == base + i + 1 && idx[3 * i + 2] == base + i + 2;
+		CHECK(ok);
+	}
+	CHECK(fan_indices(idx, 16, 65520) == 42 && idx[41] == 65535);   // u16 at the end of the range
+
+	int tex_a, tex_b, sh_a, sh_b;
+	const DrawKey k{kWalls, &tex_a, &sh_a, 0, 3, 0};
+	DrawKey k2 = k;
+	CHECK(k == k2 && !(k != k2));
+	k2 = k; k2.cls = kFloors;                CHECK(!(k == k2) && k != k2);
+	k2 = k; k2.texture = &tex_b;             CHECK(!(k == k2));
+	k2 = k; k2.shading_tables = &sh_b;       CHECK(!(k == k2));
+	k2 = k; k2.transfer_mode = 1;            CHECK(!(k == k2));
+	k2 = k; k2.transfer_data = 4;            CHECK(!(k == k2));
+	k2 = k; k2.shadeless = 0x0002;           CHECK(!(k == k2));
+
+	// c3d_supports (M2 predicate): (entry, transfer, width, height, rle, shadeless, transparent, textures).
+	auto sup = [](Entry e, Transfer t, int w, int h, bool rle, bool shadeless, bool transp, bool tex) {
+		return c3d_supports(e, t, w, h, rle, shadeless, transp, tex);
+	};
+	for (bool tex : {false, true})
+	{
+		CHECK(sup(Entry::Vertical, Transfer::Textured, 128, 128, false, false, false, tex));
+		CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, false, false, tex));
+		CHECK(sup(Entry::Vertical, Transfer::Textured, 256, 256, false, false, false, tex));
+		CHECK(sup(Entry::Horizontal, Transfer::Textured, 512, 512, false, false, false, tex));
+		CHECK(!sup(Entry::Horizontal, Transfer::Textured, 1024, 1024, false, false, false, tex));   // above vram_cap
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 64, 64, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 256, false, false, false, tex));       // not square
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 192, 192, false, false, false, tex));       // not a power of two
+		CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, true, false, false, tex));        // RLE (sprites)
+		// shadeless (infravision): drawn with textures (M3, the shadeless kinds), excluded on the flat path
+		CHECK(sup(Entry::Vertical, Transfer::Textured, 128, 128, false, true, false, tex) == tex);
+		CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, true, false, tex) == tex);
+		CHECK(!sup(Entry::Rectangle, Transfer::Textured, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::BigLandscaped, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Horizontal, Transfer::BigLandscaped, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Static, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Tinted, 128, 128, false, false, false, tex));
+		CHECK(!sup(Entry::Vertical, Transfer::Other, 128, 128, false, false, false, tex));
+	}
+	// A _TRANSPARENT_BIT wall: drawn with textures (the alpha test drops texel 0), M1's exclusion without; a
+	// floor never skips texel 0, so it is supported either way.
+	CHECK(sup(Entry::Vertical, Transfer::Textured, 128, 128, false, false, true, true));
+	CHECK(!sup(Entry::Vertical, Transfer::Textured, 128, 128, false, false, true, false));
+	CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, false, true, false));
+	CHECK(sup(Entry::Horizontal, Transfer::Textured, 128, 128, false, false, true, true));
+}
+
+static void test_colour_and_cmdbuf()
+{
+	// The colour hash never produces the sentinel's G and B (so no RGB the sentinel can have, for any k).
+	std::set<uint32_t> distinct;
+	bool never = true;
+	for (unsigned s = 0; s < 65536; ++s)
+	{
+		const Rgb c = shape_colour(static_cast<uint16_t>(s));
+		never = never && !(c.g == 0xC3 && c.b == 0xA5);
+		for (unsigned k : {0u, 1u, 77u, 255u})
+		{
+			const uint32_t argb = 0xFF000000u | (static_cast<uint32_t>(c.r) << 16) | (static_cast<uint32_t>(c.g) << 8) | c.b;
+			never = never && argb != cal_sentinel_argb(k);
+		}
+		distinct.insert((static_cast<uint32_t>(c.r) << 16) | (static_cast<uint32_t>(c.g) << 8) | c.b);
+	}
+	CHECK(never);
+	CHECK(distinct.size() > 60000);   // a hash of 65 536 ids: nearly all different
+	std::printf("shape_colour: %zu distinct colours over 65536 shapes\n", distinct.size());
+	// The forced case: find a shape whose raw hash is the forbidden pair, if any, is covered by the loop above;
+	// the function is deterministic.
+	CHECK(shape_colour(1234).r == shape_colour(1234).r && shape_colour(1).b == shape_colour(1).b);
+
+	// Command-buffer arithmetic. P0 = buffer start, P1 = write position before C3D_FrameEnd.
+	uint32_t buf[16384];
+	const uint32_t size = 16384;
+	CmdBufWords c = cmdbuf_words(buf + 4, buf + 1000, false, 0.9f, size);   // empty at P1: usage is stale
+	CHECK(c.frame_words == 996 && c.end_words == 0);
+	// Offset non-zero: end = lroundf(usage * size) - frame words. usage 0.0625 * 16384 = 1024.
+	c = cmdbuf_words(buf + 4, buf + 1000, true, 0.0625f, size);
+	CHECK(c.frame_words == 996 && c.end_words == 28);
+	// lroundf: 1023.6 -> 1024, 1023.4 -> 1023 (usage = words / size).
+	c = cmdbuf_words(buf, buf + 1000, true, 1023.6f / 16384.0f, size);
+	CHECK(c.end_words == 24);
+	c = cmdbuf_words(buf, buf + 1000, true, 1023.4f / 16384.0f, size);
+	CHECK(c.end_words == 23);
+	// Rounding half away from zero (lroundf): 1000.5 -> 1001.
+	c = cmdbuf_words(buf, buf + 1000, true, 1000.5f / 16384.0f, size);
+	CHECK(c.end_words == 1 || c.end_words == 0);   // float(1000.5/16384) * 16384 is 1000.5 or a hair under
+	// A usage below the frame's own words (a stale or odd value) records 0, not a wrap-around.
+	c = cmdbuf_words(buf, buf + 1000, true, 0.01f, size);
+	CHECK(c.frame_words == 1000 && c.end_words == 0);
+	// P1 before P0 (cannot happen): 0.
+	c = cmdbuf_words(buf + 10, buf + 5, true, 0.5f, size);
+	CHECK(c.frame_words == 0);
+	// The offset-zero case: nothing recorded for the end whatever the usage says.
+	c = cmdbuf_words(buf, buf, false, 1.0f, size);
+	CHECK(c.frame_words == 0 && c.end_words == 0);
+	c = cmdbuf_words(buf, buf + 8, false, 1.0f, size);
+	CHECK(c.frame_words == 8 && c.end_words == 0);
+
+	// The reserve test: size - offset >= draw + end + extra.
+	CHECK(reserve_ok(131072, 0, kDrawReserveWords, kEndReserveWords, 0));
+	CHECK(kDrawReserveWords == 564 && kEndReserveWords == 20);   // M3: 2 x 282
+	CHECK(reserve_ok(4096, 2048, 1024, 1024, 0) && !reserve_ok(4096, 2049, 1024, 1024, 0));
+	CHECK(reserve_ok(4096, 2048 - 5, 1024, 1024, 5) && !reserve_ok(4096, 2048 - 5, 1024, 1024, 6));
+	CHECK(!reserve_ok(131072, 0, 1024, 1024, 1000000));   // reserve_extra forces a refusal
+	CHECK(!reserve_ok(8192, 8193, 0, 0, 0) && reserve_ok(8192, 8192, 0, 0, 0));   // offset beyond size: refused
+	CHECK(!reserve_ok(0xFFFFFFFFu, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu));   // no 32-bit wrap
+	CHECK(reserve_ok(8192, 0, 4096, 4096, 0) && !reserve_ok(8192, 0, 4096, 4097, 0));
+	CHECK(sizeof(Vertex) == 32 && offsetof(Vertex, u0) == 12 && offsetof(Vertex, r) == 28);
+}
+
+static void test_config_m1()
+{
+	Config d;
+	CHECK(d.cmdbuf_kib == 512 && d.gxq_budget == 24 && d.ring_vertices == 2048 && d.ring_indices == 4096);
+	CHECK(d.reserve_extra == 0 && d.film.empty());
+
+	Config c;
+	CHECK(config_apply(c, "cmdbuf_kib", "32") && c.cmdbuf_kib == 32);
+	CHECK(config_apply(c, "cmdbuf_kib", "16") && c.cmdbuf_kib == 16);
+	CHECK(config_apply(c, "cmdbuf_kib", "4096") && c.cmdbuf_kib == 4096);
+	CHECK(!config_apply(c, "cmdbuf_kib", "15") && c.cmdbuf_kib == 4096);
+	CHECK(!config_apply(c, "cmdbuf_kib", "4097") && !config_apply(c, "cmdbuf_kib", "") && !config_apply(c, "cmdbuf_kib", "-1"));
+	CHECK(config_apply(c, "gxq_budget", "4") && c.gxq_budget == 4);
+	CHECK(config_apply(c, "gxq_budget", "1") && config_apply(c, "gxq_budget", "24") && c.gxq_budget == 24);
+	CHECK(!config_apply(c, "gxq_budget", "0") && !config_apply(c, "gxq_budget", "25") && c.gxq_budget == 24);
+	CHECK(config_apply(c, "ring_vertices", "64") && c.ring_vertices == 64);
+	CHECK(config_apply(c, "ring_vertices", "32768") && !config_apply(c, "ring_vertices", "32769") && !config_apply(c, "ring_vertices", "63"));
+	CHECK(config_apply(c, "ring_indices", "64") && config_apply(c, "ring_indices", "65536") && c.ring_indices == 65536);
+	CHECK(!config_apply(c, "ring_indices", "65537") && !config_apply(c, "ring_indices", "63"));
+	CHECK(config_apply(c, "reserve_extra", "0") && config_apply(c, "reserve_extra", "1000000") && c.reserve_extra == 1000000);
+	CHECK(!config_apply(c, "reserve_extra", "1000001") && !config_apply(c, "reserve_extra", "x"));
+
+	// film: the rest of the line, trimmed; spaces kept inside; '#' starts a comment.
+	Config f;
+	std::vector<std::string> problems;
+	config_parse(f,
+	             "renderer c3d\n"
+	             "film   M2 L01 Waterloo Waterpark.46857.filA   \n"
+	             "diff 2\n",
+	             problems);
+	CHECK(problems.empty() && f.film == "M2 L01 Waterloo Waterpark.46857.filA" && f.diff == 2 && f.renderer_c3d);
+	config_parse(f, "film\tc3d-film.filA   # a comment, not part of the name\n", problems);
+	CHECK(problems.empty() && f.film == "c3d-film.filA");
+	config_parse(f, "film sdmc:/3ds/alephone/my film.filA\n", problems);
+	CHECK(problems.empty() && f.film == "sdmc:/3ds/alephone/my film.filA");
+	config_parse(f, "film  /films/a b  c.filA\r\n", problems);
+	CHECK(problems.empty() && f.film == "/films/a b  c.filA");   // inner runs of spaces kept, the CR trimmed
+	config_parse(f, "film a#b.filA\n", problems);   // '#' is not supported inside a path: the name is cut there
+	CHECK(problems.empty() && f.film == "a");
+	// An empty value is rejected and leaves the old one.
+	config_parse(f, "film\n", problems);
+	CHECK(problems.size() == 1 && f.film == "a");
+	config_parse(f, "film    # nothing but a comment\n", problems);
+	CHECK(problems.size() == 2 && f.film == "a");
+	problems.clear();
+	// The other keys still read one token, and the new ones work in a file.
+	Config m;
+	config_parse(m, "cmdbuf_kib 32\ngxq_budget 4  # the queue\nring_vertices 64\nring_indices 128\nreserve_extra 5000\nmode readback\n", problems);
+	CHECK(problems.empty() && m.cmdbuf_kib == 32 && m.gxq_budget == 4 && m.ring_vertices == 64 && m.ring_indices == 128);
+	CHECK(m.reserve_extra == 5000 && m.mode == Mode::Readback);
+	config_parse(m, "gxq_budget 25\nring_vertices 10\n", problems);
+	CHECK(problems.size() == 2 && m.gxq_budget == 4 && m.ring_vertices == 64);
+}
+
+// A random convex polygon (or a degenerate one) of 3-8 integer vertices for the coverage model.
+static std::vector<Point2> random_polygon(std::mt19937_64& rng, int W, int H)
+{
+	auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	// Box size log-uniform: many small boxes (many exact ties), some as large as the view.
+	const double lg = std::uniform_real_distribution<double>(std::log(3.0), std::log(static_cast<double>(W)))(rng);
+	const int bw = std::min(W, static_cast<int>(std::exp(lg))), bh = std::min(H, std::max(2, static_cast<int>(std::exp(lg) * 0.6)));
+	const int bx = uni(0, W - bw), by = uni(0, H - bh);
+	const int count = uni(3, 8);
+	std::vector<Point2> pts;
+	for (int i = 0; i < count; ++i)
+		pts.push_back({bx + uni(0, bw), by + uni(0, bh)});
+	std::vector<Point2> poly;
+	if (uni(0, 9) == 0)
+		poly = pts;   // anything goes: duplicates, collinear, concave, wound either way
+	else
+	{
+		// Convex hull, counter-clockwise in math orientation (monotone chain, collinear dropped).
+		std::vector<Point2> p = pts;
+		std::sort(p.begin(), p.end(), [](const Point2& a, const Point2& b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
+		p.erase(std::unique(p.begin(), p.end(), [](const Point2& a, const Point2& b) { return a.x == b.x && a.y == b.y; }), p.end());
+		auto cross = [](const Point2& o, const Point2& a, const Point2& b) {
+			return static_cast<long long>(a.x - o.x) * (b.y - o.y) - static_cast<long long>(a.y - o.y) * (b.x - o.x);
+		};
+		std::vector<Point2> hull;
+		if (p.size() >= 3)
+		{
+			hull.resize(2 * p.size());
+			size_t k = 0;
+			for (size_t i = 0; i < p.size(); ++i)
+			{
+				while (k >= 2 && cross(hull[k - 2], hull[k - 1], p[i]) <= 0)
+					--k;
+				hull[k++] = p[i];
+			}
+			for (size_t i = p.size() - 1, t = k + 1; i > 0; --i)
+			{
+				while (k >= t && cross(hull[k - 2], hull[k - 1], p[i - 1]) <= 0)
+					--k;
+				hull[k++] = p[i - 1];
+			}
+			hull.resize(k - 1);
+		}
+		poly = hull.size() >= 3 ? hull : pts;
+		// Sometimes insert the midpoint of an edge (a collinear vertex), as clipping can produce.
+		if (poly.size() < 8 && hull.size() >= 3 && uni(0, 3) == 0)
+		{
+			const size_t e = static_cast<size_t>(uni(0, static_cast<int>(poly.size()) - 1));
+			const Point2 a = poly[e], b = poly[(e + 1) % poly.size()];
+			if (((a.x + b.x) % 2) == 0 && ((a.y + b.y) % 2) == 0)
+				poly.insert(poly.begin() + static_cast<long>(e) + 1, Point2{(a.x + b.x) / 2, (a.y + b.y) / 2});
+		}
+	}
+	if (uni(0, 1))
+		std::reverse(poly.begin(), poly.end());
+	const int rot = uni(0, static_cast<int>(poly.size()) - 1);
+	std::rotate(poly.begin(), poly.begin() + rot, poly.end());
+	return poly;
+}
+
+// Every vertex on one side of (or on) every edge: `clockwise` = the side of positive shoelace area in
+// y-down space (cross >= 0 below); otherwise either side. Repeated vertices are fine (zero-length edges skip).
+static bool is_convex(const std::vector<Point2>& poly, bool clockwise)
+{
+	const int n = static_cast<int>(poly.size());
+	bool pos = false, neg = false;
+	for (int i = 0; i < n; ++i)
+	{
+		const Point2 &a = poly[i], &b = poly[(i + 1) % n];
+		for (int j = 0; j < n; ++j)
+		{
+			const long long cr = static_cast<long long>(b.x - a.x) * (poly[j].y - a.y) - static_cast<long long>(b.y - a.y) * (poly[j].x - a.x);
+			pos = pos || cr > 0;
+			neg = neg || cr < 0;
+		}
+	}
+	return clockwise ? !neg : !(pos && neg);
+}
+
+namespace sw
+{
+// scottish_textures.cpp:1173-1223 (build_x_table), on shorts as in the original: for each row of the edge
+// (x0,y0)-(x1,y1), y0 < y1, the x the horizontal mapper starts or stops the row at. NULL = refused (dy < 0).
+static short* build_x_table(short* table, short x0, short y0, short x1, short y1)
+{
+	short dx, dy, adx, ady;
+	short x;
+	short d, delta_d, d_max;
+	short* record;
+	auto sgn = [](short v) -> short { return v < 0 ? -1 : (v > 0 ? 1 : 0); };
+
+	dx = x1 - x0, adx = std::abs(dx), dx = sgn(dx);
+	dy = y1 - y0, ady = std::abs(dy), dy = sgn(dy);
+	if (dy > 0)
+	{
+		x = x0;
+		record = table;
+		if (adx >= ady)
+		{
+			d = adx - ady, delta_d = -2 * ady, d_max = 2 * adx;
+			while ((adx -= 1) >= 0)
+			{
+				if (d < 0)
+					d += d_max, *record++ = x, ady -= 1;
+				x += dx, d += delta_d;
+			}
+			if (ady == 1)
+				*record++ = x;
+		}
+		else
+		{
+			d = ady - adx, delta_d = -2 * adx, d_max = 2 * ady;
+			while ((ady -= 1) >= 0)
+			{
+				if (d < 0)
+					x += dx, d += d_max;
+				*record++ = x;
+				d += delta_d;
+			}
+		}
+	}
+	else if (dy < 0)
+		return nullptr;
+	return table;
+}
+
+// scottish_textures.cpp:213-300 (texture_horizontal_polygon) down to the tables, then the row loop of
+// low_level_textures.h:200-225: `cov` gets 1 for every written pixel of rows [x0, x1). If `rows` is given it
+// receives, per written row r (from the highest vertex), the (y, x0, x1) of the row. `wrote_outside` as above.
+struct HRow
+{
+	int y, x0, x1;
+};
+static Result polygon_coverage_h_rows(const std::vector<Point2>& pts, int w, int h, std::vector<uint8_t>& cov,
+                                      unsigned& wrote_outside, std::vector<HRow>* rows)
+{
+	const int n = static_cast<int>(pts.size());
+	int highest = 0, lowest = 0;
+	for (int v = 0; v < n; ++v)
+	{
+		if (!(pts[v].x >= 0 && pts[v].x <= w && pts[v].y >= 0 && pts[v].y <= h))
+			return RefusedBounds;
+		if (pts[v].y < pts[highest].y)
+			highest = v;
+		else if (pts[v].y > pts[lowest].y)
+			lowest = v;
+	}
+	if (highest == lowest)
+		return RefusedDegenerate;
+
+	std::vector<short> left_table(8192, -1), right_table(8192, -1);
+	short left_line_count = 0, right_line_count = 0, total_line_count;
+	short aggregate_left = 0, aggregate_right = 0;
+	short left_vertex = static_cast<short>(highest), right_vertex = static_cast<short>(highest), vertex;
+	total_line_count = static_cast<short>(pts[lowest].y - pts[highest].y);
+	const short aggregate_total = total_line_count;
+	while (total_line_count > 0)
+	{
+		if (left_line_count <= 0)
+		{
+			do
+			{
+				vertex = left_vertex ? static_cast<short>(left_vertex - 1) : static_cast<short>(n - 1);
+				left_line_count = static_cast<short>(pts[vertex].y - pts[left_vertex].y);
+				if (!build_x_table(left_table.data() + aggregate_left, static_cast<short>(pts[left_vertex].x),
+				                   static_cast<short>(pts[left_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_left = static_cast<short>(aggregate_left + left_line_count);
+				left_vertex = vertex;
+			} while (!left_line_count);
+		}
+		if (right_line_count <= 0)
+		{
+			do
+			{
+				vertex = (right_vertex == n - 1) ? 0 : static_cast<short>(right_vertex + 1);
+				right_line_count = static_cast<short>(pts[vertex].y - pts[right_vertex].y);
+				if (!build_x_table(right_table.data() + aggregate_right, static_cast<short>(pts[right_vertex].x),
+				                   static_cast<short>(pts[right_vertex].y), static_cast<short>(pts[vertex].x),
+				                   static_cast<short>(pts[vertex].y)))
+					return RefusedWalk;
+				aggregate_right = static_cast<short>(aggregate_right + right_line_count);
+				right_vertex = vertex;
+			} while (!right_line_count);
+		}
+		const short delta = std::min(left_line_count, right_line_count);
+		total_line_count = static_cast<short>(total_line_count - delta);
+		left_line_count = static_cast<short>(left_line_count - delta);
+		right_line_count = static_cast<short>(right_line_count - delta);
+	}
+	for (int r = 0; r < aggregate_total; ++r)
+	{
+		const int y = pts[highest].y + r;
+		const int x0 = left_table[r], x1 = right_table[r];
+		if (rows)
+			rows->push_back({y, x0, x1});
+		for (int x = x0; x < x1; ++x)
+		{
+			if (y < 0 || y >= h || x < 0 || x >= w)
+				++wrote_outside;
+			else
+				cov[static_cast<size_t>(y) * w + x] = 1;
+		}
+	}
+	return Drawn;
+}
+static Result polygon_coverage_h(const std::vector<Point2>& pts, int w, int h, std::vector<uint8_t>& cov,
+                                 unsigned& wrote_outside)
+{
+	return polygon_coverage_h_rows(pts, w, h, cov, wrote_outside, nullptr);
+}
+} // namespace sw
+
+using CoverFn = sw::Result (*)(const std::vector<Point2>&, int, int, std::vector<uint8_t>&, unsigned&);
+
+// Random polygons, concave and degenerate included: the acceptance status is the SW walk's, and the pixels
+// are the interior's by the pixel-centre rule, apart from the exact ties (counted apart).
+static void coverage_model(Orient orient, CoverFn cover, uint64_t seed, const char* label)
+{
+	const int W = 400, H = 240;
+	std::mt19937_64 rng(seed);
+	unsigned long n_poly = 0, n_draw = 0, n_walk = 0, n_bounds = 0, n_degen = 0, n_area = 0;
+	unsigned long walk_mismatch = 0, area_sw_wrote = 0, refused_sw_wrote = 0, outside_writes = 0;
+	unsigned long identical_px = 0, tie_px = 0, tie_sw_covered = 0, tie_sw_clear = 0, bad_px = 0, drawn_cmp = 0, empty_drawn = 0;
+	unsigned long span_mismatch = 0, convex_mismatch = 0, nonconvex_drawn = 0;
+	std::vector<uint8_t> cov(static_cast<size_t>(W) * H);
+	for (int it = 0; it < 12000; ++it)
+	{
+		std::vector<Point2> poly = random_polygon(rng, W, H);
+		if (it % 40 == 7)   // out of the bounds now and then
+			poly[0].x = (it & 1) ? -1 : W + 1;
+		const int n = static_cast<int>(poly.size());
+		const Accept a = accept_polygon(poly.data(), n, W, H, orient);
+		++n_poly;
+		n_draw += a == Accept::Draw; n_walk += a == Accept::Walk; n_bounds += a == Accept::Bounds;
+		n_degen += a == Accept::Degenerate; n_area += a == Accept::Area;
+
+		std::fill(cov.begin(), cov.end(), 0);
+		unsigned wrote_outside = 0;
+		const sw::Result sr = cover(poly, W, H, cov, wrote_outside);
+		outside_writes += wrote_outside;
+		size_t written = 0;
+		for (uint8_t v : cov)
+			written += v;
+
+		// The statuses that precede the area agree with SW's refusals one for one.
+		const bool sw_refused = sr != sw::Drawn;
+		if ((a == Accept::Bounds) != (sr == sw::RefusedBounds) || (a == Accept::Degenerate) != (sr == sw::RefusedDegenerate) ||
+		    (a == Accept::Walk) != (sr == sw::RefusedWalk))
+			++walk_mismatch;
+		if (sw_refused && written)
+			++refused_sw_wrote;
+		if (a == Accept::Area)
+		{
+			// "SW then has y1 < y0 in every column and writes nothing" -- for the convex ones. A concave polygon of
+			// negative area can still have pixels where its tables cross; those are not what the engine feeds.
+			if (written && is_convex(poly, false))
+				++area_sw_wrote;
+			continue;
+		}
+		if (a != Accept::Draw)
+			continue;
+
+		// sw_spans (the drawing of non-convex polygons, M2 status) reproduces SW's coverage exactly, for every
+		// accepted polygon, concave ones included; convex_cw agrees with is_convex.
+		{
+			Span spans[1024];
+			const int ns = sw_spans(poly.data(), n, orient, spans, 1024);
+			std::vector<uint8_t> scov(cov.size(), 0);
+			bool ok = ns > 0;
+			for (int k = 0; ok && k < ns; ++k)
+				for (int t = spans[k].a0; t < spans[k].a1; ++t)
+				{
+					const int x = orient == Orient::Horizontal ? t : spans[k].line;
+					const int y = orient == Orient::Horizontal ? spans[k].line : t;
+					if (x >= 0 && x < W && y >= 0 && y < H)
+						scov[static_cast<size_t>(y) * W + x] = 1;
+				}
+			span_mismatch += !ok || scov != cov;
+			const bool cvx = is_convex(poly, true);
+			convex_mismatch += convex_cw(poly.data(), n) != cvx;
+			nonconvex_drawn += !cvx;
+		}
+
+		// Ideal pixel-centre rasterisation of the fan = the polygon's interior, in doubled coordinates.
+		// Only for convex polygons (all cross products of consecutive edges the same sign).
+		if (!is_convex(poly, true))
+			continue;
+		// Polygons with a repeated vertex are fan-degenerate but still convex: zero-length edges are skipped.
+		int minx = W, maxx = 0, miny = H, maxy = 0;
+		for (const Point2& p : poly)
+			minx = std::min(minx, p.x), maxx = std::max(maxx, p.x), miny = std::min(miny, p.y), maxy = std::max(maxy, p.y);
+		++drawn_cmp;
+		const unsigned long tie_before = tie_px;
+		unsigned covered_here = 0;
+		for (int y = miny; y < std::min(maxy + 1, H); ++y)
+			for (int x = minx; x < std::min(maxx + 1, W); ++x)
+			{
+				const long long px = 2LL * x + 1, py = 2LL * y + 1;
+				bool neg = false, zero = false;
+				for (int i = 0; i < n; ++i)
+				{
+					const Point2 &p0 = poly[i], &p1 = poly[(i + 1) % n];
+					if (p0.x == p1.x && p0.y == p1.y)
+						continue;
+					const long long cr = (2LL * (p1.x - p0.x)) * (py - 2LL * p0.y) - (2LL * (p1.y - p0.y)) * (px - 2LL * p0.x);
+					neg = neg || cr < 0;
+					zero = zero || cr == 0;
+				}
+				const bool swc = cov[static_cast<size_t>(y) * W + x] != 0;
+				if (neg)
+				{
+					// Outside the polygon: SW must not have written it.
+					if (swc)
+						++bad_px;
+					else
+						++identical_px;
+				}
+				else if (zero)
+				{
+					++tie_px;
+					(swc ? tie_sw_covered : tie_sw_clear) += 1;
+				}
+				else
+				{
+					covered_here += 1;
+					if (swc)
+						++identical_px;
+					else
+						++bad_px;
+				}
+			}
+		// The same definition as tie_pixels (M1 piece 5): the counts agree polygon by polygon.
+		if (tie_pixels(poly.data(), n, W, H, nullptr, nullptr) != static_cast<int>(tie_px - tie_before))
+			++bad_px;
+		// SW wrote nothing outside the box, either.
+		size_t in_box = 0;
+		for (int y = miny; y < std::min(maxy + 1, H); ++y)
+			for (int x = minx; x < std::min(maxx + 1, W); ++x)
+				in_box += cov[static_cast<size_t>(y) * W + x];
+		if (in_box != written)
+			++bad_px;
+		if (!covered_here)
+			++empty_drawn;
+	}
+	std::printf("%s: %lu polygons: %lu drawn (acceptance), %lu walk, %lu bounds, %lu degenerate, %lu area;"
+	            " %lu convex drawn compared, %lu of them with no strictly interior pixel\n",
+	            label, n_poly, n_draw, n_walk, n_bounds, n_degen, n_area, drawn_cmp, empty_drawn);
+	std::printf("%s: %lu pixels identical, %lu exact-tie pixels counted apart (SW covered %lu, SW clear %lu), "
+	            "%lu mismatches\n", label, identical_px, tie_px, tie_sw_covered, tie_sw_clear, bad_px);
+	CHECK(n_draw > 2000 && n_walk > 0 && n_bounds > 0 && n_degen > 0 && n_area > 1000);
+	std::printf("%s: acceptance vs SW refusals differ %lu; SW wrote after a refusal %lu, after area <= 0 %lu, outside the view %lu\n",
+	            label, walk_mismatch, refused_sw_wrote, area_sw_wrote, outside_writes);
+	CHECK(walk_mismatch == 0 && refused_sw_wrote == 0 && area_sw_wrote == 0 && outside_writes == 0);
+	CHECK(bad_px == 0 && drawn_cmp > 1500);
+	CHECK(tie_px > 0);
+	std::printf("%s: sw_spans vs SW coverage: %lu mismatching polygons (%lu non-convex drawn); convex_cw vs is_convex "
+	            "differ %lu\n", label, span_mismatch, nonconvex_drawn, convex_mismatch);
+	CHECK(span_mismatch == 0 && convex_mismatch == 0 && nonconvex_drawn > 50);
+}
+
+static void test_acceptance_and_coverage()
+{
+	const int W = 400, H = 240;
+	// Hand-made cases.
+	auto acc = [&](std::vector<Point2> v) { return accept_polygon(v.data(), static_cast<int>(v.size()), W, H); };
+	CHECK(acc({{0, 0}, {10, 0}, {10, 10}, {0, 10}}) == Accept::Draw);        // clockwise on screen (y down)
+	CHECK(acc({{0, 0}, {0, 10}, {10, 10}, {10, 0}}) == Accept::Area);        // counter-clockwise
+	CHECK(acc({{0, 0}, {400, 0}, {400, 240}, {0, 240}}) == Accept::Draw);    // the whole view: the bounds are inclusive
+	CHECK(acc({{-1, 0}, {10, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {401, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, -1}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, 241}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{5, 0}, {5, 10}, {5, 20}}) == Accept::Degenerate);            // min x == max x
+	CHECK(acc({{-5, 0}, {5, 10}, {5, 20}}) == Accept::Bounds);               // the bounds test comes first
+	CHECK(acc({{0, 0}, {5, 5}}) == Accept::Degenerate);
+	CHECK(acc({{0, 0}, {10, 5}, {20, 10}}) == Accept::Area);                 // collinear: zero area
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}}) == Accept::Draw);                  // clockwise on screen
+	CHECK(acc({{0, 0}, {0, 10}, {20, 0}}) == Accept::Area);                  // counter-clockwise on screen
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}, {0, 5}}) == Accept::Draw);          // a collinear vertex on the left edge
+	// A walk build_y_table refuses: a concave "S" whose clockwise walk from the leftmost vertex runs back in x.
+	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {10, 10}, {0, 10}}) == Accept::Draw);        // concave but walkable
+	CHECK(acc({{0, 0}, {10, 0}, {5, 5}, {20, 10}, {0, 10}}) == Accept::Walk);        // 1 -> 2 runs back in x
+
+	coverage_model(Orient::Vertical, sw::polygon_coverage, 0xC3D002u, "coverage model");
+}
+
+// The same for rows: texture_horizontal_polygon against accept_polygon(Horizontal) + pixel-centre rasterisation
+// (M2 specification, "Floor coverage rule").
+static void test_acceptance_and_coverage_horizontal()
+{
+	const int W = 400, H = 240;
+	auto acc = [&](std::vector<Point2> v) { return accept_polygon(v.data(), static_cast<int>(v.size()), W, H, Orient::Horizontal); };
+	CHECK(acc({{0, 0}, {10, 0}, {10, 10}, {0, 10}}) == Accept::Draw);        // clockwise on screen (y down)
+	CHECK(acc({{0, 0}, {0, 10}, {10, 10}, {10, 0}}) == Accept::Area);        // counter-clockwise
+	CHECK(acc({{0, 0}, {400, 0}, {400, 240}, {0, 240}}) == Accept::Draw);
+	CHECK(acc({{-1, 0}, {10, 0}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 0}, {10, 241}, {10, 10}}) == Accept::Bounds);
+	CHECK(acc({{0, 5}, {10, 5}, {20, 5}}) == Accept::Degenerate);            // min y == max y
+	CHECK(acc({{0, 0}, {10, 5}, {20, 10}}) == Accept::Area);                 // collinear
+	CHECK(acc({{0, 0}, {20, 0}, {0, 10}}) == Accept::Draw);
+	CHECK(acc({{0, 0}, {0, 10}, {20, 0}}) == Accept::Area);
+	coverage_model(Orient::Horizontal, sw::polygon_coverage_h, 0xC3D003u, "horizontal coverage model");
+}
+
+// tie_pixels vs a brute-force scan of every pixel centre against every edge, on generated polygons; and
+// against the coverage model's definition (the centre on an edge line and inside-or-on every other edge).
+static void tie_cb(void* ctx, int k, int m) { static_cast<std::vector<std::pair<int, int>>*>(ctx)->push_back({k, m}); }
+
+static void test_tie_pixels()
+{
+	const int W = 40, H = 30;
+	std::mt19937_64 rng(0x71E5u);
+	unsigned long polys = 0, ties = 0, model_ties = 0, convex = 0;
+	for (int it = 0; it < 20000; ++it)
+	{
+		std::vector<Point2> poly = random_polygon(rng, W, H);
+		if (it % 17 == 3)
+			poly[0].x = -3;   // clipping: vertices outside the view
+		const int n = static_cast<int>(poly.size());
+		std::vector<std::pair<int, int>> got;
+		const int cnt = tie_pixels(poly.data(), n, W, H, tie_cb, &got);
+		CHECK(cnt == static_cast<int>(got.size()));
+		std::vector<uint8_t> have(static_cast<size_t>(W) * H, 0), want(static_cast<size_t>(W) * H, 0);
+		for (auto& g : got)
+		{
+			CHECK(g.first >= 0 && g.first < W && g.second >= 0 && g.second < H);
+			++have[static_cast<size_t>(g.second) * W + g.first];
+		}
+		// Brute force: per edge, every pixel centre in the x-span, doubled coordinates.
+		for (int i = 0; i < n; ++i)
+		{
+			Point2 p0 = poly[i], p1 = poly[(i + 1) % n];
+			if (p0.x > p1.x)
+				std::swap(p0, p1);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					if (x < p0.x || x >= p1.x)
+						continue;
+					const long long cr = (2LL * (p1.x - p0.x)) * (2LL * y + 1 - 2LL * p0.y) -
+					                     (2LL * (p1.y - p0.y)) * (2LL * x + 1 - 2LL * p0.x);
+					if (cr == 0)
+						++want[static_cast<size_t>(y) * W + x];
+				}
+		}
+		CHECK(have == want);
+		++polys;
+		for (uint8_t v : have)
+			ties += v;
+		// The coverage model's definition, for convex polygons inside the view: counts must match.
+		if (poly[0].x < 0 || accept_polygon(poly.data(), n, W, H) != Accept::Draw || !is_convex(poly, true))
+			continue;   // the coverage test's population: accepted convex polygons
+		bool inside_view = true;
+		for (const Point2& p : poly)
+			inside_view = inside_view && p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H;
+		if (!inside_view)
+			continue;
+		++convex;
+		unsigned long model = 0, mine = 0;
+		for (int y = 0; y < H; ++y)
+			for (int x = 0; x < W; ++x)
+			{
+				const long long px = 2LL * x + 1, py = 2LL * y + 1;
+				bool neg = false, zero = false;
+				for (int e = 0; e < n; ++e)
+				{
+					const Point2 &q0 = poly[e], &q1 = poly[(e + 1) % n];
+					if (q0.x == q1.x && q0.y == q1.y)
+						continue;
+					const long long cr = (2LL * (q1.x - q0.x)) * (py - 2LL * q0.y) - (2LL * (q1.y - q0.y)) * (px - 2LL * q0.x);
+					neg = neg || cr < 0;
+					zero = zero || cr == 0;
+				}
+				if (!neg && zero)
+					++model;
+			}
+		for (uint8_t v : have)
+			mine += v != 0;
+		model_ties += model;
+		CHECK(model == mine);
+	}
+	std::printf("tie pixels: %lu polygons, %lu tie pixels (per edge, brute force identical); %lu convex in-view polygons: "
+	            "coverage-model exact-tie count %lu == tie_pixels count\n", polys, ties, convex, model_ties);
+	CHECK(ties > 0 && convex > 500);
+	// The film's sliver: its top edge (346,96)-(347,97) passes through the centre (346.5, 96.5).
+	const Point2 sl[4] = {{346, 96}, {347, 97}, {347, 125}, {346, 127}};
+	std::vector<std::pair<int, int>> got;
+	tie_pixels(sl, 4, 400, 240, tie_cb, &got);
+	bool has = false;
+	for (auto& g : got)
+		has = has || (g.first == 346 && g.second == 96);
+	CHECK(has);
+}
+
+static void test_ring()
+{
+	RingState r;
+	r.configure(100, 200);
+	r.begin_frame();
+	CHECK(r.half() == 0 && r.vertices_used() == 0 && r.index_used() == 0);
+	CHECK(r.fits(100, 200) && !r.fits(101, 0) && !r.fits(0, 201));
+	CHECK(r.take(4, 6) == 0 && r.take(3, 3) == 4);
+	CHECK(r.vertices_used() == 7 && r.index_used() == 9);
+	CHECK(r.fits(93, 191) && !r.fits(94, 0) && !r.fits(0, 192));
+	r.begin_frame();
+	CHECK(r.half() == 1 && r.vertices_used() == 0 && r.index_used() == 0);
+	CHECK(r.take(10, 24) == 0);
+	r.begin_frame();
+	CHECK(r.half() == 0);
+	CHECK(r.take(2, 3) == 0);
+	// high water is per half and survives the flip
+	CHECK(r.high_water_vertices(0) == 7 && r.high_water_indices(0) == 9);
+	CHECK(r.high_water_vertices(1) == 10 && r.high_water_indices(1) == 24);
+	// a full half fits exactly, one more does not
+	RingState f;
+	f.configure(64, 64);
+	f.begin_frame();
+	f.take(64, 64);
+	CHECK(!f.fits(1, 0) && !f.fits(0, 1) && f.fits(0, 0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2 parts 1-2: texture conversion, tiling, the texture cache (design 7, "M2 specification")
+
+static void test_config_m2()
+{
+	Config d;
+	CHECK(d.vram_cap == 3584 && d.linear_cap == 4096 && d.promote_max == 8);
+	Config c;
+	CHECK(config_apply(c, "vram_cap", "0") && c.vram_cap == 0);
+	CHECK(config_apply(c, "vram_cap", "512") && config_apply(c, "vram_cap", "4096") && c.vram_cap == 4096);
+	CHECK(!config_apply(c, "vram_cap", "4097") && !config_apply(c, "vram_cap", "-1") && !config_apply(c, "vram_cap", "") && c.vram_cap == 4096);
+	CHECK(config_apply(c, "linear_cap", "64") && c.linear_cap == 64);
+	CHECK(config_apply(c, "linear_cap", "16384") && c.linear_cap == 16384);
+	CHECK(!config_apply(c, "linear_cap", "63") && !config_apply(c, "linear_cap", "16385") && !config_apply(c, "linear_cap", "x") && c.linear_cap == 16384);
+	CHECK(config_apply(c, "promote_max", "0") && c.promote_max == 0);
+	CHECK(config_apply(c, "promote_max", "8") && c.promote_max == 8);
+	CHECK(!config_apply(c, "promote_max", "9") && !config_apply(c, "promote_max", "-1") && c.promote_max == 8);
+	Config p;
+	std::vector<std::string> problems;
+	config_parse(p, "vram_cap 512  # KiB\nlinear_cap 1024\npromote_max 0\nvram_cap 99999\n", problems);
+	CHECK(problems.size() == 1 && p.vram_cap == 512 && p.linear_cap == 1024 && p.promote_max == 0);
+}
+
+// --- tables built like shapes.cpp's build_shading_tables32 (number_of_shading_tables = 256, SDL_MapRGB
+// on pixel_format_32 = ARGB8888: 0xFF000000 | R << 16 | G << 8 | B)
+
+struct TestColor { unsigned r, g, b; bool selfLum; };
+
+static std::vector<uint32_t> build_tables32(const TestColor* colors, const uint8_t* remap)
+{
+	std::vector<uint32_t> t(256 * 256, 0);
+	for (unsigned i = 0; i < 256; ++i)
+		for (unsigned level = 0; level < 256; ++level)
+		{
+			const TestColor& c = colors[remap ? remap[i] : i];
+			const unsigned mult = c.selfLum ? (128 + (level >> 1)) : level;   // shapes.cpp:1946
+			t[256 * level + i] = 0xFF000000u | (((c.r * mult / 255) >> 8) << 16) | (((c.g * mult / 255) >> 8) << 8) |
+			                     ((c.b * mult / 255) >> 8);
+		}
+	return t;
+}
+
+// 256 colours: a spread, plus the special cases at 250..253 (0 is a normal colour with G = 255).
+static std::vector<TestColor> make_colors()
+{
+	std::vector<TestColor> c(256);
+	for (unsigned i = 0; i < 256; ++i)
+		c[i] = TestColor{i * 257u, (255 - i) * 257u, ((i * 7) & 255) * 257u, i % 5 == 0};
+	c[250] = TestColor{0, 0, 0, false};          // black normal
+	c[251] = TestColor{0, 0, 0, true};           // black self-luminous
+	c[252] = TestColor{0x0100, 0, 0, true};      // dark self-luminous: level 0 rounds to black
+	c[253] = TestColor{0x4000, 0x2000, 0, true}; // self-luminous with a visible level 0
+	c[254] = TestColor{0xFFFF, 0xFFFF, 0xFFFF, false};
+	c[255] = TestColor{0x1234, 0x5678, 0x9ABC, false};
+	return c;
+}
+
+// Independent expectation, from the colour itself (top level 255 or 0), not from the table.
+static uint32_t expect_word(const TestColor& c, TexKind kind, bool zero_index)
+{
+	auto ch = [&](unsigned v, unsigned mult) { return (v * mult / 255) >> 8; };
+	const unsigned top = 255;                                  // the top table: multiplier 255 either way
+	const unsigned lvl0 = c.selfLum ? 128 : 0;
+	const bool lum = ch(c.r, lvl0) || ch(c.g, lvl0) || ch(c.b, lvl0);
+	switch (kind)
+	{
+		case TexKind::Normal:
+		case TexKind::NormalKeyed:
+		{
+			const unsigned a = (kind == TexKind::NormalKeyed && zero_index) ? 0 : (lum ? 128 : 255);
+			return (ch(c.r, top) << 24) | (ch(c.g, top) << 16) | (ch(c.b, top) << 8) | a;
+		}
+		default:
+			return 0;
+	}
+}
+
+struct TestBitmap
+{
+	unsigned W;
+	std::vector<uint8_t> data;
+	std::vector<const uint8_t*> rows;
+	explicit TestBitmap(unsigned w) : W(w), data(w * w), rows(w)
+	{
+		for (unsigned j = 0; j < w; ++j)
+		{
+			rows[j] = &data[j * w];
+			for (unsigned s = 0; s < w; ++s)
+				data[j * w + s] = static_cast<uint8_t>(s * 131 + j * 7 + (s >> 3) * (j >> 2) + (j == 3 && s < 8 ? 250 + (s & 3) : 0));
+		}
+		data[0] = 0;                          // index 0 at (0, 0) and a few more
+		data[w * 5 + 9] = 0;
+		data[w * (w - 1) + (w - 1)] = 0;
+	}
+	TexBitmap view() const { return TexBitmap{static_cast<int>(W), static_cast<int>(W), rows.data(), false}; }
+};
+
+static uint32_t read_word(const std::vector<uint8_t>& out, unsigned W, unsigned j, unsigned s)
+{
+	const uint8_t* p = &out[tile_index(W, tile_memory_row(W, j), s) * 4];   // little-endian u32
+	const uint32_t w = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+	                   (static_cast<uint32_t>(p[3]) << 24);
+	return w;
+}
+
+static void test_tex_supported()
+{
+	CHECK(tex_supported(128, 128, false) && tex_supported(256, 256, false) && tex_supported(512, 512, false));
+	CHECK(!tex_supported(128, 128, true));                      // RLE: sprites, M4
+	CHECK(!tex_supported(64, 64, false) && !tex_supported(1024, 1024, false) && !tex_supported(0, 0, false));
+	CHECK(!tex_supported(192, 192, false) && !tex_supported(130, 130, false) && !tex_supported(-128, -128, false));
+	CHECK(!tex_supported(128, 256, false) && !tex_supported(256, 128, false) && !tex_supported(270, 512, false));
+	const TexBitmap b{512, 512, nullptr, false};
+	CHECK(tex_supported(b));
+	CHECK(tex_bytes(128, TexKind::Normal) == 65536 && tex_bytes(512, TexKind::NormalKeyed) == 1048576);
+	CHECK(tex_bytes(128, TexKind::Mask) == 16384);
+	std::vector<uint8_t> out(16);
+	const std::vector<uint32_t> t(kShadingTableEntries, 0);
+	CHECK(!tex_convert(b, t.data(), TexKind::Normal, out.data()));   // rows null
+	TestBitmap odd(128);
+	CHECK(!tex_convert(odd.view(), nullptr, TexKind::Normal, out.data()));   // tables needed
+	CHECK(!tex_convert(TexBitmap{64, 64, odd.rows.data(), false}, t.data(), TexKind::Normal, out.data()));
+}
+
+static void test_tex_convert()
+{
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+
+	// the table shape the comments claim: 0xFF000000 | rgb, black normal is 0xFF000000 at every level
+	CHECK(tables[256 * 255 + 250] == 0xFF000000u && tables[250] == 0xFF000000u);
+	CHECK(tables[251] == 0xFF000000u && tables[256 * 255 + 251] == 0xFF000000u);   // black SL
+	CHECK(tables[252] == 0xFF000000u && tables[256 * 255 + 252] == 0xFF010000u);   // dark SL: black at 0, not at 255
+	CHECK((tables[253] & 0xFFFFFF) != 0);                                         // visible SL at level 0
+	CHECK(tables[256 * 255 + 254] == 0xFFFFFFFFu);
+
+	for (unsigned W : {128u, 256u, 512u})
+	{
+		const TestBitmap bmp(W);
+		for (TexKind kind : {TexKind::Normal, TexKind::NormalKeyed})
+		{
+			std::vector<uint8_t> out(tex_bytes(W, kind), 0xEE);
+			CHECK(tex_convert(bmp.view(), tables.data(), kind, out.data()));
+			unsigned bad = 0, keyed0 = 0, lum = 0;
+			for (unsigned j = 0; j < W; ++j)
+				for (unsigned s = 0; s < W; ++s)
+				{
+					const unsigned i = bmp.rows[j][s];
+					const uint32_t want = expect_word(colors[i], kind, i == 0);
+					const uint32_t got = read_word(out, W, j, s);
+					bad += want != got;
+					keyed0 += (got & 0xFF) == 0;
+					lum += (got & 0xFF) == 128;
+				}
+			CHECK(bad == 0);
+			CHECK(kind == TexKind::Normal ? keyed0 == 0 : keyed0 >= 3);
+			CHECK(lum > 0);
+		}
+		// normal vs normal_keyed on the same bitmap: identical except A at index 0
+		std::vector<uint8_t> a(tex_bytes(W, TexKind::Normal)), b(a.size());
+		tex_convert(bmp.view(), tables.data(), TexKind::Normal, a.data());
+		tex_convert(bmp.view(), tables.data(), TexKind::NormalKeyed, b.data());
+		unsigned diffs = 0, bad = 0;
+		for (unsigned j = 0; j < W; ++j)
+			for (unsigned s = 0; s < W; ++s)
+			{
+				const uint32_t wa = read_word(a, W, j, s), wb = read_word(b, W, j, s);
+				if (wa != wb)
+				{
+					++diffs;
+					bad += !(bmp.rows[j][s] == 0 && (wb & 0xFF) == 0 && (wa & ~0xFFu) == (wb & ~0xFFu));
+				}
+			}
+		CHECK(diffs >= 3 && bad == 0);
+	}
+
+	// special colours, texel by texel (word = R<<24 | G<<16 | B<<8 | A)
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 250) == 0x000000FFu);         // black normal: A 255
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 251) == 0x000000FFu);         // black SL reads normal
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 252) == 0x010000FFu);         // dark SL: level 0 black -> A 255
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 253) == ((0x40u << 24) | (0x20u << 16) | 128u));   // SL: A 128
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 254) == 0xFFFFFFFFu);
+	CHECK(tex_palette_word(tables.data(), TexKind::Normal, 255) == ((0x12u << 24) | (0x56u << 16) | (0x9Au << 8) | 255u));
+	CHECK(tex_palette_word(tables.data(), TexKind::NormalKeyed, 0) == (0xFFu << 16));      // G = 255, A 0 (index 0 keyed)
+	CHECK((tex_palette_word(tables.data(), TexKind::Normal, 0) & 0xFF) == 128);            // colour 0 is SL, G = 255
+
+	// an alternate CLUT is another table pointer: colours come from the remapped entries
+	uint8_t remap[256];
+	for (unsigned i = 0; i < 256; ++i)
+		remap[i] = static_cast<uint8_t>(255 - i);
+	const std::vector<uint32_t> alt = build_tables32(colors.data(), remap);
+	CHECK(alt != tables);
+	CHECK(tex_palette_word(alt.data(), TexKind::Normal, 5) == expect_word(colors[250], TexKind::Normal, false));
+	CHECK(tex_palette_word(alt.data(), TexKind::Normal, 4) == expect_word(colors[251], TexKind::Normal, false));
+	CHECK(tex_palette_word(alt.data(), TexKind::Normal, 3) == expect_word(colors[252], TexKind::Normal, false));
+	{
+		const TestBitmap bmp(128);
+		std::vector<uint8_t> o1(tex_bytes(128, TexKind::Normal)), o2(o1.size());
+		tex_convert(bmp.view(), tables.data(), TexKind::Normal, o1.data());
+		tex_convert(bmp.view(), alt.data(), TexKind::Normal, o2.data());
+		CHECK(o1 != o2);
+		unsigned bad = 0;
+		for (unsigned j = 0; j < 128; ++j)
+			for (unsigned s = 0; s < 128; ++s)
+				bad += read_word(o2, 128, j, s) != expect_word(colors[255 - bmp.rows[j][s]], TexKind::Normal, bmp.rows[j][s] == 0);   // Normal: no keying
+		CHECK(bad == 0);
+	}
+
+	// shadeless (infravision): the single tint table, RGB = table[i], A 255 (0 for index 0 if keyed). The
+	// tint table of shapes.cpp:2279-2301 is a collection-wide table whose entry i is a grey-ish tint.
+	std::vector<uint32_t> tint(kShadingTableEntries, 0);
+	for (unsigned i = 0; i < 256; ++i)
+		tint[i] = 0xFF000000u | ((i ^ 0x5A) << 16) | ((255 - i) << 8) | ((i * 3) & 255);
+	for (unsigned i : {0u, 1u, 77u, 200u, 255u})
+	{
+		const uint32_t rgb = tint[i] & 0xFFFFFF;
+		const uint32_t w = (rgb & 0xFF0000u) << 8 | (rgb & 0xFF00u) << 8 | (rgb & 0xFFu) << 8;
+		CHECK(tex_palette_word(tint.data(), TexKind::Shadeless, i) == (w | 255u));
+		CHECK(tex_palette_word(tint.data(), TexKind::ShadelessKeyed, i) == (w | (i == 0 ? 0u : 255u)));
+	}
+	{
+		const TestBitmap bmp(128);
+		std::vector<uint8_t> o(tex_bytes(128, TexKind::ShadelessKeyed));
+		CHECK(tex_convert(bmp.view(), tint.data(), TexKind::ShadelessKeyed, o.data()));
+		unsigned bad = 0;
+		for (unsigned j = 0; j < 128; ++j)
+			for (unsigned s = 0; s < 128; ++s)
+				bad += read_word(o, 128, j, s) != tex_palette_word(tint.data(), TexKind::ShadelessKeyed, bmp.rows[j][s]);
+		CHECK(bad == 0);
+	}
+
+	// mask (tinted rectangles): A8, 1 byte per texel, Morton tiled; the tables (the global tint) never matter
+	{
+		const TestBitmap bmp(256);
+		std::vector<uint8_t> o(tex_bytes(256, TexKind::Mask), 0x77), o2(o.size(), 0x66);
+		CHECK(tex_convert(bmp.view(), nullptr, TexKind::Mask, o.data()));
+		CHECK(tex_convert(bmp.view(), tables.data(), TexKind::Mask, o2.data()));
+		CHECK(o == o2 && o.size() == 256u * 256u);
+		unsigned bad = 0, zeros = 0;
+		for (unsigned j = 0; j < 256; ++j)
+			for (unsigned s = 0; s < 256; ++s)
+			{
+				const uint8_t want = bmp.rows[j][s] == 0 ? 0 : 255;
+				zeros += want == 0;
+				bad += o[tile_index(256, 255 - j, s)] != want;
+			}
+		CHECK(bad == 0 && zeros >= 3);
+	}
+}
+
+// --- tiling
+
+static void test_morton_and_tile_index()
+{
+	CHECK(morton8(1, 0) == 1 && morton8(0, 1) == 2 && morton8(2, 0) == 4 && morton8(0, 2) == 8);
+	CHECK(morton8(4, 0) == 16 && morton8(0, 4) == 32 && morton8(7, 7) == 63 && morton8(3, 0) == 5);
+	std::set<unsigned> seen;
+	for (unsigned y = 0; y < 8; ++y)
+		for (unsigned x = 0; x < 8; ++x)
+			seen.insert(morton8(x, y));
+	CHECK(seen.size() == 64 && *seen.begin() == 0 && *seen.rbegin() == 63);
+	// tiles in row order across the width
+	CHECK(tile_index(16, 0, 0) == 0 && tile_index(16, 0, 8) == 64 && tile_index(16, 8, 0) == 128 && tile_index(16, 8, 8) == 192);
+	CHECK(tile_index(16, 0, 1) == 1 && tile_index(16, 1, 0) == 2 && tile_index(16, 1, 1) == 3 && tile_index(16, 8, 1) == 129);
+	CHECK(tile_index(128, 127, 127) == 128 * 128 - 1);
+	// a bijection for every W
+	for (unsigned W : {8u, 16u, 128u})
+	{
+		std::vector<char> hit(W * W, 0);
+		for (unsigned m = 0; m < W; ++m)
+			for (unsigned s = 0; s < W; ++s)
+				hit[tile_index(W, m, s)] = 1;
+		CHECK(std::count(hit.begin(), hit.end(), 1) == static_cast<long>(W * W));
+	}
+	CHECK(tile_memory_row(128, 0) == 127 && tile_memory_row(128, 127) == 0 && tile_memory_row(8, 3) == 4);
+	// tile_image for 1 and 4 byte texels
+	std::vector<uint8_t> lin(16 * 16), til(16 * 16);
+	for (unsigned i = 0; i < lin.size(); ++i)
+		lin[i] = static_cast<uint8_t>(i);
+	tile_image(lin.data(), 16, 1, til.data());
+	CHECK(til[tile_index(16, 9, 3)] == lin[9 * 16 + 3] && til[2] == lin[16] && til[64] == lin[8]);
+}
+
+// --- a minimal PNG writer (8-bit RGBA, stored deflate blocks) for the tex3ds test
+
+static uint32_t crc32_of(const uint8_t* p, size_t n, uint32_t crc = 0)
+{
+	static uint32_t table[256];
+	if (!table[1])
+		for (uint32_t i = 0; i < 256; ++i)
+		{
+			uint32_t c = i;
+			for (int k = 0; k < 8; ++k)
+				c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+			table[i] = c;
+		}
+	crc = ~crc;
+	for (size_t i = 0; i < n; ++i)
+		crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+	return ~crc;
+}
+
+static uint32_t adler32_of(const uint8_t* p, size_t n)
+{
+	uint32_t a = 1, b = 0;
+	for (size_t i = 0; i < n; ++i)
+	{
+		a = (a + p[i]) % 65521;
+		b = (b + a) % 65521;
+	}
+	return (b << 16) | a;
+}
+
+static void put_be32(std::vector<uint8_t>& v, uint32_t x)
+{
+	for (int sh = 24; sh >= 0; sh -= 8)
+		v.push_back(static_cast<uint8_t>(x >> sh));
+}
+
+static void png_chunk(std::vector<uint8_t>& png, const char* type, const std::vector<uint8_t>& data)
+{
+	put_be32(png, static_cast<uint32_t>(data.size()));
+	std::vector<uint8_t> body(type, type + 4);
+	body.insert(body.end(), data.begin(), data.end());
+	png.insert(png.end(), body.begin(), body.end());
+	put_be32(png, crc32_of(body.data(), body.size()));
+}
+
+// rgba: W rows of W pixels, bytes R, G, B, A per pixel, row 0 first.
+static std::vector<uint8_t> make_png(unsigned W, const std::vector<uint8_t>& rgba, unsigned H = 0)
+{
+	if (!H)
+		H = W;
+	std::vector<uint8_t> raw;
+	for (unsigned r = 0; r < H; ++r)
+	{
+		raw.push_back(0);   // filter: none
+		raw.insert(raw.end(), rgba.begin() + r * W * 4, rgba.begin() + (r + 1) * W * 4);
+	}
+	std::vector<uint8_t> z = {0x78, 0x01};
+	for (size_t pos = 0; pos < raw.size() || pos == 0;)
+	{
+		const size_t n = std::min<size_t>(65535, raw.size() - pos);
+		const bool last = pos + n == raw.size();
+		z.push_back(last ? 1 : 0);
+		z.push_back(static_cast<uint8_t>(n)); z.push_back(static_cast<uint8_t>(n >> 8));
+		z.push_back(static_cast<uint8_t>(~n)); z.push_back(static_cast<uint8_t>(~n >> 8));
+		z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
+		pos += n;
+		if (last)
+			break;
+	}
+	put_be32(z, adler32_of(raw.data(), raw.size()));
+	std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+	std::vector<uint8_t> ihdr;
+	put_be32(ihdr, W); put_be32(ihdr, H);
+	ihdr.push_back(8); ihdr.push_back(6); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
+	png_chunk(png, "IHDR", ihdr);
+	png_chunk(png, "IDAT", z);
+	png_chunk(png, "IEND", {});
+	return png;
+}
+
+static bool write_file(const std::string& path, const std::vector<uint8_t>& d)
+{
+	FILE* f = std::fopen(path.c_str(), "wb");
+	if (!f)
+		return false;
+	const bool ok = std::fwrite(d.data(), 1, d.size(), f) == d.size();
+	return std::fclose(f) == 0 && ok;
+}
+
+static bool read_file(const std::string& path, std::vector<uint8_t>& d)
+{
+	FILE* f = std::fopen(path.c_str(), "rb");
+	if (!f)
+		return false;
+	d.clear();
+	uint8_t buf[65536];
+	size_t n;
+	while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+		d.insert(d.end(), buf, buf + n);
+	std::fclose(f);
+	return true;
+}
+
+// Runs tex3ds -f <fmt> -z none -r on `rgba` (W x W, row 0 first); returns the texel bytes after the
+// 4-byte compression header (checked here). False: tex3ds failed or the header is wrong. fmt rgba8 (4 bytes
+// per texel) or, for M3's LUT, l8 (1 byte).
+static bool run_tex3ds(const std::string& dir, unsigned W, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& texels,
+                       const char* fmt = "rgba8", unsigned texel_bytes = 4, unsigned H = 0)
+{
+	if (!H)
+		H = W;
+	const std::string in = dir + "/in.png", out = dir + "/out.bin";
+	if (!write_file(in, make_png(W, rgba, H)))
+		return false;
+	const std::string cmd = std::string("'/opt/devkitpro/tools/bin/tex3ds' -f ") + fmt + " -z none -r -o '" + out + "' '" + in + "' > '" + dir + "/log.txt' 2>&1";
+	if (std::system(cmd.c_str()) != 0)
+		return false;
+	std::vector<uint8_t> raw;
+	if (!read_file(out, raw) || raw.size() != 4 + static_cast<size_t>(W) * H * texel_bytes)
+		return false;
+	const uint32_t size = raw[1] | (raw[2] << 8) | (raw[3] << 16);
+	if (raw[0] != 0x00 || size != W * H * texel_bytes)   // compression type 0 (none), 24-bit little-endian size
+		return false;
+	texels.assign(raw.begin() + 4, raw.end());
+	return true;
+}
+
+static void test_tiling_tex3ds()
+{
+	const char* tex3ds = "/opt/devkitpro/tools/bin/tex3ds";
+	if (access(tex3ds, X_OK) != 0)
+	{
+		std::printf("SKIPPED tex3ds tests: %s not found\n", tex3ds);
+		return;
+	}
+	const char* tmp = std::getenv("TMPDIR");
+	std::string tmpl = std::string(tmp && *tmp ? tmp : "/tmp") + "/c3d-tex3ds.XXXXXX";
+	std::vector<char> dirbuf(tmpl.begin(), tmpl.end());
+	dirbuf.push_back(0);
+	if (!mkdtemp(dirbuf.data()))
+	{
+		CHECK(false);
+		return;
+	}
+	const std::string dir = dirbuf.data();
+
+	// (1) the pure tiler: a unique RGBA value per texel (A != 0: tex3ds zeroes the RGB of A == 0 texels).
+	// The PNG's row r is our source row W-1-r; our tiled output must equal tex3ds's bytes exactly.
+	for (unsigned W : {8u, 16u, 128u})
+	{
+		std::vector<uint8_t> rgba(W * W * 4);
+		auto src = [&](unsigned j, unsigned s) -> uint32_t   // R<<24|G<<16|B<<8|A of source texel (s, j)
+		{
+			const unsigned n = j * W + s;
+			return ((n & 255u) << 24) | (((n >> 8) & 255u) << 16) | (((n * 37 + 11) & 255u) << 8) | (1 + n * 5 % 255);
+		};
+		for (unsigned r = 0; r < W; ++r)
+			for (unsigned x = 0; x < W; ++x)
+			{
+				const uint32_t w = src(W - 1 - r, x);
+				uint8_t* p = &rgba[(r * W + x) * 4];
+				p[0] = w >> 24; p[1] = w >> 16; p[2] = w >> 8; p[3] = w;
+			}
+		std::vector<uint8_t> t3x, ours(W * W * 4);
+		const bool ran = run_tex3ds(dir, W, rgba, t3x);
+		CHECK(ran);
+		for (unsigned j = 0; j < W; ++j)
+			for (unsigned s = 0; s < W; ++s)
+			{
+				const uint32_t w = src(j, s);
+				uint8_t* p = &ours[tile_index(W, tile_memory_row(W, j), s) * 4];
+				p[0] = w; p[1] = w >> 8; p[2] = w >> 16; p[3] = w >> 24;   // bytes A, B, G, R
+			}
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds tiling W=%u: %s\n", W, same ? "byte-identical" : "MISMATCH");
+		if (ran && W == 16)   // the reviewer's anchors: texel 0 = PNG (0,0), texel 2 = (0,1), texel 128 = (0,8)
+		{
+			auto pix = [&](unsigned x, unsigned y) { return std::vector<uint8_t>(&rgba[(y * W + x) * 4], &rgba[(y * W + x) * 4] + 4); };
+			auto texel = [&](unsigned n) { return std::vector<uint8_t>{t3x[n * 4 + 3], t3x[n * 4 + 2], t3x[n * 4 + 1], t3x[n * 4]}; };
+			CHECK(texel(0) == pix(0, 0) && texel(2) == pix(0, 1) && texel(1) == pix(1, 0) && texel(128) == pix(0, 8));
+			CHECK(tile_index(16, 0, 0) == 0 && tile_index(16, 1, 0) == 2 && tile_index(16, 8, 0) == 128);
+		}
+	}
+
+	// (2) the whole path: tex_convert's output for a bitmap (W = 128, 256) equals tex3ds's for the PNG of
+	// the colours it should produce (normal kind, no keying, so A != 0). Source row j = PNG row W-1-j.
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+	for (unsigned W : {128u, 256u})
+	{
+		const TestBitmap bmp(W);
+		std::vector<uint8_t> rgba(W * W * 4), ours(tex_bytes(W, TexKind::Normal)), t3x;
+		for (unsigned r = 0; r < W; ++r)
+			for (unsigned x = 0; x < W; ++x)
+			{
+				const uint32_t w = tex_palette_word(tables.data(), TexKind::Normal, bmp.rows[W - 1 - r][x]);
+				uint8_t* p = &rgba[(r * W + x) * 4];
+				p[0] = w >> 24; p[1] = w >> 16; p[2] = w >> 8; p[3] = w;
+			}
+		CHECK(tex_convert(bmp.view(), tables.data(), TexKind::Normal, ours.data()));
+		const bool ran = run_tex3ds(dir, W, rgba, t3x);
+		CHECK(ran);
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds conversion W=%u: %s\n", W, same ? "byte-identical" : "MISMATCH");
+	}
+	std::remove((dir + "/in.png").c_str());
+	std::remove((dir + "/out.bin").c_str());
+	std::remove((dir + "/log.txt").c_str());
+	rmdir(dir.c_str());
+}
+
+// --- the cache, with a fake allocator
+
+class FakeAlloc : public TexAllocator
+{
+public:
+	struct Rec { TexPool pool; uint32_t bytes; };
+	std::map<void*, Rec> live;
+	uintptr_t next = 0x1000;
+	int fail_next = 0;            // fail the next N allocations
+	uint32_t max_vram_block = 0;  // M5: refuse VRAM blocks over this many bytes (fragmentation); 0 = no limit
+	uint32_t vram_heap = 0;       // M5: the real VRAM heap's size in bytes (refuse past it); 0 = no limit
+	unsigned bad_release = 0, allocs = 0, releases = 0;
+	void* alloc(TexPool pool, unsigned S, unsigned T, TexKind kind, TexWrap, uint32_t bytes) override
+	{
+		if (bytes != tex_bytes(S, T, kind))
+			++bad_release;   // the size the caps count must be the texture's
+		if (fail_next > 0)
+		{
+			--fail_next;
+			return nullptr;
+		}
+		if (pool == TexPool::Vram && max_vram_block && bytes > max_vram_block)
+			return nullptr;
+		if (pool == TexPool::Vram && vram_heap && total(TexPool::Vram) + bytes > vram_heap)
+			return nullptr;
+		void* h = reinterpret_cast<void*>(next);
+		next += 0x100;
+		live[h] = Rec{pool, bytes};
+		++allocs;
+		return h;
+	}
+	void release(TexPool pool, void* handle) override
+	{
+		auto it = live.find(handle);
+		if (it == live.end() || it->second.pool != pool)
+		{
+			++bad_release;
+			return;
+		}
+		live.erase(it);
+		++releases;
+	}
+	uint32_t total(TexPool pool) const
+	{
+		uint32_t n = 0;
+		for (const auto& kv : live)
+			if (kv.second.pool == pool)
+				n += kv.second.bytes;
+		return n;
+	}
+};
+
+// A cache frame: on_retired (after "frame_begin"), begin_frame, then the promotion loop; returns the copies.
+static std::vector<TexPromotion> run_frame(TexCache& c, GxQueue& gx, uint32_t frame, bool cmdbuf_not_empty = false)
+{
+	c.on_retired();
+	c.begin_frame(frame);
+	gx.begin_frame();
+	std::vector<TexPromotion> out;
+	TexPromotion p;
+	while (c.next_promotion(gx, cmdbuf_not_empty, p))
+		out.push_back(p);
+	return out;
+}
+
+static int bm[4096];   // addresses to use as bitmap/table keys
+static TexKey K(int i, const void* tables = &bm[4095], TexKind k = TexKind::Normal) { return TexKey{&bm[i], tables, k}; }
+
+static TexCacheConfig cfg_of(unsigned linear_kib, unsigned vram_kib, unsigned promote_max)
+{
+	TexCacheConfig c;
+	c.linear_cap_kib = linear_kib;
+	c.vram_cap_kib = vram_kib;
+	c.promote_max = promote_max;
+	return c;
+}
+
+static void test_cache_keys_generations()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 3584, 8));
+	GxQueue gx;
+	run_frame(c, gx, 1);
+	const TexKey a = K(1), b = K(1, &bm[7]), d = K(1, &bm[4095], TexKind::NormalKeyed);
+	CHECK(c.lookup(a) == nullptr);
+	TexSlot* sa = c.create(a, 128);
+	TexSlot* sb = c.create(b, 128);   // another CLUT: its own entry
+	TexSlot* sd = c.create(d, 128);   // normal vs normal_keyed coexist
+	CHECK(sa && sb && sd && sa != sb && sa != sd && sb != sd);
+	CHECK(c.lookup(a) == sa && c.lookup(b) == sb && c.lookup(d) == sd && c.lookup(K(2)) == nullptr);
+	CHECK(sa->bytes == 65536 && sa->S == 128 && sa->T == 128 && sa->pool == TexPool::Linear && sa->handle);
+	CHECK(c.used_bytes(TexPool::Linear) == 3 * 65536 && fa.total(TexPool::Linear) == 3 * 65536);
+	CHECK(c.live_count(TexPool::Linear) == 3 && c.stats().conversions == 3);
+	TexSlot* sm = c.create(K(3, nullptr, TexKind::Mask), 128);
+	CHECK(sm && sm->bytes == 16384 && c.used_bytes(TexPool::Linear) == 3 * 65536 + 16384);
+
+	// collections_changed: lookups miss at once, nothing is freed until a retire
+	CHECK(c.bump_generation() == 4);
+	CHECK(c.generation() == 1 && c.stats().collections_changed == 1);
+	CHECK(c.lookup(a) == nullptr && c.lookup(b) == nullptr);
+	CHECK(fa.live.size() == 4 && fa.releases == 0 && c.retiring_count() == 4 && c.live_count(TexPool::Linear) == 0);
+	// a bitmap reallocated at the same address misses and gets a fresh entry (different slot, the old
+	// one still being held)
+	TexSlot* na = c.create(a, 128);
+	CHECK(na && na != sa && na != sb && na != sd && na->handle != sa->handle);
+	CHECK(c.lookup(a) == na);
+	CHECK(fa.live.size() == 5 && fa.releases == 0);
+	// frames_begin returned -> on_retired frees the old generation
+	CHECK(c.on_retired() == 4);
+	CHECK(fa.live.size() == 1 && fa.releases == 4 && c.retiring_count() == 0 && c.stats().deferred_frees == 4);
+	CHECK(c.used_bytes(TexPool::Linear) == 65536 && fa.bad_release == 0);
+	CHECK(c.lookup(a) == na);
+	// forget(): a fresh slot whose conversion failed goes at once (texture and slot), the others stay
+	TexSlot* nf = c.create(K(9), 128);
+	CHECK(nf && fa.live.size() == 2 && c.used_bytes(TexPool::Linear) == 2 * 65536);
+	c.forget(nf);
+	CHECK(fa.live.size() == 1 && c.used_bytes(TexPool::Linear) == 65536 && c.lookup(K(9)) == nullptr && c.lookup(a) == na);
+	c.forget(nullptr);
+	CHECK(fa.bad_release == 0);
+	// bumping twice before a retire is fine
+	c.bump_generation();
+	c.bump_generation();
+	CHECK(c.generation() == 3 && c.on_retired() == 1 && fa.live.empty());
+	// stable addresses: slot i is where it was
+	CHECK(&c.slot(0) == &c.slot(0) && (&c.slot(1) - &c.slot(0)) == 1);
+
+	// release_all frees everything in every state
+	c.begin_frame(2);
+	c.create(K(5), 128);
+	c.create(K(6), 128);
+	c.bump_generation();
+	c.create(K(7), 128);
+	c.release_all();
+	CHECK(fa.live.empty() && c.used_bytes(TexPool::Linear) == 0 && fa.bad_release == 0 && c.retiring_count() == 0);
+	CHECK(!c.stats_line().empty());
+}
+
+static void test_cache_lru()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(192, 0, 8));   // three 128x128 textures; no VRAM
+	GxQueue gx;
+	run_frame(c, gx, 1);
+	CHECK(c.create(K(1), 128) && c.create(K(2), 128) && c.create(K(3), 128));
+	CHECK(c.pending_count() == 0);   // the VRAM cap cannot hold one: never pending
+	// everything was used this frame: nothing evictable -> failure, the live ones stay
+	CHECK(c.create(K(4), 128) == nullptr);
+	CHECK(c.stats().discards_tex == 1 && c.stats().evictions == 0 && c.live_count(TexPool::Linear) == 3);
+	run_frame(c, gx, 2);
+	c.lookup(K(1));   // 1 is used in frame 2, so 2 is the LRU (then 3)
+	TexSlot* s4 = c.create(K(4), 128);
+	CHECK(s4 && c.stats().evictions == 1);
+	CHECK(c.lookup(K(2)) == nullptr);   // lookup() of the evicted one is also a miss (and does not touch)
+	CHECK(c.lookup(K(1)) && c.lookup(K(3)) && c.lookup(K(4)));
+	// a miss that follows: frame 2 slots 1, 3 (just looked up), 4 are all current -> failure
+	CHECK(c.create(K(5), 128) == nullptr && c.stats().discards_tex == 2);
+	run_frame(c, gx, 3);
+	TexSlot* s5 = c.create(K(5), 128);   // LRU: 1/3/4 all last used in frame 2; the oldest creation (1) goes
+	CHECK(s5 && c.lookup(K(1)) == nullptr && c.lookup(K(3)) && c.lookup(K(4)));
+	CHECK(fa.bad_release == 0 && c.used_bytes(TexPool::Linear) == 192 * 1024);
+
+	// a texture bigger than the pool can never be made; no slot is lost
+	TexSlot* big = c.create(K(6), 256);
+	CHECK(big == nullptr && c.live_count(TexPool::Linear) == 3);
+
+	// allocator failure with room in the cap is counted (fragmentation or the real heap)
+	FakeAlloc fb;
+	TexCache d(fb, cfg_of(4096, 0, 0));
+	run_frame(d, gx, 1);
+	fb.fail_next = 1;
+	CHECK(d.create(K(1), 128) == nullptr);
+	CHECK(d.stats().alloc_failed_free == 1 && d.stats().discards_tex == 1);
+	CHECK(d.create(K(1), 128) != nullptr && d.stats().alloc_failed_free == 1);
+
+	// a failure that persists with room under the cap evicts at most kEvictAfterAllocFail victims (minor 3 of the
+	// M2 commit review: fragmentation must not empty the pool)
+	FakeAlloc fe;
+	TexCache e(fe, cfg_of(4096, 0, 0));
+	run_frame(e, gx, 1);
+	for (int i = 0; i < 6; ++i)
+		CHECK(e.create(K(i), 128) != nullptr);
+	run_frame(e, gx, 2);
+	fe.fail_next = 100;
+	CHECK(e.create(K(50), 128) == nullptr);
+	CHECK(e.stats().evictions == kEvictAfterAllocFail && e.live_count(TexPool::Linear) == 6 - kEvictAfterAllocFail);
+	CHECK(fe.bad_release == 0);
+}
+
+static void test_cache_slot_array_full()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 0, 0));
+	GxQueue gx;
+	run_frame(c, gx, 1);
+	std::vector<TexSlot*> slots;
+	for (int i = 0; i < static_cast<int>(kTexSlots); ++i)
+		slots.push_back(c.create(K(i), 8));   // 256-byte textures
+	CHECK(std::count(slots.begin(), slots.end(), nullptr) == 0);
+	CHECK(c.create(K(1000), 8) == nullptr);          // full and all current: discard
+	run_frame(c, gx, 2);
+	TexSlot* n = c.create(K(1000), 8);                 // full, previous frame: evict the LRU (oldest)
+	CHECK(n && n == slots[0] && c.lookup(K(0)) == nullptr && c.lookup(K(1)) == slots[1]);
+	CHECK(c.stats().evictions == 1 && fa.bad_release == 0);
+}
+
+static void test_cache_promotion()
+{
+	// order, promote_max, the GX rule
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 2));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		TexSlot* s[5];
+		for (int i = 0; i < 5; ++i)
+			s[i] = c.create(K(i), 128);
+		CHECK(c.pending_count() == 5);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2);
+		CHECK(p.size() == 2 && p[0].slot == s[0] && p[1].slot == s[1]);   // oldest first, promote_max 2
+		CHECK(gx.used() == 2 && c.stats().promotions_done == 2 && c.stats().promotions_deferred == 0);
+		CHECK(p[0].src == s[0]->handle && p[0].dst == s[0]->vram_handle && p[0].bytes == 65536);
+		CHECK(c.pending_count() == 3 && s[0]->handle != s[0]->vram_handle);
+		// the linear texture is still sampled in the frame of the copy; it is on the deferred list
+		CHECK(s[0]->pool == TexPool::Linear && c.deferred_block_count() == 2);
+		CHECK(c.used_bytes(TexPool::Vram) == 2 * 65536 && c.used_bytes(TexPool::Linear) == 5 * 65536);
+		void* vh = s[0]->vram_handle;
+		p = run_frame(c, gx, 3);   // on_retired: frees the two linear sources, switches 0 and 1 to VRAM
+		CHECK(s[0]->handle == vh && s[0]->pool == TexPool::Vram && s[0]->vram_handle == nullptr);
+		CHECK(c.used_bytes(TexPool::Linear) == 3 * 65536 && fa.bad_release == 0);
+		CHECK(p.size() == 2 && p[0].slot == s[2] && p[1].slot == s[3]);
+		p = run_frame(c, gx, 4);
+		CHECK(p.size() == 1 && p[0].slot == s[4]);
+		p = run_frame(c, gx, 5);
+		CHECK(p.empty() && c.pending_count() == 0 && c.stats().promotions_done == 5);
+		CHECK(c.live_count(TexPool::Vram) == 5 && c.live_count(TexPool::Linear) == 0 && fa.total(TexPool::Linear) == 0);
+		CHECK(c.stats().deferred_frees == 5);
+	}
+	// gxq_budget 4: used + 1 + 3 <= 4 admits one per frame; the rest are deferred, not discarded
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 8));
+		GxQueue gx;
+		gx.set_budget(4);
+		run_frame(c, gx, 1);
+		for (int i = 0; i < 4; ++i)
+			c.create(K(i), 128);
+		for (uint32_t f = 2; f <= 5; ++f)
+		{
+			std::vector<TexPromotion> p = run_frame(c, gx, f);
+			CHECK(p.size() == 1 && gx.used() == 1);
+			// the frame's own entries still fit: clear + split + readback = 3 more
+			CHECK(gx.take(false) && gx.take_split() && gx.take(false) && gx.refused() == 0);
+		}
+		CHECK(c.stats().promotions_done == 4 && c.stats().promotions_deferred == 3 && c.pending_count() == 0);
+		run_frame(c, gx, 6);
+		CHECK(c.stats().promotions_deferred == 3);   // nothing waiting: not a deferral
+		// budget 3 never admits one (used 0 + 1 + 3 > 3)
+		FakeAlloc fb;
+		TexCache d(fb, cfg_of(4096, 3584, 8));
+		GxQueue g3;
+		g3.set_budget(3);
+		run_frame(d, g3, 1);
+		d.create(K(1), 128);
+		CHECK(run_frame(d, g3, 2).empty() && d.stats().promotions_deferred == 1 && d.pending_count() == 1);
+	}
+	// a non-empty command buffer costs 2 entries; the rule still uses 1, a failed take is a deferral
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 8));
+		GxQueue gx;
+		gx.set_budget(5);
+		run_frame(c, gx, 1);
+		c.create(K(1), 128);
+		c.create(K(2), 128);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2, true);   // rule: 0+1+3 <= 5; take costs 2; then 2+1+3 > 5
+		CHECK(p.size() == 1 && gx.used() == 2 && c.stats().promotions_deferred == 1 && fa.bad_release == 0);
+		GxQueue tight;
+		tight.set_budget(4);
+		FakeAlloc fb;
+		TexCache e(fb, cfg_of(4096, 3584, 8));
+		run_frame(e, tight, 1);
+		e.create(K(1), 128);
+		p = run_frame(e, tight, 2, true);   // rule counts the split: 0+2+3 > 4, deferred (the readback keeps its room)
+		CHECK(p.empty() && tight.used() == 0 && e.stats().promotions_deferred == 1);
+		p = run_frame(e, tight, 3);         // empty command buffer: 0+1+3 <= 4, one promotion
+		CHECK(p.size() == 1 && tight.used() == 1);
+	}
+	// promote_max 0: nothing ever pending, nothing promoted
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 0));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		c.create(K(1), 128);
+		CHECK(c.pending_count() == 0 && run_frame(c, gx, 2).empty() && c.stats().promotions_done == 0);
+		CHECK(c.stats().promotions_deferred == 0);
+	}
+}
+
+static void test_cache_eviction_rules()
+{
+	// never evict a slot whose copy was issued this frame; a merely waiting slot goes (and leaves the queue)
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(128, 1024, 1));   // two linear textures
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		TexSlot* a = c.create(K(1), 128);
+		TexSlot* b = c.create(K(2), 128);
+		CHECK(a && b && c.pending_count() == 2);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2);   // promote_max 1: A's copy is issued
+		CHECK(p.size() == 1 && p[0].slot == a);
+		// the linear cap is full (A's source is still held until the retire): B waits, is older than the
+		// current frame, and is evicted for C
+		TexSlot* cc = c.create(K(3), 128);
+		CHECK(cc && c.lookup(K(2)) == nullptr && c.pending_count() == 1);   // B dropped from the queue; C pending
+		CHECK(c.stats().evictions == 1 && a->vram_handle);
+		// D: A is protected (copy this frame), C was created this frame -> failure (discard tex), A intact
+		CHECK(c.create(K(4), 128) == nullptr && c.stats().discards_tex == 1);
+		CHECK(c.lookup(K(1)) == a && a->vram_handle && fa.bad_release == 0);
+		// next frame the source is freed, A is in VRAM; C (older than frame 3) can be promoted
+		p = run_frame(c, gx, 3);
+		CHECK(a->pool == TexPool::Vram && p.size() == 1 && p[0].slot == cc);
+	}
+	// VRAM full: the LRU VRAM slot is evicted for a promotion unless it was used as recently
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 64, 8));   // one 128x128 in VRAM
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		TexSlot* a = c.create(K(1), 128);
+		run_frame(c, gx, 2);
+		run_frame(c, gx, 3);   // A is in VRAM now (promoted in frame 2, retired at 3)
+		CHECK(a->pool == TexPool::Vram && c.used_bytes(TexPool::Vram) == 65536);
+		c.lookup(K(1));   // A used in frame 3
+		TexSlot* b = c.create(K(2), 128);   // B created in frame 3
+		CHECK(b && b->pool == TexPool::Linear);
+		std::vector<TexPromotion> p = run_frame(c, gx, 4);   // A (3) is not older than B (3): B stays linear
+		CHECK(p.empty() && c.pending_count() == 1 && c.lookup(K(1)) == a && c.stats().evictions == 0);
+		run_frame(c, gx, 5);
+		c.lookup(K(2));   // B used in frame 5 (A last used in 4)
+		p = run_frame(c, gx, 6);   // B (5) is newer than A (4): A is evicted from VRAM, B promoted
+		CHECK(p.size() == 1 && p[0].slot == b && c.stats().evictions == 1 && c.lookup(K(1)) == nullptr);
+		CHECK(c.used_bytes(TexPool::Vram) == 65536 && fa.bad_release == 0);
+	}
+	// bump while a copy is in flight: no double free, everything released after one retire
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 3584, 8));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		c.create(K(1), 128);
+		c.create(K(2), 128);
+		std::vector<TexPromotion> p = run_frame(c, gx, 2);
+		CHECK(p.size() == 2);
+		c.bump_generation();
+		CHECK(c.pending_count() == 0 && c.retiring_count() == 2);
+		c.on_retired();
+		CHECK(fa.live.empty() && fa.bad_release == 0 && c.used_bytes(TexPool::Linear) == 0 && c.used_bytes(TexPool::Vram) == 0);
+	}
+	// an unreachable promotion (oversized for the VRAM cap) never queues
+	{
+		FakeAlloc fa;
+		TexCache c(fa, cfg_of(4096, 128, 8));
+		GxQueue gx;
+		run_frame(c, gx, 1);
+		c.create(K(1), 256);   // 256 KiB > 128 KiB VRAM cap
+		CHECK(c.pending_count() == 0);
+	}
+}
+
+// The linear cap filled without any promotion getting through: LRU eviction, never a failure.
+static void fill_linear(unsigned promote_max, int gx_budget)
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(256, 3584, promote_max));   // four 128x128 in linear
+	GxQueue gx;
+	gx.set_budget(gx_budget);
+	unsigned made = 0;
+	for (uint32_t f = 1; f <= 40; ++f)
+	{
+		run_frame(c, gx, f);
+		for (int k = 0; k < 2; ++k)
+			made += c.create(K(static_cast<int>(f * 2 + k)), 128) != nullptr;
+		CHECK(c.used_bytes(TexPool::Linear) <= 256 * 1024);
+	}
+	CHECK(made == 80);
+	CHECK(c.stats().discards_tex == 0 && c.stats().evictions > 0 && fa.bad_release == 0);
+	CHECK(c.stats().alloc_failed_free == 0);
+	if (promote_max == 0)
+		CHECK(c.stats().promotions_done == 0 && c.pending_count() == 0);
+	else
+		CHECK(c.stats().promotions_done > 0 && c.stats().promotions_deferred > 0);
+}
+
+static void test_cache_linear_full()
+{
+	fill_linear(0, 24);   // promote_max 0
+	fill_linear(8, 4);    // gxq_budget 4: one promotion a frame, the waiting ones are evicted
+}
+
+static void test_cache_stats()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(8192, 3584, 8));
+	GxQueue gx;
+	c.bump_generation();   // a generation change opens the first-10-frames window
+	run_frame(c, gx, 1);
+	for (int i = 0; i < 10; ++i)
+		c.create(K(i), 128);   // 640 KiB in frame 1: over the soft budget (512 KiB)
+	run_frame(c, gx, 2);
+	c.create(K(20), 256);
+	const TexStats& s = c.stats();
+	CHECK(s.conversions == 11 && s.bytes_converted == 10 * 65536 + 262144);
+	CHECK(s.frame_bytes_max == 10 * 65536 && s.over_budget_frames == 1);
+	CHECK(s.gen_window_bytes[0] == 10 * 65536 && s.gen_window_bytes[1] == 262144 && s.gen_window_bytes[2] == 0);
+	const std::string line = c.stats_line();
+	CHECK(line.find("[c3d] tex:") == 0 && line.find("gen 1") != std::string::npos && line.find("discards 0") != std::string::npos);
+	CHECK(line.find('\n') == std::string::npos);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// M2 part 4: the texcoords against the transliterated SW mappers (design 7, M2 specification "Host tests").
+// For every pixel SW covers, the texel (column, row) the integer mappers read, against the texel the GPU would
+// sample at the pixel centre: perspective-correct interpolation (double) of the vertex attributes
+// wall_attrs / floor_attrs give over the fan triangle that contains the centre, floor(u * W) mod W.
+
+namespace sw
+{
+using std::int32_t;
+using std::uint32_t;
+
+static int32_t mul32(int32_t a, int32_t b) { return static_cast<int32_t>(static_cast<uint32_t>(a) * static_cast<uint32_t>(b)); }
+static int32_t add32(int32_t a, int32_t b) { return static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b)); }
+
+// scottish_textures.cpp:891-1001 (_pretexture_vertical_polygon_lines) for the column sx whose first written
+// row is y0; texel (column, row) of pixel row m is (col, (texture_y + (m - y0) * dy) >> (32 - bits)).
+struct WallColumn
+{
+	unsigned col;
+	uint32_t texture_y, texture_dy;
+};
+
+static WallColumn wall_column(int bits, const TexView& v, const WallSurf& o, int sx, int y0)
+{
+	const int32_t screen_x = sx - v.hw;
+	const int32_t dz0 = mul32(v.wy, o.oz);
+	const int32_t unadjusted_ty_denominator = mul32(v.wy, o.vk);
+	int32_t an = add32(mul32(v.wx, o.oy), -mul32(screen_x, o.ox));
+	int32_t ad = add32(mul32(screen_x, o.vi), -mul32(v.wx, o.vj));
+	while (an > ((1 << (31 - bits)) - 1) || an < -(1 << (31 - bits)))
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	WallColumn r;
+	r.col = static_cast<unsigned>((an * (1 << bits)) / ad) & ((1u << bits) - 1);
+	while (an > INT16_MAX || an < INT16_MIN)
+		an >>= 1, ad >>= 1;
+	if (!ad)
+		ad = 1;
+	const int32_t tx = (an * 65536) / ad;
+	int32_t world_x = o.ox + (static_cast<int32_t>(static_cast<int64_t>(tx) * o.vi) >> 16);
+	if (world_x < 0)
+		world_x = -world_x;
+	const int16_t screen_y0 = static_cast<int16_t>(v.hh - y0 + v.dtp);
+	int32_t ty_numerator = add32(mul32(world_x, screen_y0), -dz0);
+	int32_t ty_denominator = unadjusted_ty_denominator;
+	while (ty_numerator > INT16_MAX || ty_numerator < INT16_MIN)
+		ty_numerator >>= 1, ty_denominator >>= 1;
+	if (!ty_denominator)
+		ty_denominator = 1;
+	const int32_t ty = (ty_numerator * 65536) / ty_denominator;
+	int32_t adjusted_world_x = world_x;
+	int32_t adjusted_ty_denominator = unadjusted_ty_denominator >> 8;
+	while (adjusted_world_x > INT16_MAX)
+		adjusted_world_x >>= 1, adjusted_ty_denominator >>= 1;
+	if (!adjusted_ty_denominator)
+		adjusted_ty_denominator = 1;
+	const int32_t ty_delta = -((adjusted_world_x * 65536) / adjusted_ty_denominator);
+	r.texture_y = static_cast<uint32_t>(ty) << 16;
+	r.texture_dy = static_cast<uint32_t>(ty_delta) << 8;
+	return r;
+}
+
+// scottish_textures.cpp:1003-1097 (_pretexture_horizontal_polygon_lines) for the row y0 whose first written
+// pixel is x0. Pixel k of the row: column = (sx + (k - x0) * dx) >> (32 - bits), row = the top `bits` bits of
+// (sy + (k - x0) * dy) (low_level_textures.h:222).
+struct FloorRow
+{
+	uint32_t sx, sy, dx, dy;
+};
+
+static FloorRow floor_row(const TexView& v, const FloorSurf& o, int x0, int y0)
+{
+	const bool higher_precision = o.oz > -1024 && o.oz < 1024;
+	int32_t hcosine = v.cos_t, hsine = v.sin_t;
+	if (higher_precision)
+		hcosine = mul32(hcosine, o.oz), hsine = mul32(hsine, o.oz);
+	const int32_t dhcosine = mul32(v.wy, hcosine), dhsine = mul32(v.wy, hsine);
+	const int16_t screen_x = static_cast<int16_t>(x0 - v.hw);
+	int16_t screen_y = static_cast<int16_t>(v.hh - y0 + v.dtp);
+	if (!screen_y)
+		screen_y = 1;
+	int32_t source_x, source_y, source_dx, source_dy;
+	const int32_t ox10 = static_cast<int32_t>(static_cast<uint32_t>(o.ox) << 10);
+	const int32_t oy10 = static_cast<int32_t>(static_cast<uint32_t>(o.oy) << 10);
+	if (higher_precision)
+	{
+		source_x = add32((add32(dhcosine, -mul32(screen_x, hsine))) / screen_y, ox10);
+		source_dx = -hsine / screen_y;
+		source_y = add32((add32(mul32(screen_x, hcosine), dhsine)) / screen_y, oy10);
+		source_dy = hcosine / screen_y;
+	}
+	else
+	{
+		source_x = add32(mul32((add32(dhcosine, -mul32(screen_x, hsine))) / screen_y, o.oz), ox10);
+		source_dx = -mul32(hsine, o.oz) / screen_y;
+		source_y = add32(mul32((add32(mul32(screen_x, hcosine), dhsine)) / screen_y, o.oz), oy10);
+		source_dy = mul32(hcosine, o.oz) / screen_y;
+	}
+	const int bits = 12 - o.scale;   // HORIZONTAL_FREE_BITS - (flags & _SCALE_BITS)
+	FloorRow r;
+	r.sx = static_cast<uint32_t>(source_x) << bits;
+	r.dx = static_cast<uint32_t>(source_dx) << bits;
+	r.sy = static_cast<uint32_t>(source_y) << bits;
+	r.dy = static_cast<uint32_t>(source_dy) << bits;
+	return r;
+}
+} // namespace sw
+
+// The texel the GPU samples at the pixel centre (cx, cy): false when the centre is outside every fan triangle.
+static bool gpu_sample(const Point2* pts, const TexAttr* at, int n, double cx, double cy, double& s, double& t)
+{
+	for (int i = 1; i + 1 < n; ++i)
+	{
+		const Point2 &a = pts[0], &b = pts[i], &c = pts[i + 1];
+		const double det = static_cast<double>(b.x - a.x) * (c.y - a.y) - static_cast<double>(c.x - a.x) * (b.y - a.y);
+		if (det == 0)
+			continue;
+		const double l1 = ((cx - a.x) * (c.y - a.y) - (c.x - a.x) * (cy - a.y)) / det;
+		const double l2 = ((b.x - a.x) * (cy - a.y) - (cx - a.x) * (b.y - a.y)) / det;
+		const double l0 = 1.0 - l1 - l2;
+		if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9)
+			continue;
+		const double iw0 = l0 / at[0].w, iw1 = l1 / at[i].w, iw2 = l2 / at[i + 1].w;
+		const double iw = iw0 + iw1 + iw2;
+		s = (iw0 * at[0].s + iw1 * at[i].s + iw2 * at[i + 1].s) / iw;
+		t = (iw0 * at[0].t + iw1 * at[i].t + iw2 * at[i + 1].t) / iw;
+		return true;
+	}
+	return false;
+}
+
+static unsigned texel_of(double u, unsigned W)
+{
+	const long long k = static_cast<long long>(std::floor(u * W));
+	return static_cast<unsigned>(((k % static_cast<long long>(W)) + W) % W);
+}
+
+struct TexAgree
+{
+	unsigned long total = 0, exact = 0, within1 = 0;   // within1: both coordinates within one texel (wrapping)
+	double pct() const { return total ? 100.0 * exact / total : 100.0; }
+	double pct1() const { return total ? 100.0 * within1 / total : 100.0; }
+	void add(unsigned sc, unsigned sr, unsigned gc, unsigned gr, unsigned W)
+	{
+		++total;
+		if (sc == gc && sr == gr)
+			++exact;
+		auto near1 = [W](unsigned a, unsigned b) { const unsigned d = (a + W - b) % W; return d <= 1 || d == W - 1; };
+		if (near1(sc, gc) && near1(sr, gr))
+			++within1;
+	}
+};
+
+static void test_texcoords_vs_sw()
+{
+	std::mt19937_64 rng(0xC3D004u);
+	auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+	const int VW = 400, VH = 240;
+	const double deltas[2] = {0.0, -0.5};
+	TexAgree wall[2], floor_[2], floor_h_[2];
+	TexAgree wall_b[3][2], floor_b[3][2];
+	TexAgree floor_minif[3];   // floors at delta -0.5 by texels per pixel: < 1, 1-2, >= 2 (informative)
+	TexAgree sw_vs_exact_w, sw_vs_exact_f, gpu_vs_exact_w, gpu_vs_exact_f;   // the exact map at the pixel's corner (informative)   // by TEXBITS 7, 8, 9 (informative)
+	unsigned long walls_made = 0, walls_used = 0, floors_made = 0, floors_used = 0, floors_h_used = 0, nonfinite = 0, degenerate = 0;
+	std::vector<uint8_t> cov(static_cast<size_t>(VW) * VH);
+
+	auto make_view = [&]() {
+		TexView v;
+		v.hw = VW / 2, v.hh = VH / 2;
+		v.wx = uni(160, 320);
+		v.wy = std::max(100, static_cast<int>(v.wx * std::uniform_real_distribution<double>(0.8, 1.2)(rng)));
+		v.dtp = uni(-60, 60);
+		const int yaw = uni(0, 511);
+		v.cos_t = static_cast<int>(std::lround(1024.0 * std::cos(2.0 * M_PI * yaw / 512.0)));
+		v.sin_t = static_cast<int>(std::lround(1024.0 * std::sin(2.0 * M_PI * yaw / 512.0)));
+		return v;
+	};
+
+	for (int it = 0; it < 6000; ++it)
+	{
+		const TexView v = make_view();
+		const int bits = uni(7, 9);
+		const unsigned W = 1u << bits;
+
+		// ---- a wall, as RenderRasterize.cpp:525-548 makes it ----
+		{
+			++walls_made;
+			const int sx0 = uni(4, VW - 4), sx1 = uni(4, VW - 4);
+			if (std::abs(sx0 - sx1) < 6)
+				goto floors;
+			const int d0 = uni(150, 6000), d1 = uni(150, 6000);
+			const int p0i = d0, p0j = (sx0 - v.hw) * d0 / v.wx, p1i = d1, p1j = (sx1 - v.hw) * d1 / v.wx;
+			const int h0 = -uni(100, 1200), h1 = h0 + uni(256, 2048);   // bottom, top (relative to the eye)
+			const int scale = 1024 << uni(0, 2);
+			const int dx = p1i - p0i, dy = p1j - p0j;
+			int divisor = static_cast<int>(std::lround(std::sqrt(static_cast<double>(dx) * dx + static_cast<double>(dy) * dy)));
+			if (divisor == 0)
+				divisor = 1;
+			const int x0off = uni(0, scale - 1) & (scale - 1), y0off = uni(0, scale - 1) & (scale - 1);
+			WallSurf o;
+			o.vi = (scale * dx) / divisor;
+			o.vj = (scale * dy) / divisor;
+			o.vk = -scale;
+			o.ox = p0i - (x0off * dx) / divisor;
+			o.oy = p0j - (x0off * dy) / divisor;
+			o.oz = h1 + y0off;
+			auto project_y = [&](int depth, int z) {
+				const double Y = v.hh + v.dtp - static_cast<double>(v.wy) * z / depth;
+				return std::min(VH, std::max(0, static_cast<int>(std::lround(Y))));
+			};
+			const bool p0_left = sx0 < sx1;
+			const int xl = p0_left ? sx0 : sx1, xr = p0_left ? sx1 : sx0;
+			const int dl = p0_left ? d0 : d1, dr = p0_left ? d1 : d0;
+			std::vector<Point2> poly = {{xl, project_y(dl, h1)}, {xr, project_y(dr, h1)}, {xr, project_y(dr, h0)}, {xl, project_y(dl, h0)}};
+			if (accept_polygon(poly.data(), 4, VW, VH) != Accept::Draw || !is_convex(poly, true))
+				goto floors;
+			TexAttr at[2][4];
+			if (wall_attrs(v, o, poly.data(), 4, deltas[0], at[0]) != TexResult::Ok ||
+			    wall_attrs(v, o, poly.data(), 4, deltas[1], at[1]) != TexResult::Ok)
+			{
+				++nonfinite;
+				goto floors;
+			}
+			std::fill(cov.begin(), cov.end(), 0);
+			unsigned outside = 0;
+			if (sw::polygon_coverage(poly, VW, VH, cov, outside) != sw::Drawn)
+				goto floors;
+			++walls_used;
+			for (int k = 0; k < VW; ++k)
+			{
+				int y0 = -1;
+				sw::WallColumn col{};
+				for (int m = 0; m < VH; ++m)
+				{
+					if (!cov[static_cast<size_t>(m) * VW + k])
+						continue;
+					if (y0 < 0)
+					{
+						y0 = m;
+						col = sw::wall_column(bits, v, o, k, y0);
+					}
+					const unsigned sw_row = (col.texture_y + static_cast<uint32_t>(m - y0) * col.texture_dy) >> (32 - bits);
+					for (int di = 0; di < 2; ++di)
+					{
+						double gs, gt;
+						if (!gpu_sample(poly.data(), at[di], 4, k + 0.5, m + 0.5, gs, gt))
+							continue;
+						// walls: s = row in the column, t = column
+						wall[di].add(col.col, sw_row, texel_of(gt, W), texel_of(gs, W), W);
+						wall_b[bits - 7][di].add(col.col, sw_row, texel_of(gt, W), texel_of(gs, W), W);
+						if (di == 1)
+						{
+							const TexAttrD e = wall_vertex(v, o, k, m);
+							sw_vs_exact_w.add(col.col, sw_row, texel_of(e.t, W), texel_of(e.s, W), W);
+							gpu_vs_exact_w.add(texel_of(gt, W), texel_of(gs, W), texel_of(e.t, W), texel_of(e.s, W), W);
+						}
+					}
+				}
+			}
+		}
+	floors:
+		// ---- a floor or ceiling, as RenderRasterize.cpp:450-452 makes it ----
+		{
+			++floors_made;
+			FloorSurf o;
+			const int mag = uni(64, 2048);
+			o.oz = (it & 1) ? mag : -mag;
+			o.ox = uni(0, 32767);
+			o.oy = uni(0, 32767);
+			o.scale = uni(0, 2);
+			const int yh = v.hh + v.dtp;   // the horizon row (screen_y == 0)
+			// Ground distance is |oz| * wy / |sy'|; maps are some 32 WORLD_ONE across: keep rows no farther than
+			// that, except in the "horizon" variant (every 20th: rows on the horizon row itself).
+			const bool near_horizon = (it % 20) == 3;
+			const int off_min = near_horizon ? 0 : std::max(1, (std::abs(o.oz) * v.wy + 32767) / 32768);
+			std::vector<Point2> poly = random_polygon(rng, VW, VH);
+			// Map y in [0, VH] onto the rows between the horizon (offset off_min) and the view's edge.
+			const int lo = o.oz < 0 ? yh + off_min : 0, hi = o.oz < 0 ? VH : yh - off_min;
+			if (hi - lo < 4)
+				continue;
+			for (Point2& p : poly)
+				p.y = lo + (p.y * (hi - lo) + VH / 2) / VH;
+			if (accept_polygon(poly.data(), static_cast<int>(poly.size()), VW, VH, Orient::Horizontal) != Accept::Draw ||
+			    !is_convex(poly, true))
+				continue;
+			const int n = static_cast<int>(poly.size());
+			TexAttr at[2][16];
+			bool bad = false;
+			for (int di = 0; di < 2; ++di)
+			{
+				const TexResult tr = floor_attrs(v, o, poly.data(), n, deltas[di], at[di]);
+				if (tr == TexResult::Degenerate)
+					++degenerate, bad = true;
+				else if (tr != TexResult::Ok)
+					++nonfinite, bad = true;
+			}
+			if (bad)
+				continue;
+			std::fill(cov.begin(), cov.end(), 0);
+			unsigned outside = 0;
+			if (sw::polygon_coverage_h(poly, VW, VH, cov, outside) != sw::Drawn)
+				continue;
+			(near_horizon ? floors_h_used : floors_used) += 1;
+			for (int m = 0; m < VH; ++m)
+			{
+				int x0 = -1;
+				sw::FloorRow row{};
+				for (int k = 0; k < VW; ++k)
+				{
+					if (!cov[static_cast<size_t>(m) * VW + k])
+						continue;
+					if (x0 < 0)
+					{
+						x0 = k;
+						row = sw::floor_row(v, o, x0, m);
+					}
+					const uint32_t ux = row.sx + static_cast<uint32_t>(k - x0) * row.dx;
+					const uint32_t uy = row.sy + static_cast<uint32_t>(k - x0) * row.dy;
+					const unsigned sw_col = ux >> (32 - bits), sw_row = uy >> (32 - bits);
+					for (int di = 0; di < 2; ++di)
+					{
+						double gs, gt;
+						if (!gpu_sample(poly.data(), at[di], n, k + 0.5, m + 0.5, gs, gt))
+							continue;
+						// floors: s = column, t = row
+						(near_horizon ? floor_h_ : floor_)[di].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
+						if (!near_horizon)
+							floor_b[bits - 7][di].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
+						if (di == 1 && !near_horizon)
+						{
+							// By minification (texels per pixel step along the row, the larger coordinate): where
+							// neighbouring pixels sample texels >= 2 apart, a one-texel miss of SW's mapper shows in
+							// no neighbour (the load test's level-1 ceiling, M2 acceptance; informative).
+							const double step = std::max(std::fabs(static_cast<double>(static_cast<int32_t>(row.dx))),
+							                             std::fabs(static_cast<double>(static_cast<int32_t>(row.dy)))) /
+							                    std::ldexp(1.0, 32 - bits);
+							floor_minif[step < 1.0 ? 0 : step < 2.0 ? 1 : 2].add(sw_col, sw_row, texel_of(gs, W), texel_of(gt, W), W);
+							TexAttrD e;
+							floor_vertex(v, o, k, m, e);
+							sw_vs_exact_f.add(sw_col, sw_row, texel_of(e.s, W), texel_of(e.t, W), W);
+							gpu_vs_exact_f.add(texel_of(gs, W), texel_of(gt, W), texel_of(e.s, W), texel_of(e.t, W), W);
+						}
+					}
+				}
+			}
+		}
+	}
+	std::printf("texcoords vs SW, floors at delta -0.5 by texels per pixel: < 1 %.3f%% exact (%.3f%% within 1) of %lu px; "
+	            "1-2 %.3f%% (%.3f%%) of %lu; >= 2 %.3f%% (%.3f%%) of %lu (informative)\n",
+	            floor_minif[0].pct(), floor_minif[0].pct1(), floor_minif[0].total, floor_minif[1].pct(), floor_minif[1].pct1(),
+	            floor_minif[1].total, floor_minif[2].pct(), floor_minif[2].pct1(), floor_minif[2].total);
+	std::printf("texcoords vs SW: %lu walls generated, %lu compared; %lu floors generated, %lu compared (+ %lu on the horizon row), "
+	            "%lu non-finite, %lu degenerate\n", walls_made, walls_used, floors_made, floors_used, floors_h_used, nonfinite, degenerate);
+	for (int di = 0; di < 2; ++di)
+	{
+		std::printf("texcoords vs SW, delta %5.1f: walls %.3f%% exact (%.3f%% within 1 texel) of %lu px; floors %.3f%% exact (%.3f%% within 1) of %lu px;"
+		            " horizon-row floors %.3f%% of %lu px (informative)\n",
+		            deltas[di], wall[di].pct(), wall[di].pct1(), wall[di].total, floor_[di].pct(), floor_[di].pct1(),
+		            floor_[di].total, floor_h_[di].pct(), floor_h_[di].total);
+	}
+	for (int b = 0; b < 3; ++b)
+		std::printf("texcoords vs SW, W=%u, delta -0.5: walls %.3f%% (delta 0: %.3f%%), floors %.3f%% (delta 0: %.3f%%)\n", 128u << b,
+		            wall_b[b][1].pct(), wall_b[b][0].pct(), floor_b[b][1].pct(), floor_b[b][0].pct());
+	std::printf("texcoords vs SW (informative): against the exact map at each pixel's corner, SW's integers agree %.3f%% (walls) / %.3f%% (floors);"
+	            " the GPU at delta -0.5 agrees %.3f%% / %.3f%%\n", sw_vs_exact_w.pct(), sw_vs_exact_f.pct(), gpu_vs_exact_w.pct(), gpu_vs_exact_f.pct());
+	const double best_wall = std::max(wall[0].pct(), wall[1].pct()), best_floor = std::max(floor_[0].pct(), floor_[1].pct());
+	const int bw = wall[1].pct() >= wall[0].pct() ? 1 : 0, bf = floor_[1].pct() >= floor_[0].pct() ? 1 : 0;
+	const double wall1 = wall[bw].pct1(), floor1 = floor_[bf].pct1();
+	std::printf("texcoords vs SW: best delta for walls %s (%.3f%% exact, %.3f%% within 1 texel), for floors %s (%.3f%% exact, %.3f%% within 1 texel);"
+	            " gate: within 1 texel >= 99.5%% (revised gate, Review log \"M2 implementation, colour gate\")\n",
+	            bw ? "-0.5" : "0", best_wall, wall1, bf ? "-0.5" : "0", best_floor, floor1);
+	CHECK(walls_used > 1000 && floors_used > 1000 && wall[1].total > 100000 && floor_[1].total > 100000);
+	CHECK(wall1 >= 99.5);
+	CHECK(floor1 >= 99.5);
+}
+
+
+static void test_config_m2_front()
+{
+	Config d;
+	CHECK(d.textures && d.uv_half && d.diff_tol == 2);
+	Config c;
+	CHECK(config_apply(c, "textures", "1") && c.textures && config_apply(c, "textures", "0") && !c.textures);
+	CHECK(!config_apply(c, "textures", "2") && !config_apply(c, "textures", "yes") && !config_apply(c, "textures", "") && !c.textures);
+	CHECK(config_apply(c, "uv_half", "0") && !c.uv_half && config_apply(c, "uv_half", "1") && c.uv_half);
+	CHECK(!config_apply(c, "uv_half", "-1") && !config_apply(c, "uv_half", "half") && c.uv_half);
+	CHECK(config_apply(c, "diff_tol", "0") && c.diff_tol == 0 && config_apply(c, "diff_tol", "255") && c.diff_tol == 255);
+	CHECK(!config_apply(c, "diff_tol", "256") && !config_apply(c, "diff_tol", "-1") && !config_apply(c, "diff_tol", "") && c.diff_tol == 255);
+	Config p;
+	std::vector<std::string> problems;
+	config_parse(p, "textures 1\nuv_half 0 # shift off\ndiff_tol 4\ndiff_tol 300\ntextures maybe\n", problems);
+	CHECK(problems.size() == 2 && p.textures && !p.uv_half && p.diff_tol == 4);
+}
+
+static void test_texcoord_basics()
+{
+	TexView v{200, 120, 256, 256, 0, 1024, 0};   // yaw 0: cos 1.0, sin 0
+	// clamp_wp: [16, 2^24], not wall_w's [16, 32767].
+	CHECK(clamp_wp(0.0f) == 16.0f && clamp_wp(40000.0f) == 40000.0f && clamp_wp(1e9f) == 16777216.0f && clamp_wp(16.0f) == 16.0f);
+	// A wall in the plane x = 1000 (v = (1024, 0, -1024), o = (1000, 0, 0)): w = 1000 at every column, in the
+	// shifted evaluation too; wall_vertex's w at delta 0 is wall_w.
+	const WallSurf wl{1000, 0, 0, 0, 1024, -1024};
+	for (int sx = 0; sx <= 400; sx += 40)
+	{
+		CHECK(wall_vertex(v, wl, sx, 100).w == 1000.0);
+		CHECK(wall_vertex(v, wl, sx - 0.5, 100 - 0.5).w == 1000.0);
+	}
+	{
+		std::mt19937_64 rng(0xC3D005u);
+		int bad = 0;
+		for (int i = 0; i < 20000; ++i)
+		{
+			auto uni = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+			TexView tv{200, 120, uni(160, 320), uni(160, 320), uni(-60, 60), 1024, 0};
+			const WallSurf o{uni(-20000, 20000), uni(-20000, 20000), uni(-2000, 2000), uni(-4000, 4000), uni(-4000, 4000), -1024};
+			const int sx = uni(0, 400);
+			const double w = wall_vertex(tv, o, sx, 50).w;
+			const double ref = wall_w(200, tv.wx, o.ox, o.oy, o.vi, o.vj, sx);
+			if (std::fabs(w - ref) > 1e-3 * ref + 0.05)
+				++bad;
+		}
+		CHECK(bad == 0);
+	}
+	// A floor at o.z == 0 is a degenerate skip, never unsupported / finite garbage.
+	const Point2 tri[3] = {{10, 200}, {300, 200}, {10, 230}};
+	TexAttr at[3];
+	CHECK(floor_attrs(v, FloorSurf{5, 6, 0, 0}, tri, 3, -0.5, at) == TexResult::Degenerate);
+	TexAttrD d;
+	CHECK(!floor_vertex(v, FloorSurf{5, 6, 0, 0}, 10, 10, d));
+	// Per-polygon floor(min): every texcoord is >= 0 and < its spread + 1, w within [16, 2^24].
+	const FloorSurf fs{40000, 33000, -512, 0};
+	CHECK(floor_attrs(v, fs, tri, 3, -0.5, at) == TexResult::Ok);
+	double mins = 1e30, mint = 1e30;
+	for (int i = 0; i < 3; ++i)
+	{
+		CHECK(at[i].w >= 16.0f && at[i].w <= 16777216.0f);
+		mins = std::min<double>(mins, at[i].s);
+		mint = std::min<double>(mint, at[i].t);
+	}
+	CHECK(mins >= 0.0 && mins < 1.0 && mint >= 0.0 && mint < 1.0);
+	// ... and it is an integer shift: the fractional parts equal the raw ones.
+	{
+		TexAttrD raw[3];
+		for (int i = 0; i < 3; ++i)
+			CHECK(floor_vertex(v, fs, tri[i].x - 0.5, tri[i].y - 0.5, raw[i]));
+		for (int i = 0; i < 3; ++i)
+		{
+			const double fs_ = std::floor(std::min({raw[0].s, raw[1].s, raw[2].s}));
+			CHECK(std::fabs((raw[i].s - fs_) - at[i].s) < 1e-3);
+		}
+	}
+	// The sign guard: a floor below the eye (o.z < 0) with a vertex on the horizon row (sy' = 0, or +1/2 after
+	// the shift): its u/w keeps the polygon's sign, so w stays positive and finite and u/w has the sign of the others.
+	{
+		const int yh = v.hh + v.dtp;
+		const FloorSurf below{1000, 2000, -300, 1}, above{1000, 2000, 300, 1};
+		TexAttrD on_h, next, other;
+		CHECK(floor_vertex(v, below, 100, yh, on_h) && floor_vertex(v, below, 100, yh + 1, next));
+		CHECK(floor_vertex(v, below, 100, yh + 0.5, other));   // ey = yh + 1/2: sy' = -1/2 exactly
+		CHECK(std::isfinite(on_h.s) && std::isfinite(on_h.w) && on_h.w > 0 && on_h.w == other.w && on_h.s == other.s);
+		TexAttrD up;
+		CHECK(floor_vertex(v, above, 100, yh - 0.5, up));      // sy' = +1/2 exactly for a ceiling
+		TexAttrD on_h2;
+		CHECK(floor_vertex(v, above, 100, yh + 0.5, on_h2));   // past the horizon: the guard puts sy' at +1/2
+		CHECK(on_h2.w == up.w && on_h2.s == up.s && on_h2.t == up.t);
+		// the w of a vertex at the guard is the largest the polygon sees: |o.z| * wy / (1/2)
+		CHECK(std::fabs(on_h.w - 2.0 * 300 * 256) < 1e-9);
+	}
+	// Scale: 2x and 4x halve and quarter the texcoords' rate (same polygon, same raw u up to the origin term).
+	{
+		TexAttrD a0, a1, a2;
+		const FloorSurf f0{0, 0, -512, 0}, f1{0, 0, -512, 1}, f2{0, 0, -512, 2};
+		CHECK(floor_vertex(v, f0, 123, 200, a0) && floor_vertex(v, f1, 123, 200, a1) && floor_vertex(v, f2, 123, 200, a2));
+		CHECK(std::fabs(a0.s - 2 * a1.s) < 1e-12 && std::fabs(a0.t - 4 * a2.t) < 1e-12 && a0.w == a1.w && a0.w == a2.w);
+	}
+	// Non-finite input is reported, not drawn: a wall with a zero denominator row stays finite (SW's guard).
+	const Point2 q[4] = {{10, 10}, {20, 10}, {20, 20}, {10, 20}};
+	TexAttr aq[4];
+	CHECK(wall_attrs(v, WallSurf{1000, 0, 0, 0, 0, -1024}, q, 4, -0.5, aq) == TexResult::Ok);
+}
+
+static void test_m2_core()
+{
+	test_config_m2();
+	test_tex_supported();
+	test_tex_convert();
+	test_morton_and_tile_index();
+	test_tiling_tex3ds();
+	test_cache_keys_generations();
+	test_cache_lru();
+	test_cache_slot_array_full();
+	test_cache_promotion();
+	test_cache_eviction_rules();
+	test_cache_linear_full();
+	test_cache_stats();
+	test_config_m2_front();
+	test_texcoord_basics();
+	test_texcoords_vs_sw();
+}
+
+// --- M3 (design 7, "M3 specification", "Host tests")
+
+static void test_config_m3()
+{
+	Config d;
+	CHECK(d.lit && !d.alpha_x2);
+	Config c;
+	CHECK(config_apply(c, "lit", "0") && !c.lit && config_apply(c, "lit", "1") && c.lit);
+	CHECK(config_apply(c, "alpha_x2", "1") && c.alpha_x2 && config_apply(c, "alpha_x2", "0") && !c.alpha_x2);
+	CHECK(!config_apply(c, "lit", "2") && !config_apply(c, "alpha_x2", "") && c.lit && !c.alpha_x2);
+}
+
+// calculate_shading_table (scottish_textures.cpp:146-165) at bit_depth 32, written out again on its own
+// types: short table_index, _fixed shade, CEILING = MIN (csmacros.h:42). The index, or -1000 - x for an index
+// x < 0 that SW would use to read before the tables.
+static int sw_calc_index(int32_t M, short depth, int32_t ambient_shade)
+{
+	short table_index;
+	int32_t shade;
+	if (ambient_shade < 0)
+		table_index = static_cast<short>(static_cast<int32_t>(0u - static_cast<uint32_t>(ambient_shade)) >> (16 - 8));
+	else
+	{
+		shade = M - (static_cast<int32_t>(depth) << (16 - 10 - 3));
+		shade = shade < 0 ? 0 : (shade > 65536 ? 65536 : shade);
+		const uint32_t v = ambient_shade > shade ? static_cast<uint32_t>(ambient_shade) + static_cast<uint32_t>(shade >> 1)
+		                                          : static_cast<uint32_t>(shade) + static_cast<uint32_t>(ambient_shade >> 1);
+		table_index = static_cast<short>(static_cast<int32_t>(v) >> (16 - 8));
+	}
+	const int idx = table_index < 255 ? table_index : 255;
+	return idx;
+}
+
+// The GPU's LUT texel for texcoord1 (u, v) with nearest sampling and clamp to edge.
+static int lut_sample(double u, double v)
+{
+	auto texel = [](double c) {
+		const double f = std::floor(c * 256.0);
+		return f < 0 ? 0 : (f > 255 ? 255 : static_cast<int>(f));
+	};
+	return shade_lut_value(static_cast<unsigned>(texel(u)), static_cast<unsigned>(texel(v)));
+}
+
+static void test_shade_lut()
+{
+	// The representatives and the transliteration agree with the module's own SW index.
+	CHECK(shade_lut_s(0) == 0 && shade_lut_s(255) == 65536 && shade_lut_s(1) == 384 && shade_lut_a(0) == 128 && shade_lut_a(255) == 65408);
+	for (unsigned j = 0; j < 256; ++j)
+		CHECK(shade_lut_value(0, j) == j);   // column 0 (s = 0): exactly the row (a_j >> 8 = j)
+	for (unsigned i = 0; i < 256; ++i)
+		CHECK(shade_lut_value(i, 255) == 255);   // full bright
+	CHECK(shade_lut_value(255, 0) == 255);       // s = 1: 65536 + 64 >> 8 = 256 -> 255
+
+	// The wrap rules (round 1 finding 2).
+	CHECK(sw_shade_index(65536, 0, INT32_MIN) == 0 && !shade_ambient_wraps(INT32_MIN));   // -2^31: table 0, black
+	CHECK(sw_shade_index(65536, 0, INT32_MIN + 1) == -1 && shade_ambient_wraps(INT32_MIN + 1));
+	CHECK(shade_ambient_wraps(INT32_MIN + 255) && shade_ambient_wraps(-(1 << 23)) && !shade_ambient_wraps(-(1 << 23) + 1));
+	CHECK(sw_shade_index(65536, 0, -(1 << 23) + 1) == 255);
+	CHECK(!shade_ambient_wraps(kAmbientWrapMin - 1) && shade_ambient_wraps(kAmbientWrapMin));
+	CHECK(sw_shade_index(65536, 0, kAmbientWrapMin - 1) == 255);   // a + 32768 = 2^23 - 1: index 32767, no wrap
+	CHECK(sw_shade_index(65536, 0, kAmbientWrapMin) < 0);          // a + 32768 = 2^23: the short wraps
+	CHECK(shade_polygon(65536, kAmbientWrapMin, false).kind == ShadeKind::Excluded);
+	CHECK(shade_polygon(65536, INT32_MIN + 7, false).kind == ShadeKind::Excluded);
+	CHECK(shade_polygon(kFlashMax + 1, 1000, false).kind == ShadeKind::FlashOver);
+	CHECK(shade_polygon(kFlashMax, 1000, false).kind == ShadeKind::Depth);
+	{
+		const ShadePoly p = shade_polygon(65536, INT32_MIN, false);   // drawn as SW: row 0, column 0 = level 0
+		CHECK(p.kind == ShadeKind::Constant && p.row == 0 && lut_sample(p.u, p.v) == 0);
+		const ShadePoly q = shade_polygon(65536, 123456, true);       // shadeless: LUT 255
+		CHECK(q.kind == ShadeKind::Constant && lut_sample(q.u, q.v) == 255);
+	}
+
+	// Negative ambient (no depth): exact wherever SW's index is in [0, 255].
+	unsigned neg_n = 0, neg_bad = 0;
+	for (int64_t a = -1; a >= INT32_MIN; a = a * 3 / 2 - 1)
+		for (int64_t da : {0LL, -1LL, -127LL, -128LL, -255LL})
+		{
+			const int64_t aa = a + da;
+			if (aa >= 0 || aa < INT32_MIN)
+				continue;
+			const int32_t a32 = static_cast<int32_t>(aa);
+			const int sw = sw_calc_index(65536, 0, a32);
+			CHECK(sw == sw_shade_index(65536, 0, a32));
+			CHECK(shade_ambient_wraps(a32) == (sw < 0));
+			if (sw < 0)
+				continue;
+			const ShadePoly p = shade_polygon(65536, a32, false);
+			++neg_n;
+			neg_bad += lut_sample(p.u, p.v) != sw;
+		}
+	CHECK(neg_bad == 0 && neg_n > 100);
+
+	// The grid: every integer d in [0, M/8 + 64] (s pinned to 0 beyond) plus far d, every a at the bin edges
+	// 256 j + {0, 1, 127, 128, 255} (j = 0..256) and a few large ones; the GPU's w at d - 1/2, d, d + 1/2 (SW keeps
+	// the integer d) and u nudged by +-1/65536 (a one-bin miss at a boundary). |LUT - SW| <= 1 everywhere.
+	std::vector<int32_t> as;
+	for (int j = 0; j <= 256; ++j)
+		for (int o : {0, 1, 127, 128, 255})
+			as.push_back(256 * j + o);
+	for (int32_t a : {100000, 131072, 1 << 20, kAmbientWrapMin - 1})
+		as.push_back(a);
+	unsigned long long n = 0, exact = 0, worse = 0, pinned_bad = 0, full_bad = 0;
+	double u_err = 0;
+	int worst = 0;
+	for (int32_t M : {32768, 65536, 98304, 131072, kFlashMax})
+	{
+		std::vector<int> ds;
+		const int dmax = std::min(32767, M / 8 + 64);
+		for (int d = 0; d <= dmax; ++d)
+			ds.push_back(d);
+		for (int d : {dmax + 500, 20000, 32767})
+			if (d > dmax && d <= 32767)
+				ds.push_back(d);
+		for (int32_t a : as)
+		{
+			const ShadePoly p = shade_polygon(M, a, false);
+			CHECK(p.kind == ShadeKind::Depth);
+			for (int d : ds)
+			{
+				const int sw = sw_calc_index(M, static_cast<short>(d), a);
+				for (int k = 0; k < 5; ++k)
+				{
+					static const double dd[5] = {-0.5, 0.0, 0.5, 0.0, 0.0};
+					static const double nudge[5] = {0.0, 0.0, 0.0, -1.0 / 65536, 1.0 / 65536};
+					const double w = std::max(16.0, d + dd[k]);   // the vertex weight's clamp (M2)
+					// The shipped float formula (shade_u, p.m_u), cross-checked against the exact double one.
+					const double u = shade_u(p, static_cast<float>(w)) + nudge[k];
+					const double ud = static_cast<double>(M) / 65536.0 - w / 8192.0;
+					u_err = std::max(u_err, std::abs(u - nudge[k] - ud));
+					const int g = lut_sample(u, p.v);
+					const int e = std::abs(g - sw);
+					++n;
+					exact += e == 0;
+					worse += e > 1;
+					worst = std::max(worst, e);
+					if (u < -1.0 / 256 && e != 0)
+						++pinned_bad;   // s pinned to 0 far from the bin edge: exact
+					if (a >= 65280 && e != 0)
+						++full_bad;     // full bright: exact
+				}
+			}
+		}
+	}
+	CHECK(worse == 0 && pinned_bad == 0 && full_bad == 0);
+	CHECK(u_err < 1.0 / 65536);   // float u within 1/256 of a texel of the exact value
+	std::printf("shade LUT vs SW: %llu samples, exact %.3f%%, worst |dL| %d (gate <= 1); negative ambient %u cases "
+	            "exact; s-pinned and full-bright cases exact: %s; float u error max %.2e\n",
+	            n, 100.0 * exact / n, worst, neg_n, pinned_bad == 0 && full_bad == 0 ? "yes" : "NO", u_err);
+
+	// tiling: the built LUT is tile_l8 of the plain image.
+	std::vector<uint8_t> plain(kLutBytes), a(kLutBytes), b(kLutBytes);
+	for (unsigned j = 0; j < 256; ++j)
+		for (unsigned i = 0; i < 256; ++i)
+			plain[j * 256 + i] = shade_lut_value(i, j);
+	tile_l8(256, plain.data(), a.data());
+	shade_lut_build(b.data());
+	CHECK(a == b);
+	CHECK(b[tile_index(256, 255, 0)] == 0 && b[tile_index(256, 0, 0)] == 255);   // row 0 (a ~ 0) is the last memory row
+}
+
+// The lit colour prediction (informative): SW's channel ((c16 * m) / 255) >> 8 against the two TEV stages on
+// c8 = c16 >> 8, integer (a * b) / 255 (Azahar's software backend) and rounded float (host GPU), the LUT exact
+// and off by one level.
+static void test_lit_prediction()
+{
+	auto sw = [](int c, int L, bool self) { const int m = self ? 128 + (L >> 1) : L; return ((c * m) / 255) >> 8; };
+	auto mulf = [](int a, int b) { return (a * b) / 255; };
+	auto mulr = [](int a, int b) { return static_cast<int>(std::floor(a * b / 255.0 + 0.5)); };
+	int worst_all = 0;
+	for (int self = 0; self < 2; ++self)
+		for (int r = 0; r < 2; ++r)
+			for (int lerr = 0; lerr < 2; ++lerr)
+			{
+				long n = 0, sum = 0;
+				int mx = 0;
+				for (int c = 0; c < 65536; c += 7)
+					for (int L = 0; L < 256; ++L)
+						for (int e = -lerr; e <= lerr; ++e)
+						{
+							const int Lg = L + e;
+							if (Lg < 0 || Lg > 255)
+								continue;
+							const int A = self ? 128 : 255;
+							const int x = r ? mulr(A, 255 - Lg) : mulf(A, 255 - Lg);
+							const int g = r ? mulr(c >> 8, 255 - x) : mulf(c >> 8, 255 - x);
+							const int d = std::abs(sw(c, L, self) - g);
+							mx = std::max(mx, d);
+							sum += d;
+							++n;
+						}
+				worst_all = std::max(worst_all, mx);
+				std::printf("lit prediction %s, TEV %s, LUT %s: max delta %d, mean %.3f\n", self ? "self-luminous" : "normal",
+				            r ? "rounded" : "floor", lerr ? "+-1 level" : "exact", mx, static_cast<double>(sum) / n);
+			}
+	CHECK(worst_all <= 2);
+}
+
+static void test_tiling_tex3ds_l8()
+{
+	const char* tex3ds = "/opt/devkitpro/tools/bin/tex3ds";
+	if (access(tex3ds, X_OK) != 0)
+	{
+		std::printf("SKIPPED tex3ds L8 test: %s not found\n", tex3ds);
+		return;
+	}
+	const char* tmp = std::getenv("TMPDIR");
+	std::string tmpl = std::string(tmp && *tmp ? tmp : "/tmp") + "/c3d-tex3ds-l8.XXXXXX";
+	std::vector<char> dirbuf(tmpl.begin(), tmpl.end());
+	dirbuf.push_back(0);
+	if (!mkdtemp(dirbuf.data()))
+	{
+		CHECK(false);
+		return;
+	}
+	const std::string dir = dirbuf.data();
+	// A grey PNG (R = G = B = value, A 255) whose row r is source row W - 1 - r; tex3ds -f l8's bytes must equal
+	// tile_l8's. W = 16 with a varied pattern, and the LUT itself (W = 256).
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		const unsigned W = pass ? 256u : 16u;
+		std::vector<uint8_t> src(W * W);
+		for (unsigned j = 0; j < W; ++j)
+			for (unsigned s = 0; s < W; ++s)
+				src[j * W + s] = pass ? shade_lut_value(s, j) : static_cast<uint8_t>((j * W + s) * 37 + 11);
+		std::vector<uint8_t> rgba(W * W * 4);
+		for (unsigned r = 0; r < W; ++r)
+			for (unsigned x = 0; x < W; ++x)
+			{
+				uint8_t* p = &rgba[(r * W + x) * 4];
+				p[0] = p[1] = p[2] = src[(W - 1 - r) * W + x];
+				p[3] = 255;
+			}
+		std::vector<uint8_t> t3x, ours(W * W);
+		const bool ran = run_tex3ds(dir, W, rgba, t3x, "l8", 1);
+		CHECK(ran);
+		tile_l8(W, src.data(), ours.data());
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds L8 tiling W=%u%s: %s\n", W, pass ? " (the shade LUT)" : "", same ? "byte-identical" : "MISMATCH");
+	}
+	std::string cmd = "rm -rf '" + dir + "'";
+	if (std::system(cmd.c_str()) != 0)
+		std::printf("note: could not remove %s\n", dir.c_str());
+}
+
+static void test_m3_core()
+{
+	test_config_m3();
+	test_shade_lut();
+	test_lit_prediction();
+	test_tiling_tex3ds_l8();
+}
+
+// --- M4 (design 7, "M4 specification"): RLE rectangle bitmaps, SW's rectangle vs the GPU model, the LUT's
+// column 0, the tinted factor, the cache with S != T.
+
+// A column-ordered RLE bitmap as shapes.cpp stores it: per column 4 header bytes (first, last big-endian, last
+// exclusive) and the bytes of rows [first, last).
+struct RleBitmap
+{
+	int W, H;
+	std::vector<std::vector<uint8_t>> cols;
+	std::vector<const uint8_t*> rows;
+	std::vector<unsigned> first, last;
+	RleBitmap(int w, int h, unsigned seed) : W(w), H(h), cols(w), rows(w), first(w), last(w)
+	{
+		for (int c = 0; c < w; ++c)
+		{
+			unsigned f = (c * 7u + seed) % static_cast<unsigned>(h / 3 + 1);
+			unsigned l = static_cast<unsigned>(h) - (c * 5u + seed) % static_cast<unsigned>(h / 4 + 1);
+			if (c == 0)
+			{
+				f = 0;
+				l = static_cast<unsigned>(h);    // a full column
+			}
+			if (c == 1 && w > 2)
+				f = l = static_cast<unsigned>(h / 2);   // an empty run
+			if (c == 2 && w > 3)
+				l = static_cast<unsigned>(h) + 5;      // last beyond the bitmap (clamped)
+			first[c] = f;
+			last[c] = l;
+			std::vector<uint8_t>& d = cols[c];
+			d = {static_cast<uint8_t>(f >> 8), static_cast<uint8_t>(f), static_cast<uint8_t>(l >> 8), static_cast<uint8_t>(l)};
+			for (unsigned y = f; y < l; ++y)
+				d.push_back(static_cast<uint8_t>((y * 37u + c * 101u + seed) % 13u == 0 ? 0 : 1 + (c * 31u + y * 17u + seed) % 255u));
+			rows[c] = d.data();
+		}
+	}
+	TexBitmap view() const { return TexBitmap{W, H, rows.data(), true}; }
+	// The index of texel (column c, row y), 0 outside the run.
+	unsigned index(int c, int y) const
+	{
+		if (c < 0 || c >= W || y < 0)
+			return 0;
+		const unsigned l = std::min<unsigned>(last[c], static_cast<unsigned>(H));
+		if (static_cast<unsigned>(y) < first[c] || static_cast<unsigned>(y) >= l)
+			return 0;
+		return cols[c][4 + (y - first[c])];
+	}
+};
+
+static void test_rect_tex_convert()
+{
+	unsigned S = 0, T = 0;
+	CHECK(rect_tex_size(37, 81, true, S, T) && S == 128 && T == 64);
+	CHECK(rect_tex_size(1, 1, true, S, T) && S == 8 && T == 8);
+	CHECK(rect_tex_size(1024, 3, true, S, T) && S == 8 && T == 1024);
+	CHECK(!rect_tex_size(1025, 3, true, S, T) && !rect_tex_size(3, 0, true, S, T) && !rect_tex_size(64, 64, false, S, T));
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+	for (unsigned seed = 0; seed < 3; ++seed)
+	{
+		const int W = seed == 2 ? 5 : 37, H = seed == 1 ? 8 : 81;
+		const RleBitmap b(W, H, seed);
+		CHECK(rect_tex_size(W, H, true, S, T));
+		for (TexKind kind : {TexKind::NormalKeyed, TexKind::ShadelessKeyed, TexKind::Mask})
+		{
+			std::vector<uint8_t> out(tex_bytes(S, T, kind), 0xEE);
+			CHECK(tex_convert_rle(b.view(), tables.data(), kind, S, T, out.data()));
+			unsigned bad = 0;
+			for (unsigned c = 0; c < T; ++c)
+				for (unsigned y = 0; y < S; ++y)
+				{
+					const unsigned i = b.index(static_cast<int>(c), static_cast<int>(y));
+					const size_t t = tile_index(S, tile_memory_row(T, c), y);
+					if (kind == TexKind::Mask)
+						bad += out[t] != (i ? 255u : 0u);
+					else
+					{
+						const uint8_t* p = &out[t * 4];
+						const uint32_t w = p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
+						bad += w != tex_palette_word(tables.data(), kind, i);
+					}
+				}
+			CHECK(bad == 0);
+		}
+	}
+	// Refusals: wrong size, a non-keyed kind, no tables for a colour kind.
+	const RleBitmap b(37, 81, 0);
+	std::vector<uint8_t> out(tex_bytes(128, 64, TexKind::NormalKeyed));
+	CHECK(!tex_convert_rle(b.view(), tables.data(), TexKind::NormalKeyed, 64, 64, out.data()));
+	CHECK(!tex_convert_rle(b.view(), tables.data(), TexKind::Normal, 128, 64, out.data()));
+	CHECK(!tex_convert_rle(b.view(), nullptr, TexKind::NormalKeyed, 128, 64, out.data()));
+	CHECK(tex_convert_rle(b.view(), nullptr, TexKind::Mask, 128, 64, out.data()));
+	CHECK(!tex_supported(b.view()));   // the M2 predicate still refuses RLE
+}
+
+// The non-square tiling against tex3ds (A8 and RGBA8 of one RLE bitmap): PNG row r is memory row r.
+static void test_rect_tiling_tex3ds()
+{
+	const char* tex3ds = "/opt/devkitpro/tools/bin/tex3ds";
+	if (access(tex3ds, X_OK) != 0)
+	{
+		std::printf("SKIPPED tex3ds rectangle test: %s not found\n", tex3ds);
+		return;
+	}
+	const char* tmp = std::getenv("TMPDIR");
+	std::string tmpl = std::string(tmp && *tmp ? tmp : "/tmp") + "/c3d-tex3ds-rect.XXXXXX";
+	std::vector<char> dirbuf(tmpl.begin(), tmpl.end());
+	dirbuf.push_back(0);
+	if (!mkdtemp(dirbuf.data()))
+	{
+		CHECK(false);
+		return;
+	}
+	const std::string dir = dirbuf.data();
+	const std::vector<TestColor> colors = make_colors();
+	const std::vector<uint32_t> tables = build_tables32(colors.data(), nullptr);
+	const RleBitmap b(37, 81, 1);
+	unsigned S = 0, T = 0;
+	CHECK(rect_tex_size(37, 81, true, S, T));
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		const TexKind kind = pass ? TexKind::NormalKeyed : TexKind::Mask;
+		const unsigned tb = tex_texel_bytes(kind);
+		std::vector<uint8_t> ours(tex_bytes(S, T, kind));
+		CHECK(tex_convert_rle(b.view(), tables.data(), kind, S, T, ours.data()));
+		std::vector<uint8_t> rgba(static_cast<size_t>(S) * T * 4);
+		for (unsigned m = 0; m < T; ++m)
+			for (unsigned x = 0; x < S; ++x)
+			{
+				const unsigned c = T - 1 - m;   // memory row m holds column T - 1 - m
+				const unsigned i = b.index(static_cast<int>(c), static_cast<int>(x));
+				uint8_t* p = &rgba[(static_cast<size_t>(m) * S + x) * 4];
+				const uint32_t w = kind == TexKind::Mask ? (i ? 255u : 0u) : tex_palette_word(tables.data(), kind, i);
+				if (kind == TexKind::Mask)
+				{
+					p[0] = p[1] = p[2] = 0;
+					p[3] = static_cast<uint8_t>(w);
+				}
+				else
+				{
+					p[0] = static_cast<uint8_t>(w >> 24);
+					p[1] = static_cast<uint8_t>(w >> 16);
+					p[2] = static_cast<uint8_t>(w >> 8);
+					p[3] = static_cast<uint8_t>(w);
+				}
+			}
+		std::vector<uint8_t> t3x;
+		const bool ran = run_tex3ds(dir, S, rgba, t3x, pass ? "rgba8" : "a8", tb, T);
+		CHECK(ran);
+		if (ran && pass && t3x.size() == ours.size())
+			for (size_t t = 0; t < ours.size(); t += 4)
+				if (ours[t] == 0)   // A == 0: tex3ds does not keep the colour of a fully transparent pixel
+					std::memset(&ours[t + 1], 0, 3), std::memset(&t3x[t + 1], 0, 3);
+		const bool same = ran && t3x == ours;
+		CHECK(same);
+		std::printf("tex3ds %s tiling %ux%u (RLE 37x81%s): %s\n", pass ? "RGBA8" : "A8", S, T, pass ? ", RGB of A 0 ignored" : "",
+		            same ? "byte-identical" : "MISMATCH");
+	}
+	std::string cmd = "rm -rf '" + dir + "'";
+	if (std::system(cmd.c_str()) != 0)
+		std::printf("note: could not remove %s\n", dir.c_str());
+}
+
+// scottish_textures.cpp:656-723, a second, literal transliteration (the test's own), for rect_setup.
+static bool sw_rect_ref(RectIn r, int sw, int sh, RectBox& o)
+{
+	short x0 = r.x0, x1 = r.x1, y0 = r.y0, y1 = r.y1;
+	short clip_left = r.clip_left, clip_right = r.clip_right, clip_top = r.clip_top, clip_bottom = r.clip_bottom;
+	if (!(x0 < x1 && y0 < y1))
+		return false;
+	if (clip_left < 0) clip_left = 0;
+	if (clip_right > sw) clip_right = sw;
+	if (clip_top < 0) clip_top = 0;
+	if (clip_bottom > sh) clip_bottom = sh;
+	if (clip_left < x0) clip_left = x0;
+	if (clip_right > x1) clip_right = x1;
+	if (clip_top < y0) clip_top = y0;
+	if (clip_bottom > y1) clip_bottom = y1;
+	if (!(clip_left < clip_right && clip_top < clip_bottom && clip_right > 0 && clip_left < sw && clip_bottom > 0 && clip_top < sh))
+		return false;
+	short delta;
+	short screen_width = x1 - x0, screen_height = y1 - y0, screen_x = x0;
+	int32_t texture_dx = (r.W << 16) / screen_width;
+	int32_t texture_x = texture_dx >> 1;
+	int32_t texture_dy = (r.H << 16) / screen_height;
+	int32_t texture_y0 = 0;
+	if (!(texture_dx && texture_dy))
+		return false;
+	if (r.flip_h)
+	{
+		texture_dx = -texture_dx;
+		texture_x = (r.W << 16) + (texture_dx >> 1);
+	}
+	if ((delta = clip_left - x0) > 0)
+	{
+		texture_x += delta * texture_dx;
+		screen_width -= delta;
+		screen_x = clip_left;
+	}
+	if ((delta = x1 - clip_right) > 0)
+		screen_width -= delta;
+	if ((delta = clip_top - y0) > 0)
+	{
+		texture_y0 += delta * texture_dy;
+		screen_height -= delta;
+	}
+	if ((delta = y1 - clip_bottom) > 0)
+		screen_height -= delta;
+	o = RectBox{screen_x, screen_x + screen_width, clip_top, clip_top + screen_height, texture_x, texture_dx, texture_y0, texture_dy};
+	return true;
+}
+
+// float24 (1.7.16): the vertex attribute rounded to a 17-bit significand.
+static double f24(double v)
+{
+	if (v == 0.0 || !std::isfinite(v))
+		return v;
+	int e = 0;
+	const double m = std::frexp(v, &e);   // [0.5, 1)
+	return std::ldexp(std::nearbyint(m * 131072.0) / 131072.0, e);
+}
+
+struct RectStats
+{
+	uint64_t common = 0, texel_same = 0, cov_mismatch = 0, cov_nonband = 0, cov_nonband_tall = 0, case3_reads = 0;
+};
+
+// SW draws the rectangle (the test's transliteration of :759-800 with the textured loop's index-0 skip) into
+// `a` (index, 0 = not written) and the GPU model into `b`: one quad, texcoords from rect_t/rect_s at the
+// corners (+ bias, / S or T), float32 then float24, interpolated at pixel centres, floored, clamped.
+static void rect_compare(const RleBitmap& bm, const RectBox& bx, int sw, int sh, double bias, int model,
+                         std::vector<int>& a, std::vector<int>& b, RectStats& st)
+{
+	a.assign(static_cast<size_t>(sw) * sh, 0);
+	b.assign(static_cast<size_t>(sw) * sh, 0);
+	for (int k = 0; k < bx.cr - bx.cl; ++k)
+	{
+		const int32_t texture_x = bx.tx0 + k * bx.dx;
+		const int c = texture_x >> 16;
+		const unsigned first = bm.first[c], last = bm.last[c];
+		int32_t texture_y = bx.ty0;
+		short y0 = bx.ct, y1 = bx.cb;
+		const int32_t texture_y1 = bx.ty0 + (bx.cb - bx.ct) * bx.dy;
+		if ((bx.ty0 >> 16) < static_cast<int32_t>(first))
+		{
+			const short delta = (static_cast<int32_t>(first << 16) - bx.ty0) / bx.dy + 1;
+			y0 = std::min<short>(y1, y0 + delta);
+			texture_y += delta * bx.dy;
+		}
+		if ((texture_y1 >> 16) > static_cast<int32_t>(last))
+		{
+			const short delta = (texture_y1 - static_cast<int32_t>(last << 16)) / bx.dy + 1;
+			y1 = std::max<short>(y0, y1 - delta);
+		}
+		int ry0 = 0, ry1 = 0;
+		rect_sw_column_rows(bx, first, last, &ry0, &ry1);
+		CHECK(ry0 == y0 && ry1 == y1);
+		uint32_t ty = static_cast<uint32_t>(texture_y);
+		for (int y = y0; y < y1; ++y, ty += static_cast<uint32_t>(bx.dy))
+		{
+			// data[(ty >> 16) - first]; past the run (case (iii): ty1 >> 16 == last, no bottom trim) SW reads on into
+			// the next column's header (its first, big-endian: the high byte) or past the bitmap after the last column (0).
+			const size_t i = 4 + ((ty >> 16) - first);
+			const std::vector<uint8_t>& col = bm.cols[c];
+			const int v = i < col.size() ? col[i] : (i == col.size() && c + 1 < bm.W ? bm.cols[c + 1][0] : 0);
+			if (i >= col.size())
+				++st.case3_reads;
+			a[static_cast<size_t>(y) * sw + bx.cl + k] = v;
+		}
+	}
+	unsigned S = 0, T = 0;
+	rect_tex_size(bm.W, bm.H, true, S, T);
+	// model 0: double end to end; 1: float32 vertex storage (Azahar's host-GPU backend); 2: float32 then float24.
+	auto corner = [&](double v) { return model == 2 ? f24(static_cast<float>(v)) : model == 1 ? static_cast<double>(static_cast<float>(v)) : v; };
+	const double vl = corner((rect_t(bx, bx.cl) + bias) / T), vr = corner((rect_t(bx, bx.cr) + bias) / T);
+	const double ut = corner((rect_s(bx, bx.ct) + bias) / S), ub = corner((rect_s(bx, bx.cb) + bias) / S);
+	for (int y = bx.ct; y < bx.cb; ++y)
+		for (int x = bx.cl; x < bx.cr; ++x)
+		{
+			const double fx = (x + 0.5 - bx.cl) / (bx.cr - bx.cl), fy = (y + 0.5 - bx.ct) / (bx.cb - bx.ct);
+			const double v = vl + (vr - vl) * fx, u = ut + (ub - ut) * fy;
+			const int c = std::min(std::max(static_cast<int>(std::floor(v * T)), 0), static_cast<int>(T) - 1);
+			const int r = std::min(std::max(static_cast<int>(std::floor(u * S)), 0), static_cast<int>(S) - 1);
+			b[static_cast<size_t>(y) * sw + x] = static_cast<int>(bm.index(c, r));
+		}
+	auto in_band = [&](int x, int y) {
+		const bool cov = a[static_cast<size_t>(y) * sw + x] != 0;
+		for (int dy = -1; dy <= 1; ++dy)
+			for (int dx = -1; dx <= 1; ++dx)
+			{
+				const int nx = x + dx, ny = y + dy;
+				if ((dx || dy) && nx >= 0 && ny >= 0 && nx < sw && ny < sh && (a[static_cast<size_t>(ny) * sw + nx] != 0) != cov)
+					return true;
+			}
+		return false;
+	};
+	for (int y = 0; y < sh; ++y)
+		for (int x = 0; x < sw; ++x)
+		{
+			const int ia = a[static_cast<size_t>(y) * sw + x], ib = b[static_cast<size_t>(y) * sw + x];
+			if ((ia != 0) != (ib != 0))
+			{
+				++st.cov_mismatch;
+				if (!in_band(x, y))
+				{
+					++st.cov_nonband;
+					if (bx.cb - bx.ct > 2)
+						++st.cov_nonband_tall;
+				}
+			}
+			else if (ia)
+			{
+				++st.common;
+				st.texel_same += ia == ib;
+			}
+		}
+}
+
+static void test_rect_setup_and_model()
+{
+	// rect_setup vs the literal transliteration, on a grid with clips and flips.
+	unsigned setups = 0, same = 0;
+	for (int W : {1, 8, 31, 64, 200})
+		for (int H : {1, 8, 81, 200})
+			for (int x0 : {-50, 0, 13, 390})
+				for (int wd : {1, 2, 37, 100, 600})
+					for (int y0 : {-30, 0, 7, 235})
+						for (int ht : {1, 3, 64, 300})
+							for (int clip = 0; clip < 2; ++clip)
+								for (int flip = 0; flip < 2; ++flip)
+								{
+									const RectIn r{x0, y0, x0 + wd, y0 + ht, clip ? 20 : 0, clip ? 300 : 400, clip ? 10 : 0,
+									               clip ? 200 : 240, W, H, flip != 0};
+									RectBox p{}, q{};
+									const bool a = rect_setup(r, 400, 240, p), b = sw_rect_ref(r, 400, 240, q);
+									++setups;
+									same += a == b && (!a || (p.cl == q.cl && p.cr == q.cr && p.ct == q.ct && p.cb == q.cb &&
+									                          p.tx0 == q.tx0 && p.dx == q.dx && p.ty0 == q.ty0 && p.dy == q.dy));
+								}
+	CHECK(same == setups);
+	std::printf("rect_setup vs SW: %u / %u set-ups identical\n", same, setups);
+
+	// The GPU model vs SW per bias (1/4096 texel), on a grid of bitmap and screen sizes, clips and flips.
+	const int biases[] = {0, 1, 2, 8};   // 1/131072 texel
+	for (int model = 0; model < 3; ++model)
+		for (int bias : biases)
+		{
+			RectStats st;
+			std::vector<int> a, b;
+			for (int W : {8, 31, 64, 128, 200})
+				for (int H : {8, 81, 128, 200})
+					for (int wd : {1, 3, 16, 37, 100, 199, 400})
+						for (int ht : {1, 3, 16, 64, 128, 239})
+							for (int v = 0; v < 3; ++v)
+							{
+								const RleBitmap bm(W, H, static_cast<unsigned>(W + H + v));
+								const int x0 = v == 2 ? -wd / 3 : (400 - wd) / 2, y0 = v == 2 ? 240 - ht * 2 / 3 : (240 - ht) / 2;
+								const RectIn r{x0, y0, x0 + wd, y0 + ht, v == 1 ? x0 + wd / 4 : 0, 400, 0, 240, W, H, v == 1};
+								RectBox bx{};
+								if (!rect_setup(r, 400, 240, bx))
+									continue;
+								rect_compare(bm, bx, 400, 240, bias / 131072.0, model, a, b, st);
+							}
+			const double agree = st.common ? 100.0 * st.texel_same / st.common : 100.0;
+			const double nonband = st.common ? 100.0 * st.cov_nonband / st.common : 0.0;
+			if (bias == 1)
+			{
+				// The default rect_bias (1/131072 texel): SW's own texels in exact arithmetic; the float24 model close;
+				// SW's per-column trim outside A's edge band (minified runs of 1-2 rows) far below the 0.5 % gate.
+				CHECK(model ? agree >= 99.8 : agree >= 99.9999);   // the bias's full benefit shows in double only
+				CHECK(nonband <= 0.1);
+			}
+			std::printf("rect GPU model (%s) bias %d/131072: texel agreement %.4f%% of %llu, coverage mismatches %llu "
+			            "(outside A's edge band %llu = %.3f%% of common, on rectangles over 2 rows %llu; case (iii) reads %llu)\n",
+			            model == 2 ? "float24" : model == 1 ? "float32" : "double ", bias, agree, static_cast<unsigned long long>(st.common), static_cast<unsigned long long>(st.cov_mismatch),
+			            static_cast<unsigned long long>(st.cov_nonband), nonband, static_cast<unsigned long long>(st.cov_nonband_tall),
+			            static_cast<unsigned long long>(st.case3_reads));
+		}
+}
+
+static void test_m4_misc()
+{
+	// The LUT's column 0 is the identity: texcoord1 (0.5/256, (L + 0.5)/256) gives level L exactly.
+	bool ident = true;
+	for (unsigned j = 0; j < 256; ++j)
+		ident = ident && shade_lut_value(0, j) == j;
+	CHECK(ident);
+	// The tinted factor: SW's table (v * 8k) / 255 (shapes.cpp:2006-2021 with number_of_shading_tables 256) vs a
+	// rounding blend v * c / 255, c = min(8k, 255): within 1.
+	unsigned worst = 0;
+	for (unsigned k = 0; k < 32; ++k)
+		for (unsigned v = 0; v < 256; ++v)
+		{
+			const unsigned c = std::min(8 * k, 255u);
+			const unsigned sw = (v * 8 * k) / 255, gpu = (v * c + 127) / 255;
+			worst = std::max(worst, sw > gpu ? sw - gpu : gpu - sw);
+		}
+	CHECK(worst <= 1);
+	std::printf("tinted factor: SW floor vs rounding blend, worst %u\n", worst);
+	// The cache with S != T and an A8 kind: the bytes the caps count.
+	FakeAlloc fa;
+	TexCache cache(fa, TexCacheConfig{});
+	cache.begin_frame(1);
+	TexSlot* s = cache.create(TexKey{&fa, nullptr, TexKind::Mask, TexWrap::Clamp}, 128, 64);
+	CHECK(s && s->S == 128 && s->T == 64 && s->bytes == 8192 && fa.bad_release == 0);
+	TexSlot* r = cache.create(TexKey{&fa, &fa, TexKind::NormalKeyed, TexWrap::Clamp}, 16, 256);
+	CHECK(r && r->bytes == 16384 && cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, TexWrap::Clamp}) == r);
+	CHECK(!cache.lookup(TexKey{&fa, &fa, TexKind::NormalKeyed, TexWrap::Repeat}));   // the wrap is part of the key
+	cache.release_all();
+}
+
+static void test_config_m4()
+{
+	Config c;
+	CHECK(c.play && c.play_check == 0 && c.rect_bias == 1);
+	CHECK(config_apply(c, "play", "0") && !c.play);
+	CHECK(config_apply(c, "play_check", "30") && c.play_check == 30);
+	CHECK(!config_apply(c, "play_check", "100001") && c.play_check == 30);
+	CHECK(config_apply(c, "rect_bias", "65536") && c.rect_bias == 65536);
+	CHECK(!config_apply(c, "rect_bias", "65537") && !config_apply(c, "play", "2") && c.rect_bias == 65536 && !c.play);
+}
+
+// Coverage::All: common = A or B differs from the clear in RGB; both-clear pixels are `empty`; no band.
+static void test_diff_all()
+{
+	std::vector<uint32_t> a(4 * 3, 0), b(4 * 3, 0);
+	a[0] = 0xFF102030u;                  // drawn in A only
+	b[1] = 0xFF000001u;                  // drawn in B only
+	a[5] = 0x00405060u; b[5] = 0xFF405062u;   // a tinted SW pixel (alpha 0) vs C3D: compared, delta 2
+	a[6] = 0xFF000000u; b[6] = 0xFF000000u;   // black on both: RGB equals the clear, empty
+	const DiffResult r = diff_images(Image32{a.data(), 4, 3, 4}, Image32{b.data(), 4, 3, 4}, Coverage::All, 0, 2);
+	CHECK(r.common == 3 && r.empty == 9 && r.band == 0 && r.cov_mismatch_edge == 0 && r.cov_mismatch_nonedge == 0);
+	CHECK(r.within_tol == 2 && r.max_delta == 0x30);
+	CHECK(r.covered_a == 2 && r.covered_b == 2);
+}
+
+static void test_m4_core()
+{
+	test_config_m4();
+	test_diff_all();
+	test_rect_tex_convert();
+	test_rect_tiling_tex3ds();
+	test_rect_setup_and_model();
+	test_m4_misc();
+}
+
+// --- M5 (design 7, M5 specification "Host tests") ---
+
+// The GPU's texel column / source row of a landscape at pixel centres: the attribute evaluated at two corners
+// (stored per `model`: 0 double, 1 float32, 2 float32 then float24), interpolated, floored; the row clamped to
+// [0, T - 1] and the padded rows read row R - 1.
+static void test_landscape_vs_sw()
+{
+	uint64_t n_col = 0, n_row = 0, bad_col[3] = {0, 0, 0}, bad_row[3] = {0, 0, 0};
+	auto store = [](double v, int model) {
+		return model == 2 ? f24(static_cast<float>(v)) : model == 1 ? static_cast<double>(static_cast<float>(v)) : v;
+	};
+	const int screens[2][2] = {{400, 240}, {640, 320}};
+	const int cones[3] = {40, 64, 80};
+	const int heights[2] = {256, 512};
+	// Columns: yaw, azimuth, half_cone, screen, height, HorizExp.
+	for (int sc = 0; sc < 2; ++sc)
+		for (int hc : cones)
+			for (int ht : heights)
+				for (int he = 0; he <= 2; ++he)
+					for (int az : {0, 100})
+						for (int yaw = 0; yaw < 512; yaw += 7)
+						{
+							const int W = screens[sc][0];
+							LandView v{screens[sc][1] / 2, 0, yaw, hc, W};
+							LandOpts o;
+							o.horiz_exp = he;
+							o.azimuth = az;
+							LandParams p;
+							CHECK(landscape_setup(v, o, 540, ht, false, p));
+							const Point2 q[2] = {{0, 0}, {W, 0}};
+							TexAttr at[2];
+							CHECK(landscape_attrs(p, q, 2, -0.5, 0, 0, 0.0, at) == TexResult::Ok);
+							// double corners: recompute without the float of TexAttr
+							double u0d, u1d, vd;
+							landscape_uv(p, -0.5, 0, 0, u0d, vd);
+							landscape_uv(p, W - 0.5, 0, 0, u1d, vd);
+							const double period = static_cast<double>(1u << p.bits);
+							const double sh = std::floor(std::fmin(u0d, u1d) / period) * period;
+							const double c0 = (u0d - sh + kLandEps) / p.S, c1 = (u1d - sh + kLandEps) / p.S;
+							for (int x = 0; x < W; ++x)
+							{
+								const int sw = landscape_sw_col(p, x);
+								++n_col;
+								for (int m = 0; m < 3; ++m)
+								{
+									const double a = store(c0, m), b = store(c1, m);
+									const double s = a + (b - a) * (x + 0.5) / W;
+									long t = static_cast<long>(std::floor(s * p.S)) % static_cast<long>(p.S);
+									if (t < 0)
+										t += p.S;
+									bad_col[m] += t != sw;
+								}
+							}
+						}
+	// Rows: dtp, half_cone, screen, R, height, VertExp, AspRatExp, VertRepeat.
+	for (int sc = 0; sc < 2; ++sc)
+		for (int hc : cones)
+			for (int R : {540, 270, 135, 512, 1024})
+				for (int ht : heights)
+					for (int ve = 0; ve <= 2; ++ve)
+						for (int rep = 0; rep < 2; ++rep)
+							for (int dtp : {-60, -13, 0, 25, 60})
+							{
+								const int W = screens[sc][0], H = screens[sc][1];
+								LandView v{H / 2, dtp, 0, hc, W};
+								LandOpts o;
+								o.vert_exp = ve;
+								o.vert_repeat = rep != 0;
+								o.asp_rat_exp = rep ? (ve & 1) : 0;
+								LandParams p;
+								const int cut = landscape_part_rows();
+								const bool set = landscape_setup(v, o, R, ht, false, p);
+								if (R - cut > 512)
+								{
+									CHECK(!set);   // part 1 would pass 512 rows (land_cut 256 with R 1024)
+									continue;
+								}
+								CHECK(set);
+								CHECK(p.parts == (R > cut ? 2 : 1));
+								// One polygon per piece (band, part): the screen's lines of that piece, its own row offset.
+								auto piece = [&](int yy) { return landscape_band(p, yy) * 2 + landscape_part(p, yy); };
+								for (int y = 0; y < H; ++y)
+								{
+									const int band = landscape_band(p, y), part = landscape_part(p, y);
+									int b0 = y, b1 = y;
+									while (b0 > 0 && piece(b0 - 1) == piece(y))
+										--b0;
+									while (b1 < H && piece(b1) == piece(y))
+										++b1;
+									const double off = landscape_row_offset(p, b0, b1, band, part);
+									const double base = cut * part;
+									const unsigned TT = p.T[part];
+									const int rows_in = part ? R - cut : std::min(R, cut);
+									double ud, va, vb;
+									landscape_uv(p, 0, b0 - 0.5, band, ud, va, off);
+									landscape_uv(p, 0, b1 - 0.5, band, ud, vb, off);
+									va -= base;
+									vb -= base;
+									const int sw = landscape_sw_row(p, y);
+									++n_row;
+									for (int m = 0; m < 3; ++m)
+									{
+										const double a = store(va / TT, m), b = store(vb / TT, m);
+										const double t = a + (b - a) * (y + 0.5 - b0) / (b1 - b0);
+										long r = static_cast<long>(std::floor(t * TT));
+										r = r < 0 ? 0 : (r > static_cast<long>(TT) - 1 ? TT - 1 : r);
+										if (r >= rows_in)
+											r = rows_in - 1;
+										bad_row[m] += r + static_cast<long>(base) != sw;
+									}
+								}
+							}
+	std::printf("landscape (cut %d) texel agreement (double / float32 / float24): columns %.5f / %.5f / %.5f %% of %llu, rows "
+	            "%.5f / %.5f / %.5f %% of %llu\n",
+	            landscape_part_rows(), 100.0 * (n_col - bad_col[0]) / n_col, 100.0 * (n_col - bad_col[1]) / n_col,
+	            100.0 * (n_col - bad_col[2]) / n_col, static_cast<unsigned long long>(n_col),
+	            100.0 * (n_row - bad_row[0]) / n_row, 100.0 * (n_row - bad_row[1]) / n_row,
+	            100.0 * (n_row - bad_row[2]) / n_row, static_cast<unsigned long long>(n_row));
+	CHECK(bad_col[0] == 0 && bad_row[0] == 0);
+	CHECK(bad_col[1] * 10000 <= n_col && bad_row[1] * 2000 <= n_row);   // >= 99.99 % / 99.95 % in float32
+
+	// Sizes (at the default cut; land_cut has its own in test_m5_cache_and_convert).
+	unsigned S = 0, T[2] = {0, 0};
+	int parts = 0;
+	const bool cut512 = landscape_part_rows() == 512;
+	CHECK(!cut512 || (landscape_tex_size(540, 1024, false, S, T, &parts) && S == 1024 && T[0] == 512 && T[1] == 32 && parts == 2));
+	CHECK(!cut512 || (landscape_tex_size(270, 512, false, S, T, &parts) && S == 512 && T[0] == 512 && parts == 1));
+	CHECK(!landscape_tex_size(270, 512, true, S, T, &parts));
+	CHECK(!landscape_tex_size(270, 500, false, S, T, &parts));
+	CHECK(!landscape_tex_size(1025, 1024, false, S, T, &parts));
+	CHECK(!cut512 || (landscape_tex_size(1024, 1024, false, S, T, &parts) && T[1] == 512));
+	CHECK(landscape_tex_size(1, 8, false, S, T, &parts) && S == 8 && T[0] == 8 && parts == 1);
+	// Bands: without VertRepeat always 0; with it the fold matches k' = k - 2 h2 n.
+	LandParams p;
+	LandOpts o;
+	o.vert_repeat = true;
+	CHECK(landscape_setup(LandView{120, 0, 0, 64, 400}, o, 270, 512, false, p) && p.h2 == 256);
+	for (int k = -2000; k <= 2000; ++k)
+	{
+		const int n = k + p.h2 >= 0 ? (k + p.h2) / (2 * p.h2) : -((-(k + p.h2) + 2 * p.h2 - 1) / (2 * p.h2));
+		CHECK(landscape_sw_kfold(p, k) == k - 2 * p.h2 * n);
+	}
+}
+
+static void test_noise()
+{
+	// SW's step: maximal period from 1.
+	uint16_t s = 1;
+	unsigned period = 0;
+	do
+	{
+		s = sw_lfsr_step(s);
+		++period;
+	} while (s != 1 && period < 70000);
+	CHECK(period == 65535);
+	CHECK(sw_static_pixel(0xABCD) == 0x00AB66CDu);   // R = AB, G = AB ^ CD, B = CD
+	CHECK(noise_word(0xABCD) == 0xAB66CDACu);
+	CHECK((noise_word(0x0105) & 0xFF) == 2 && (noise_word(0x0005) & 0xFF) == 1 && (noise_word(0xFF05) & 0xFF) == 255);
+	// Through the readback: the target pixel (RGBA from the texel word) as ARGB (calibrate.h rgba_to_argb_keep) = SW's
+	// pixel32 (low_level_textures.h:597-600) in RGB, for every state.
+	for (uint32_t st = 1; st < 65536; ++st)
+	{
+		const uint32_t w = noise_word(static_cast<uint16_t>(st));
+		const uint32_t argb = ((w & 0xFFu) << 24) | (w >> 8);
+		if ((argb & 0x00FFFFFFu) != sw_static_pixel(static_cast<uint16_t>(st)))
+		{
+			CHECK(false);
+			break;
+		}
+	}
+	CHECK(noise_ref(0) == 1 && noise_ref(0x80FF) == 0x81 && noise_ref(0x00FF) == 1 && noise_ref(0xFFFF) == 255);
+	double worst = 0.0, worst_top = 0.0;
+	unsigned worst_drop = 0;
+	for (unsigned d = 0; d < 65536; d += 1)
+	{
+		const double e = std::fabs(noise_density(noise_ref(static_cast<uint16_t>(d))) - sw_static_density(static_cast<uint16_t>(d)));
+		if (d >= 0xFF00)
+			worst_top = std::fmax(worst_top, e);
+		else if (e > worst)
+		{
+			worst = e;
+			worst_drop = d;
+		}
+		if (d >= 256 && d < 0xFF00)
+			d += 254;   // every 0x100 boundary and its neighbours
+	}
+	std::printf("static density, noise texture vs SW: worst |delta| %.3f points (drop 0x%04x), %.3f at drop >= 0xff00\n",
+	            100.0 * worst, worst_drop, 100.0 * worst_top);
+	CHECK(worst <= 0.004 && worst_top <= 0.008);
+	// Tiling: texel k at its tiled place.
+	std::vector<uint8_t> tex(kNoiseBytes);
+	noise_build(tex.data());
+	uint16_t seed = kNoiseSeed;
+	bool ok = true;
+	for (unsigned x = 0; x < kNoiseSide && ok; ++x)
+		for (unsigned j = 0; j < kNoiseSide; ++j)   // down columns, as SW walks
+		{
+			const uint8_t* q = tex.data() + tile_index(kNoiseSide, tile_memory_row(kNoiseSide, j), x) * 4;
+			const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+			ok = ok && w == noise_word(seed);
+			seed = sw_lfsr_step(seed);
+		}
+	CHECK(ok);
+}
+
+// M5: the landscape conversion (padding, kinds), the cache's wrap key, fail_every, audit, level-start counts.
+static void test_m5_cache_and_convert()
+{
+	// A 5-row x 8-texel landscape into 8 x 8: rows 5..7 repeat row 4; tiling through tile_index.
+	uint32_t tables[kShadingTableEntries];
+	for (unsigned i = 0; i < kShadingTableEntries; ++i)
+		tables[i] = 0xFF000000u | (i * 2654435761u >> 8);
+	uint8_t data[5][8];
+	const uint8_t* rows[5];
+	for (int r = 0; r < 5; ++r)
+	{
+		for (int x = 0; x < 8; ++x)
+			data[r][x] = static_cast<uint8_t>(r * 8 + x + 1);
+		rows[r] = data[r];
+	}
+	TexBitmap b;
+	b.width = 5;
+	b.height = 8;
+	b.rows = rows;
+	unsigned S = 0, TT[2] = {0, 0};
+	int parts = 0;
+	CHECK(landscape_tex_size(5, 8, false, S, TT, &parts) && S == 8 && TT[0] == 8 && parts == 1);
+	const unsigned T = TT[0];
+	std::vector<uint8_t> out(tex_bytes(S, T, TexKind::Normal));
+	CHECK(tex_convert_landscape(b, tables, TexKind::Normal, 0, S, T, out.data()));
+	CHECK(!tex_convert_landscape(b, tables, TexKind::Mask, 0, S, T, out.data()));
+	CHECK(!tex_convert_landscape(b, tables, TexKind::Normal, 1, S, T, out.data()));
+	CHECK(!tex_convert_landscape(b, tables, TexKind::Normal, 0, 8, 16, out.data()));
+	bool ok = true;
+	for (unsigned j = 0; j < T; ++j)
+		for (unsigned x = 0; x < S; ++x)
+		{
+			const uint8_t* q = out.data() + tile_index(S, tile_memory_row(T, j), x) * 4;
+			const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+			ok = ok && w == tex_palette_word(tables, TexKind::Normal, data[j < 5 ? j : 4][x]);
+		}
+	CHECK(ok);
+	// Two parts: 520 rows of 8 -> part 0 = rows 0..511 (T 512), part 1 = rows 512..519 (T 8, no padding).
+	{
+		std::vector<std::vector<uint8_t>> big(520, std::vector<uint8_t>(8));
+		std::vector<const uint8_t*> br(520);
+		for (int r = 0; r < 520; ++r)
+		{
+			for (int x = 0; x < 8; ++x)
+				big[r][x] = static_cast<uint8_t>((r * 7 + x) & 0xFF);
+			br[r] = big[r].data();
+		}
+		TexBitmap bb;
+		bb.width = 520;
+		bb.height = 8;
+		bb.rows = br.data();
+		CHECK(landscape_tex_size(520, 8, false, S, TT, &parts) && parts == 2 && TT[0] == 512 && TT[1] == 8);
+		for (int part = 0; part < 2; ++part)
+		{
+			std::vector<uint8_t> o2(tex_bytes(S, TT[part], TexKind::Normal));
+			CHECK(tex_convert_landscape(bb, tables, TexKind::Normal, part, S, TT[part], o2.data()));
+			bool ok2 = true;
+			for (unsigned j = 0; j < TT[part]; ++j)
+				for (unsigned x = 0; x < S; ++x)
+				{
+					const uint8_t* q = o2.data() + tile_index(S, tile_memory_row(TT[part], j), x) * 4;
+					const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+					ok2 = ok2 && w == tex_palette_word(tables, TexKind::Normal, big[512 * part + j][x]);
+				}
+			CHECK(ok2);
+		}
+	}
+	CHECK(sw_shade_index(65536, 0, 65536) == 255 && sw_shade_index(1 << 20, 0, 65536) == 255);
+
+	// The wrap is part of the key; fail_every; audit.
+	FakeAlloc fa;
+	TexCacheConfig cfg;
+	cfg.fail_every = 3;
+	TexCache cache(fa, cfg);
+	cache.begin_frame(1);
+	TexSlot* a = cache.create(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Landscape}, 512, 512);
+	CHECK(a && a->bytes == 1024u * 1024u);
+	CHECK(cache.lookup(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Landscape}) == a);
+	CHECK(!cache.lookup(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Landscape, 1}));   // the part is in the key
+	CHECK(!cache.lookup(TexKey{&bm[1], &bm[2], TexKind::Normal, TexWrap::Repeat}));
+	CHECK(cache.create(K(3), 128));
+	CHECK(!cache.create(K(4), 128));   // the third create: forced
+	CHECK(cache.stats().forced_fails == 1 && cache.stats().discards_tex == 1 && cache.stats().creates == 3);
+	CHECK(cache.create(K(4), 128));    // retried: the counter moved on
+	CHECK(cache.audit());
+	uint32_t el = 0, ev = 0;
+	CHECK(cache.audit(&el, &ev) && el == cache.used_bytes(TexPool::Linear) && ev == 0);
+	// Level-start counts: the cache's first frames are a window too (the first level); reset by bump_generation.
+	CHECK(cache.stats().ls_textures[0] == 3);   // a, K(3), K(4) retried (the forced failure converts nothing)
+	cache.bump_generation();
+	CHECK(cache.audit());
+	cache.on_retired();
+	CHECK(cache.audit() && cache.used_bytes(TexPool::Linear) == 0);
+	cache.release_all();
+	CHECK(cache.audit());
+	TexCache c2(fa, TexCacheConfig{});
+	c2.bump_generation();
+	for (uint32_t f = 2; f < 14; ++f)
+	{
+		c2.begin_frame(f);
+		if (f == 2 || f == 5)
+			c2.create(K(static_cast<int>(10 + f)), 128);
+	}
+	CHECK(c2.stats().ls_textures[0] == 1 && c2.stats().ls_textures[3] == 1 && c2.stats().ls_bytes[0] == 65536 &&
+	      c2.stats().ls_pending[3] == 1);
+	CHECK(c2.frames_since_generation() >= static_cast<int>(kTexGenWindow));
+	c2.release_all();
+	CHECK(c2.audit());
+	// The keys.
+	Config c;
+	CHECK(config_apply(c, "fail_every", "50") && c.fail_every == 50 && !config_apply(c, "fail_every", "x"));
+	CHECK(config_apply(c, "landscape_tol", "2") && c.landscape_tol == 2 && !config_apply(c, "landscape_tol", "300"));
+	CHECK(c.land_cut == 512 && config_apply(c, "land_cut", "300") && c.land_cut == 300 && !config_apply(c, "land_cut", "600") &&
+	      !config_apply(c, "land_cut", "32") && c.land_cut == 300);
+	// land_cut 300 on Marathon 2's 540 x 1024: part 0 = rows 0..299 (padded to 512, row 299 repeated), part 1 = rows
+	// 300..539 (240 -> 256).
+	landscape_set_part_rows(300);
+	{
+		unsigned S2 = 0, T2[2] = {0, 0};
+		int n2 = 0;
+		CHECK(landscape_tex_size(540, 1024, false, S2, T2, &n2) && n2 == 2 && T2[0] == 512 && T2[1] == 256);
+		CHECK(!landscape_tex_size(1024, 1024, false, S2, T2, &n2));   // part 1 would be 724 rows
+		std::vector<std::vector<uint8_t>> big(540, std::vector<uint8_t>(8));
+		std::vector<const uint8_t*> br(540);
+		for (int r = 0; r < 540; ++r)
+		{
+			for (int x = 0; x < 8; ++x)
+				big[r][x] = static_cast<uint8_t>((r * 5 + x) & 0xFF);
+			br[r] = big[r].data();
+		}
+		TexBitmap bb;
+		bb.width = 540;
+		bb.height = 8;
+		bb.rows = br.data();
+		CHECK(landscape_tex_size(540, 8, false, S2, T2, &n2) && n2 == 2 && T2[0] == 512 && T2[1] == 256);
+		for (int part = 0; part < 2; ++part)
+		{
+			std::vector<uint8_t> o2(tex_bytes(S2, T2[part], TexKind::Normal));
+			CHECK(tex_convert_landscape(bb, tables, TexKind::Normal, part, S2, T2[part], o2.data()));
+			bool ok3 = true;
+			for (unsigned j = 0; j < T2[part]; ++j)
+				for (unsigned x = 0; x < S2; ++x)
+				{
+					const uint8_t* q = o2.data() + tile_index(S2, tile_memory_row(T2[part], j), x) * 4;
+					const uint32_t w = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+					const int src = part ? (j < 240 ? 300 + static_cast<int>(j) : 539) : (j < 300 ? static_cast<int>(j) : 299);
+					ok3 = ok3 && w == tex_palette_word(tables, TexKind::Normal, big[src][x]);
+				}
+			CHECK(ok3);
+		}
+	}
+	landscape_set_part_rows(512);
+}
+
+// Critic, M5 code review major 1 and minor 4: a 2 MiB landscape part whose VRAM allocation fails (fragmentation)
+// must not drain the VRAM pool frame after frame; a landscape is the last LRU victim; the audit holds with a
+// promotion in flight through forget, bump_generation and on_retired.
+static void test_m5_promotion_pressure()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 3584, 8));
+	GxQueue gx;
+	uint32_t f = 1;
+	run_frame(c, gx, f++);
+	for (int i = 0; i < 20; ++i)
+		CHECK(c.create(K(i), 128));
+	for (int k = 0; k < 4; ++k)
+		run_frame(c, gx, f++);
+	CHECK(c.live_count(TexPool::Vram) == 20 && c.used_bytes(TexPool::Vram) == 20u * 65536u);
+	fa.max_vram_block = 1024 * 1024;
+	const TexKey land{&bm[100], &bm[4095], TexKind::Normal, TexWrap::Landscape, 0};
+	run_frame(c, gx, f);
+	TexSlot* L = c.create(land, 1024, 512);
+	CHECK(L && L->bytes == 2u * 1024u * 1024u && L->promote_pending);
+	const uint32_t ev0 = c.stats().evictions;
+	for (int k = 0; k < 30; ++k)
+	{
+		run_frame(c, gx, ++f);
+		CHECK(c.lookup(land) == L);
+	}
+	CHECK(c.stats().evictions == ev0 && c.stats().promotions_blocked == 1 && c.stats().alloc_failed_free == 1 &&
+	      c.stats().promotions_blocked_land == 1);
+	CHECK(L->pool == TexPool::Linear && !L->promote_pending && c.live_count(TexPool::Vram) == 20);
+	CHECK(c.audit());
+	// Over the cap with enough older victims: the allocation first, then exactly the evictions the cap needs.
+	{
+		FakeAlloc fb;
+		TexCache d(fb, cfg_of(4096, 1024, 8));
+		GxQueue g2;
+		uint32_t h = 1;
+		run_frame(d, g2, h++);
+		for (int i = 0; i < 16; ++i)
+			CHECK(d.create(K(i), 128));
+		for (int k = 0; k < 4; ++k)
+			run_frame(d, g2, h++);
+		CHECK(d.used_bytes(TexPool::Vram) == 1024u * 1024u);
+		run_frame(d, g2, h++);
+		TexSlot* big = d.create(K(50), 512);   // 1 MiB: the whole cap
+		CHECK(big);
+		run_frame(d, g2, h++);
+		CHECK(d.lookup(K(50)) == big && big->vram_handle && d.stats().evictions == 16 && d.audit());
+		// The audit with the promotion in flight: forget while copying, then the retire.
+		d.forget(big);
+		CHECK(d.audit());
+		run_frame(d, g2, h++);
+		CHECK(d.audit() && d.used_bytes(TexPool::Vram) == 0 && fb.bad_release == 0);
+		// bump_generation while copying.
+		TexSlot* m = d.create(K(51), 256);
+		run_frame(d, g2, h++);
+		CHECK(m->vram_handle && d.audit());
+		d.bump_generation();
+		CHECK(d.audit());
+		run_frame(d, g2, h++);
+		CHECK(d.audit() && d.used_bytes(TexPool::Vram) == 0 && d.used_bytes(TexPool::Linear) == 0);
+		d.release_all();
+		CHECK(d.audit() && fb.live.empty() && fb.bad_release == 0);
+	}
+	// At the cap, a real heap no larger than the cap: the first allocation fails until the victims are freed, so the
+	// promotion evicts for the cap and retries instead of blocking (critic, M5 code review round 2).
+	{
+		FakeAlloc fh;
+		fh.vram_heap = 1024 * 1024;
+		TexCache d(fh, cfg_of(4096, 1024, 8));
+		GxQueue g3;
+		uint32_t h = 1;
+		run_frame(d, g3, h++);
+		for (int i = 0; i < 16; ++i)
+			CHECK(d.create(K(i), 128));
+		for (int k = 0; k < 4; ++k)
+			run_frame(d, g3, h++);
+		run_frame(d, g3, h++);
+		TexSlot* big = d.create(K(60), 512);
+		run_frame(d, g3, h++);
+		CHECK(big->vram_handle && d.stats().promotions_blocked == 0 && d.stats().evictions == 16 && d.audit());
+		d.release_all();
+		CHECK(d.audit() && fh.live.empty() && fh.bad_release == 0);
+	}
+	// A landscape goes last: linear only (promote_max 0), the landscape older than the others.
+	{
+		FakeAlloc fc;
+		TexCache e(fc, cfg_of(2048 + 256, 3584, 0));
+		e.begin_frame(1);
+		TexSlot* l2 = e.create(land, 1024, 512);
+		e.begin_frame(2);
+		CHECK(l2 && e.create(K(1), 128) && e.create(K(2), 128) && e.create(K(3), 128) && e.create(K(4), 128));
+		e.begin_frame(3);
+		CHECK(e.create(K(5), 128));        // evicts K(1), the oldest that is not a landscape
+		CHECK(e.lookup(land) == l2 && !e.lookup(K(1)) && e.stats().evictions == 1 && e.audit());
+		e.release_all();
+	}
+	c.release_all();
+	CHECK(c.audit() && fa.bad_release == 0);
+}
+
+static void test_m5_diff()
+{
+	// diff_static on a 6 x 4 image: C covers x in [1, 5), A writes half of it, B writes 3 inside and 2 outside.
+	const int w = 6, h = 4;
+	std::vector<uint32_t> A(w * h, 0), B(w * h, 0), C(w * h, 0);
+	for (int y = 0; y < h; ++y)
+		for (int x = 1; x < 5; ++x)
+			C[y * w + x] = 0x00123456u;
+	A[0 * w + 1] = A[1 * w + 2] = A[2 * w + 3] = A[3 * w + 4] = 7;
+	A[0 * w + 2] = A[1 * w + 3] = A[2 * w + 4] = A[3 * w + 1] = 9;
+	B[0 * w + 1] = B[1 * w + 1] = B[2 * w + 2] = 0xFF000001u;
+	B[0 * w + 0] = 0x05000000u;   // outside, next to C: edge
+	const Image32 ia{A.data(), w, h, w}, ib{B.data(), w, h, w}, ic{C.data(), w, h, w};
+	StaticResult r = diff_static(ia, ib, ic);
+	CHECK(r.cover == 16 && r.written_a == 8 && r.written_b == 3 && r.out_edge == 1 && r.out_nonedge == 0 && r.a_out == 0);
+	const std::string line = static_line(5, r, 2, 0);
+	CHECK(line.find("class=static cover=16 written=8/3 density=50.000/18.750 out=1/0 a_out=0") != std::string::npos);
+	// diff_images_excluding: an excluded pixel is neither compared nor a neighbour.
+	std::vector<uint32_t> P(w * h, 0xFF101010u), Q(w * h, 0xFF101010u);
+	std::vector<uint8_t> ex(w * h, 0);
+	Q[2 * w + 2] = 0xFFF0F0F0u;
+	ex[2 * w + 2] = 1;
+	unsigned n = 0;
+	DiffResult d = diff_images_excluding(Image32{P.data(), w, h, w}, Image32{Q.data(), w, h, w}, 0, 4, ex.data(), &n);
+	CHECK(n == 1 && d.common == 23 && d.within_tol == 23 && d.within_nb == 23);
+	ex[2 * w + 2] = 0;
+	d = diff_images_excluding(Image32{P.data(), w, h, w}, Image32{Q.data(), w, h, w}, 0, 4, ex.data(), &n);
+	CHECK(n == 0 && d.common == 24 && d.within_tol == 23);
+}
+
+static void test_m5_core()
+{
+	test_m5_diff();
+	test_landscape_vs_sw();
+	landscape_set_part_rows(300);   // the land_cut test key (critic, M5 code review major 2)
+	test_landscape_vs_sw();
+	landscape_set_part_rows(512);
+	test_noise();
+	test_m5_cache_and_convert();
+	test_m5_promotion_pressure();
+}
+
+
+// M6 (M4 commit review, minor 4): the chained lookup index against a linear scan of the slots (today's lookup), under
+// random creates, hits, misses, evictions (small caps), forgets, retirements and generation bumps; then the lookup's
+// cost, old scan against the index, on a full cache.
+static const TexSlot* reference_lookup(const TexCache& c, const TexKey& k)
+{
+	for (unsigned i = 0; i < kTexSlots; ++i)
+	{
+		const TexSlot& s = c.slot(i);
+		if (s.state == TexSlotState::Live && s.generation == c.generation() && s.key.bitmap == k.bitmap &&
+		    s.key.tables == k.tables && s.key.kind == k.kind && s.key.wrap == k.wrap && s.key.part == k.part)
+			return &s;
+	}
+	return nullptr;
+}
+
+static void test_m6_hash()
+{
+	FakeAlloc fa;
+	TexCache c(fa, cfg_of(4096, 1024, 8));
+	GxQueue gx;
+	std::mt19937 rng(6);
+	uint32_t frame = 1;
+	unsigned agree = 0, ops = 0, hits = 0, audits_ok = 0, audits = 0;
+	run_frame(c, gx, frame);
+	for (int step = 0; step < 200000; ++step)
+	{
+		const unsigned r = rng() % 1000;
+		// Keys: 60 bitmaps, two tables, three wraps, two parts: collisions and near misses on every field.
+		TexKey k = K(static_cast<int>(rng() % 60), (rng() & 1) ? &bm[4095] : &bm[4094]);
+		k.wrap = static_cast<TexWrap>(rng() % 3);
+		k.part = static_cast<uint8_t>(rng() & 1);
+		const TexSlot* ref = reference_lookup(c, k);
+		if (r < 1 && rng() % 4 == 0)
+		{
+			c.bump_generation();
+			run_frame(c, gx, ++frame);
+		}
+		else if (r < 60)
+			run_frame(c, gx, ++frame);
+		else if (r < 70)
+		{
+			if (TexSlot* s = c.lookup(k))
+				c.forget(s);
+		}
+		else
+		{
+			TexSlot* got = c.lookup(k);
+			agree += got == ref;
+			hits += got != nullptr;
+			++ops;
+			if (!got)
+				c.create(k, 64 << (rng() % 3));   // 16..256 KiB: the caps evict
+		}
+		if (step % 997 == 0)
+		{
+			++audits;
+			audits_ok += c.audit_index() && c.audit();
+		}
+	}
+	CHECK(agree == ops);
+	CHECK(audits_ok == audits);
+	std::printf("texcache index vs scan: %u lookups, %u hits, %u evictions, %u generations\n", ops, hits, c.stats().evictions, c.generation());
+	CHECK(hits > 1000 && hits < ops);   // both paths exercised
+	CHECK(c.stats().evictions > 1000);
+	unsigned chain = 0;
+	CHECK(c.audit_index(&chain));
+	c.release_all();
+	CHECK(c.audit_index() && fa.live.empty());
+
+	// The cost: a full cache (512 live 16 KiB slots), one lookup per key, half of them misses.
+	FakeAlloc fb;
+	TexCache d(fb, cfg_of(16384, 0, 0));
+	run_frame(d, gx, 1);
+	for (int i = 0; i < static_cast<int>(kTexSlots); ++i)
+		CHECK(d.create(K(i), 64) != nullptr);
+	CHECK(d.audit_index(&chain));
+	const int rounds = 400;
+	volatile uintptr_t sink = 0;
+	auto t0 = std::chrono::steady_clock::now();
+	for (int n = 0; n < rounds; ++n)
+		for (int i = 0; i < 1024; ++i)
+			sink += reinterpret_cast<uintptr_t>(reference_lookup(d, K(i)));
+	auto t1 = std::chrono::steady_clock::now();
+	for (int n = 0; n < rounds; ++n)
+		for (int i = 0; i < 1024; ++i)
+			sink += reinterpret_cast<uintptr_t>(d.lookup(K(i)));
+	auto t2 = std::chrono::steady_clock::now();
+	const double scan_ns = std::chrono::duration<double, std::nano>(t1 - t0).count() / (rounds * 1024.0);
+	const double index_ns = std::chrono::duration<double, std::nano>(t2 - t1).count() / (rounds * 1024.0);
+	std::printf("texcache lookup (512 live, half misses): scan %.1f ns, index %.1f ns per lookup, longest chain %u\n",
+	            scan_ns, index_ns, chain);
+	CHECK(index_ns < scan_ns);
+	d.release_all();
+}
+
+
+// M6 "Overlay bands": clamping, tile rounding, merging, the kMaxBands rule, the tile mask.
+static void test_m6_bands()
+{
+	Band out[kMaxBands];
+	auto one = [&](std::initializer_list<Band> in, std::initializer_list<Band> want) {
+		std::vector<Band> v(in);
+		const int n = bands_normalise(v.data(), static_cast<int>(v.size()), 240, out);
+		bool ok = n == static_cast<int>(want.size());
+		int i = 0;
+		for (const Band& w : want)
+			ok = ok && i < n && out[i].y0 == w.y0 && out[i].y1 == w.y1, ++i;
+		if (!ok)
+			for (int j = 0; j < n; ++j)
+				std::printf("bands: got [%d, %d)\n", out[j].y0, out[j].y1);
+		CHECK(ok);
+	};
+	one({}, {});
+	one({{5, 5}, {300, 400}, {-20, -1}}, {});                         // empty, below, above
+	one({{3, 9}}, {{0, 16}});                                          // rounded out to tiles
+	one({{-5, 250}}, {{0, 240}});                                      // clamped
+	one({{86, 154}}, {{80, 160}});                                     // a 68-row crosshair band
+	one({{0, 40}, {200, 240}, {86, 154}}, {{0, 40}, {80, 160}, {200, 240}});   // sorted
+	one({{0, 41}, {44, 60}}, {{0, 64}});                               // touching after rounding: merged
+	one({{0, 8}, {8, 16}}, {{0, 16}});                                 // touching: merged
+	one({{0, 8}, {16, 24}, {40, 48}, {64, 72}, {100, 108}, {200, 208}}, // 6 bands: the smallest gaps go first (8,
+	    {{0, 48}, {64, 72}, {96, 112}, {200, 208}});                      // then the first of two 16s; 100-108 rounds out)
+	CHECK(bands_normalise(nullptr, 0, 240, out) == 0);
+	// The worst cases stay within kMaxBands, cover their input and are tile-aligned.
+	std::mt19937 rng(66);
+	unsigned bad = 0;
+	for (int r = 0; r < 20000; ++r)
+	{
+		Band in[8];
+		const int n = 1 + static_cast<int>(rng() % 8);
+		for (int i = 0; i < n; ++i)
+		{
+			const int a = static_cast<int>(rng() % 260) - 10, len = static_cast<int>(rng() % 60);
+			in[i] = Band{a, a + len};
+		}
+		const int k = bands_normalise(in, n, 240, out);
+		const uint32_t m = bands_tile_mask(out, k);
+		bad += k > kMaxBands;
+		for (int i = 0; i < k; ++i)
+			bad += (out[i].y0 % 8) || (out[i].y1 % 8) || out[i].y0 >= out[i].y1 || out[i].y1 > 240 ||
+			       (i && out[i].y0 <= out[i - 1].y1);
+		for (int i = 0; i < n; ++i)
+			for (int y = std::max(in[i].y0, 0); y < std::min(in[i].y1, 240); ++y)
+				bad += !(m >> (y / 8) & 1);
+	}
+	CHECK(bad == 0);
+	const Band two[] = {{0, 16}, {232, 240}};
+	CHECK(bands_tile_mask(two, 2) == (3u | 1u << 29));
+}
+
+
+static void test_config_m6()
+{
+	Config c;
+	CHECK(c.overlays == 0 && c.direct_check == 0 && c.overlay_audit == 0 && !c.seed_check && c.band_from_end &&
+	      c.view_v_flip && !c.g3a);
+	std::vector<std::string> problems;
+	config_parse(c, "overlays 2\ndirect_check 30\noverlay_audit 15\nseed_check 1\nband_from_end 0\nview_v_flip 0\n"
+	                "g3a 1\nsw_every 50\noverlays 3\ndirect_check -1\n", problems);
+	CHECK(c.overlays == 2 && c.direct_check == 30 && c.overlay_audit == 15 && c.seed_check && !c.band_from_end &&
+	      !c.view_v_flip && c.g3a && c.sw_every == 50);
+	CHECK(problems.size() == 2);
+}
+
+
+// M8: the fallback key and the Renderer preference's bundle.
+static void test_config_m8()
+{
+	Config c;
+	CHECK(!c.fallback_sw && !c.renderer_c3d && c.mode == Mode::Readback);
+	std::vector<std::string> problems;
+	config_parse(c, "fallback sw\nfallback gpu\nfallback\n", problems);
+	CHECK(c.fallback_sw && problems.size() == 2);
+	config_parse(c, "fallback readback\n", problems);
+	CHECK(!c.fallback_sw && problems.size() == 2);
+
+	Config p;
+	CHECK(!config_apply_preference(p, false) && !p.renderer_c3d && p.mode == Mode::Readback && !p.fallback_sw);
+	CHECK(config_apply_preference(p, true));
+	CHECK(p.renderer_c3d && p.mode == Mode::Direct && p.fallback_sw);
+	CHECK(p.play && p.textures && p.lit && p.zero_copy && p.present_gpu && p.overlays == 0);   // the defaults
+	CHECK(!config_apply_preference(p, true));
+	CHECK(config_apply_preference(p, false));
+	CHECK(!p.renderer_c3d && p.mode == Mode::Direct && p.fallback_sw);   // the view target's kind is kept
+}
+
+
+// M6 "No clear in direct mode": the tex_view / dest_view transitions, the sync guard, the reason table.
+static void test_m6_direct_state()
+{
+	DirectState st;   // start: dest is the view, the texture holds nothing
+	CHECK(!st.tex_view && st.dest_view);
+	DirectPlan p = direct_plan(st, ViewKind::Direct, C3dAvail::Ok);
+	CHECK(p.seed && !p.sync);                                       // first direct frame: seeded from dest
+	direct_after(st, ViewKind::Direct, false);
+	CHECK(st.tex_view && !st.dest_view);
+	p = direct_plan(st, ViewKind::Direct, C3dAvail::Ok);
+	CHECK(!p.seed && !p.sync);                                      // the next one draws over the last view
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Ok);
+	CHECK(p.sync && p.skip == SyncSkip::None);                      // SW after direct: dest synced first
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Gate);
+	CHECK(!p.sync && p.skip == SyncSkip::Gate);                     // never a citro3d call with the gate closed
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Off);
+	CHECK(!p.sync && p.skip == SyncSkip::Off);
+	p = direct_plan(st, ViewKind::Clearing, C3dAvail::Ok);
+	CHECK(p.sync && !p.seed);                                       // a diff frame: synced, never seeded
+	direct_after(st, ViewKind::Sw, false);
+	CHECK(!st.tex_view && st.dest_view);
+	p = direct_plan(st, ViewKind::Sw, C3dAvail::Ok);
+	CHECK(!p.sync && p.skip == SyncSkip::None);                     // dest already holds it
+	p = direct_plan(st, ViewKind::Readback, C3dAvail::Ok);
+	CHECK(p.seed);                                                  // readback in mode direct draws without a clear
+	direct_after(st, ViewKind::Readback, false);
+	CHECK(st.tex_view && st.dest_view);
+	direct_after(st, ViewKind::Direct, false);
+	direct_after(st, ViewKind::Direct, true);                       // a discarded direct frame: partial texture
+	CHECK(!st.tex_view && st.tex_partial && st.dest_view);
+	CHECK(!direct_plan(st, ViewKind::Clearing, C3dAvail::Ok).sync);
+	DirectState d2;
+	direct_after(d2, ViewKind::Direct, false);
+	direct_after(d2, ViewKind::Readback, true);                     // discarded with dest stale: SW redrew dest
+	CHECK(!d2.tex_view && d2.dest_view);
+	DirectState d3;
+	direct_after(d3, ViewKind::Direct, false);
+	d3.tex_view = false;                                            // forgotten while dest is stale (a release)
+	p = direct_plan(d3, ViewKind::Sw, C3dAvail::Ok);
+	CHECK(!p.sync && p.skip == SyncSkip::Discard);
+	direct_forget_texture(d3);
+	CHECK(!d3.tex_view);
+	direct_after(d3, ViewKind::Clearing, false);
+	CHECK(!d3.tex_view && d3.dest_view);
+	// The reasons follow include/a1_c3d.h's bits.
+	CHECK(std::string(direct_block_name(0)) == "none" && direct_block_index(0) == -1);
+	CHECK(std::string(direct_block_name(kDirectNotNative)) == "not_native");
+	CHECK(std::string(direct_block_name(kDirectMap | kDirectGamma)) == "map");
+	CHECK(std::string(direct_block_name(kDirectGamma)) == "gamma");
+	CHECK(std::string(direct_block_name(kDirectMovie)) == "movie");
+	CHECK(direct_block_index(kDirectDarken) == 6 && direct_block_index(1u << 20) == kDirectBlockCount - 1);
+	// The dirty-tile rule (overlay_tiles_to_clear, used by back/overlay.cpp) on a simulated 400x240 surface: random band
+	// sequences, the engine writing anywhere inside each frame's bands (and, rarely, a leak outside them): after each
+	// clear, no pixel outside the frame's bands is set, except a leak's, which the next frame clears entirely.
+	{
+		std::mt19937 rng(616);
+		std::vector<uint8_t> surf(400 * 240, 0);
+		uint32_t dirty = 0;
+		bool leaked = false;
+		unsigned outside = 0, leaks_made = 0, leaks_cleared = 0;
+		const uint32_t all = (1u << 30) - 1;
+		for (int f = 0; f < 5000; ++f)
+		{
+			Band in[3], out[kMaxBands];
+			const int n = static_cast<int>(rng() % 4);
+			for (int i = 0; i < n; ++i)
+			{
+				const int a0 = static_cast<int>(rng() % 240);
+				in[i] = Band{a0, a0 + 1 + static_cast<int>(rng() % 80)};
+			}
+			const int k = bands_normalise(in, n, 240, out);
+			const uint32_t cur = bands_tile_mask(out, k);
+			const bool had_leak = leaked;
+			const uint32_t clear = overlay_tiles_to_clear(dirty, cur, leaked, all);
+			leaked = false;
+			for (int t = 0; t < 30; ++t)
+				if (clear >> t & 1)
+					std::fill(surf.begin() + t * 8 * 400, surf.begin() + (t + 1) * 8 * 400, 0);
+			for (int y = 0; y < 240; ++y)   // before drawing: nothing outside the bands
+				if (!(cur >> (y / 8) & 1))
+					for (int x = 0; x < 400; ++x)
+						outside += surf[static_cast<size_t>(y) * 400 + x] != 0;
+			leaks_cleared += had_leak;
+			for (int i = 0; i < k; ++i)     // the engine draws inside the bands
+				for (int j = 0; j < 20; ++j)
+				{
+					const int y = out[i].y0 + static_cast<int>(rng() % (out[i].y1 - out[i].y0));
+					surf[static_cast<size_t>(y) * 400 + rng() % 400] = 1;
+				}
+			if (rng() % 97 == 0)             // a missed overlay writes outside: the audit sees it, the next frame clears all
+			{
+				surf[static_cast<size_t>(rng() % 240) * 400 + rng() % 400] = 1;
+				leaked = true;
+				++leaks_made;
+			}
+		}
+		CHECK(outside == 0);
+		CHECK(leaks_made > 10 && leaks_cleared >= leaks_made - 1);
+	}
+	// GX accounting (2.4) of M6's frames: a composite with 4 band uploads + C3D_FrameEnd + the linked target; a direct view
+	// frame with its seed; direct_check's readback runs in frames of its own (split + transfer + end).
+	{
+		GxQueue q;
+		q.begin_frame();
+		for (int i = 0; i < kMaxBands; ++i)
+			CHECK(q.take(false));
+		CHECK(q.end_frame(1) == kMaxBands + 2 && q.end_frame(1) <= GxQueue::kMaxBudget);
+		q.begin_frame();
+		CHECK(q.take(false));                                    // the seed, first in the frame
+		CHECK(q.used() + 1 + kViewReserveEntries <= q.budget());  // promotions still fit behind it
+		q.begin_frame();
+		CHECK(q.take_split() && q.take(false) && q.end_frame(0) == 3);
+		GxQueue sw;
+		sw.set_budget(3);                                         // the software backend's configs
+		sw.begin_frame();
+		CHECK(sw.take_split() && sw.take(false));                 // direct_check's frame fits gxq_budget 3
+	}
+}
+
+static void test_m6_core()
+{
+	test_m6_direct_state();
+	test_config_m6();
+	test_config_m8();
+	test_m6_hash();
+	test_m6_bands();
+}
+
+
+// --- M6b (design 7, M6b specification "Tests" (1)): replicas of fades.cpp's six faders over the grey ramp ---
+
+namespace m6b {
+
+struct Rgb { uint16_t r, g, b; };
+struct Table { Rgb c[256]; };
+enum Proc { Tint, Randomize, Negate, Dodge, Burn, SoftTint };
+struct Def { Proc proc; Rgb colour; };
+constexpr int32_t kOne = 65536;
+
+// fades.cpp:162-198, in order (the fade types of fades.h).
+const Def kDefs[] = {
+	{Tint, {0, 0, 0}}, {Tint, {0, 0, 0}}, {Tint, {0, 0, 0}}, {Tint, {0, 0, 0}}, {Tint, {0, 0, 0}},
+	{Tint, {65535, 0, 0}}, {Tint, {65535, 0, 0}}, {Tint, {0, 65535, 0}}, {Tint, {65535, 65535, 50000}},
+	{Tint, {65535, 65535, 50000}}, {Tint, {65535, 65535, 0}}, {Tint, {65535, 65535, 0}},
+	{Tint, {215 * 256, 107 * 256, 65535}}, {Tint, {169 * 256, 65535, 224 * 256}}, {Tint, {65535, 65535, 65535}},
+	{Tint, {65535, 65535, 65535}}, {Tint, {65535, 32768, 0}}, {Tint, {65535, 32768, 0}}, {Tint, {0, 65535, 0}},
+	{Tint, {65535, 0, 65535}},
+	{Randomize, {0, 0, 0}}, {Negate, {65535, 65535, 65535}}, {Negate, {65535, 65535, 65535}},
+	{Negate, {0, 65535, 0}}, {Dodge, {0, 65535, 0}}, {Burn, {0, 65535, 65535}}, {Dodge, {0, 0, 65535}},
+	{Burn, {0, 65535, 0}},
+	{SoftTint, {137 * 256, 0, 137 * 256}}, {SoftTint, {0, 0, 65535}}, {SoftTint, {65535, 16384, 0}},
+	{SoftTint, {32768, 65535, 0}}, {SoftTint, {32768, 65535, 0}},
+};
+constexpr int kDefCount = sizeof kDefs / sizeof kDefs[0];
+// fades.cpp:201-208: water, lava, sewage, jjaro, goo -> their soft_tint types, transparency 3/4.
+const int kLiquids[] = {29, 30, 31, 32, 28};
+
+uint16_t s_seed = 1;   // FADES_RANDOM's LFSR (fades.cpp:89)
+uint16_t fades_random()
+{
+	return (s_seed & 1) ? (s_seed = static_cast<uint16_t>((s_seed >> 1) ^ 0xb400)) : (s_seed >>= 1);
+}
+
+int32_t ceiling(int32_t n, int32_t c) { return n > c ? c : n; }
+int32_t floor_(int32_t n, int32_t f) { return n < f ? f : n; }
+
+void ramp(Table& t)
+{
+	for (int i = 0; i < 256; ++i)
+		t.c[i] = Rgb{static_cast<uint16_t>(i << 8), static_cast<uint16_t>(i << 8), static_cast<uint16_t>(i << 8)};
+}
+
+// One fader over `t` in place (as recalculate_and_display_color_table does after a fade effect).
+void apply(Table& t, const Def& d, int32_t transparency)
+{
+	const Rgb& k = d.colour;
+	for (int i = 0; i < 256; ++i)
+	{
+		Rgb& u = t.c[i];
+		uint16_t* ch[3] = {&u.r, &u.g, &u.b};
+		const uint16_t kc[3] = {k.r, k.g, k.b};
+		switch (d.proc)
+		{
+		case Tint:
+		{
+			const short adj = static_cast<short>(transparency >> 8);
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] + (((kc[c] - *ch[c]) * adj) >> 8));
+			break;
+		}
+		case Randomize:
+		{
+			uint16_t mask, adj = static_cast<uint16_t>(transparency < 0 ? 0 : transparency > 0xffff ? 0xffff : transparency);
+			for (mask = 0; ~mask & adj; mask = static_cast<uint16_t>((mask << 1) | 1))
+				;
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] + (fades_random() & mask));
+			break;
+		}
+		case Negate:
+		{
+			const int32_t tr = kOne - transparency;
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] > 0x8000 ? ceiling((*ch[c] ^ kc[c]) + tr, *ch[c])
+				                                                : floor_((*ch[c] ^ kc[c]) - tr, *ch[c]));
+			break;
+		}
+		case Dodge:
+			for (int c = 0; c < 3; ++c)
+			{
+				const int32_t comp =
+					0xffff - (static_cast<int32_t>(1LL * (kc[c] ^ 0xffff) * *ch[c]) >> 16) - transparency;
+				*ch[c] = static_cast<uint16_t>(ceiling(comp, *ch[c]));
+			}
+			break;
+		case Burn:
+		{
+			const int32_t tr = kOne - transparency;
+			for (int c = 0; c < 3; ++c)
+			{
+				const int32_t comp = (static_cast<int32_t>(1LL * kc[c] * *ch[c]) >> 16) + tr;
+				*ch[c] = static_cast<uint16_t>(ceiling(comp, *ch[c]));
+			}
+			break;
+		}
+		case SoftTint:
+		{
+			const uint16_t adj = static_cast<uint16_t>(transparency >> 8);
+			uint16_t intensity = std::max(u.r, u.g);
+			intensity = static_cast<uint16_t>(std::max(intensity, u.b) >> 8);
+			for (int c = 0; c < 3; ++c)
+				*ch[c] = static_cast<uint16_t>(*ch[c] + (((((kc[c] * intensity) >> 8) - *ch[c]) * adj) >> 8));
+			break;
+		}
+		}
+	}
+}
+
+void split(const Table& t, uint16_t* r, uint16_t* g, uint16_t* b)
+{
+	for (int i = 0; i < 256; ++i)
+	{
+		r[i] = t.c[i].r;
+		g[i] = t.c[i].g;
+		b[i] = t.c[i].b;
+	}
+}
+
+FadeFit fit_of(const Table& t, unsigned tol, unsigned parts = kFadeAllParts)
+{
+	uint16_t r[256], g[256], b[256];
+	split(t, r, g, b);
+	return fade_fit(r, g, b, tol, parts);
+}
+
+// An affine fit's max |GPU model - SW curve| over the 256 entries, recomputed here.
+unsigned model_error(const Table& t, const FadeFit& f)
+{
+	unsigned worst = 0;
+	for (int i = 0; i < 256; ++i)
+	{
+		const uint16_t v[3] = {t.c[i].r, t.c[i].g, t.c[i].b};
+		for (int c = 0; c < 3; ++c)
+			worst = std::max(worst, static_cast<unsigned>(std::abs(
+				static_cast<int>(fade_affine_gpu(static_cast<unsigned>(i), f.ch[c].a8, f.ch[c].b8)) - (v[c] >> 8))));
+	}
+	return worst;
+}
+
+bool is_identity(const Table& t)
+{
+	for (int i = 0; i < 256; ++i)
+		if (t.c[i].r >> 8 != i || t.c[i].g >> 8 != i || t.c[i].b >> 8 != i)
+			return false;
+	return true;
+}
+
+} // namespace m6b
+
+// Part 1: tint and soft_tint fit within 1, compositions within 2, the four others never except where they degenerate.
+static void test_m6b_part1()
+{
+	using namespace m6b;
+	{
+		bool exact = true;
+		for (unsigned y = 0; y <= 65535; ++y)
+			exact = exact && fade_div255(y) == y / 255;
+		CHECK(exact);
+	}
+	CHECK(fade_affine_gpu(255, 255, 0) == 255 && fade_affine_gpu(0, 0, 7) == 7 && fade_affine_gpu(255, 255, 10) == 255);
+	CHECK(fade_affine_gpu(128, 64, 0) == 32 && fade_affine_gpu(255, 128, 0) == 128);
+	unsigned worst_single = 0, worst_comp = 0, fits = 0, nofit_tint = 0, wrong_fits = 0, near_identity_fits = 0;
+	for (int d = 0; d < kDefCount; ++d)
+	{
+		const Proc p = kDefs[d].proc;
+		for (int k = 0; k <= 64; ++k)
+		{
+			const int32_t tr = k * kOne / 64;
+			Table t;
+			ramp(t);
+			apply(t, kDefs[d], tr);
+			const FadeFit f = fit_of(t, 2, kFadeAffine);
+			if (p == Tint || p == SoftTint)
+			{
+				nofit_tint += f.kind != FadeKind::Affine || f.err > 1 || model_error(t, f) != f.err;
+				if (f.err > worst_single)
+					worst_single = f.err;
+				++fits;
+			}
+			else if (k > 0 && k < 64 && f.kind == FadeKind::Affine)
+			{
+				// The interior of a negate / dodge / burn / randomize fade fits only where it is nearly affine (negate at
+				// t = 1/64: error 2), and the quad is then within tol of SW's curve (checked independently).
+				++near_identity_fits;
+				wrong_fits += model_error(t, f) > 2 || k > 1;
+			}
+			// Over each liquid (the fade effect first, fades.cpp:519-531).
+			for (int l : kLiquids)
+			{
+				Table u;
+				ramp(u);
+				apply(u, kDefs[l], 3 * kOne / 4);
+				if (d == 0 && k == 0)
+				{
+					const FadeFit lf = fit_of(u, 2, kFadeAffine);
+					CHECK(lf.kind == FadeKind::Affine && lf.err <= 1);
+					CHECK(lf.ch[0].b8 == 0 && lf.ch[1].b8 == 0 && lf.ch[2].b8 == 0);   // a soft_tint has B = 0
+				}
+				apply(u, kDefs[d], tr);
+				const FadeFit cf = fit_of(u, 2, kFadeAffine);
+				if (p == Tint || p == SoftTint)
+				{
+					nofit_tint += cf.kind != FadeKind::Affine;
+					if (cf.err > worst_comp)
+						worst_comp = cf.err;
+				}
+			}
+		}
+	}
+	std::printf("m6b part 1: %u tint/soft_tint curves, worst error %u alone, %u over a liquid; interior fits of the "
+	            "others: %u nearly affine (t = 1/64), %u not\n", fits, worst_single, worst_comp, near_identity_fits, wrong_fits);
+	CHECK(nofit_tint == 0 && worst_single <= 1 && worst_comp <= 2 && wrong_fits == 0);
+	// The level-start black (_start_cinematic_fade_in at transparency 1): A = B = 0.
+	{
+		Table t;
+		ramp(t);
+		apply(t, kDefs[0], kOne);
+		const FadeFit f = fit_of(t, 2);
+		CHECK(f.kind == FadeKind::Affine && f.ch[0].a8 == 0 && f.ch[0].b8 == 0 && f.ch[2].a8 == 0 && f.err == 0);
+	}
+	// The identity fits with A = 255, B = 0, error 0; a decreasing curve and randomize's never do.
+	{
+		Table t;
+		ramp(t);
+		CHECK(is_identity(t));
+		const FadeFit f = fit_of(t, 0);
+		CHECK(f.kind == FadeKind::Affine && f.ch[1].a8 == 255 && f.ch[1].b8 == 0 && f.err == 0);
+		uint16_t down[256];
+		for (int i = 0; i < 256; ++i)
+			down[i] = static_cast<uint16_t>((255 - i) << 8);
+		CHECK(fade_fit(down, down, down, 32, kFadeAffine).kind == FadeKind::None);
+		CHECK(fade_fit(down, down, down, 2, 0).kind == FadeKind::None);   // fade_parts 0: nothing classifies
+	}
+	// The cache: the same curves give the same fit with no refit; a change (or another tol) refits.
+	{
+		Table t;
+		ramp(t);
+		apply(t, kDefs[5], kOne / 2);
+		uint16_t r[256], g[256], b[256];
+		split(t, r, g, b);
+		FadeCache cache;
+		bool changed = false;
+		const FadeFit a = cache.get(r, g, b, 2, kFadeAllParts, &changed);
+		CHECK(changed && cache.fits() == 1 && a.kind == FadeKind::Affine);
+		const FadeFit a2 = cache.get(r, g, b, 2, kFadeAllParts, &changed);
+		CHECK(!changed && cache.fits() == 1 && a2.ch[0].a8 == a.ch[0].a8 && a2.ch[0].b8 == a.ch[0].b8);
+		cache.get(r, g, b, 3, kFadeAllParts, &changed);
+		CHECK(changed && cache.fits() == 2);
+		r[17] ^= 0x100;
+		cache.get(r, g, b, 3, kFadeAllParts, &changed);
+		CHECK(changed && cache.fits() == 3);
+		// After a fit that found nothing the next one is quick only; the identity (invalidate) lifts that.
+		uint16_t down[256];
+		for (int i = 0; i < 256; ++i)
+			down[i] = static_cast<uint16_t>((255 - i) << 8);
+		down[100] = 0;
+		CHECK(cache.get(down, down, down, 2, kFadeAllParts).kind == FadeKind::None);
+		down[101] = 0;
+		CHECK(cache.get(down, down, down, 2, kFadeAllParts).kind == FadeKind::None);
+		cache.invalidate();
+		CHECK(cache.get(r, g, b, 3, kFadeAllParts).kind == FadeKind::Affine);
+	}
+}
+
+// A fit's max |GPU model - reference| (the normalised curve: dodge's wrap clamped), recomputed here; part 2's model.
+static unsigned m6b_fold_error(const m6b::Table& t, const FadeFit& f)
+{
+	uint16_t c[3][256];
+	m6b::split(t, c[0], c[1], c[2]);
+	unsigned worst = 0;
+	for (int ch = 0; ch < 3; ++ch)
+	{
+		uint8_t ref[256];
+		fade_reference(c[ch], f, ch, ref);
+		for (int i = 0; i < 256; ++i)
+			worst = std::max(worst, static_cast<unsigned>(std::abs(
+				static_cast<int>(fade_fold_gpu(static_cast<unsigned>(i), f.ch[ch])) - ref[i])));
+	}
+	return worst;
+}
+
+// Part 2: negate, dodge and burn at t = 0 .. 1 (1/64 steps), alone and over each liquid: classified affine or fold
+// within tol (independently re-checked), never static; how many the search cannot find is recorded.
+static void test_m6b_part2()
+{
+	using namespace m6b;
+	unsigned total = 0, fold = 0, affine = 0, none = 0, bad = 0, wraps = 0, worst = 0, none_def[7] = {}, overflow = 0;
+	double ms = 0, ms_max = 0, ms_hint = 0;
+	unsigned hint_diff = 0, hint_more = 0;
+	for (int d = 21; d <= 27; ++d)
+		for (int l = -1; l < 5; ++l)
+		{
+			FadeFit prev;
+			for (int k = 0; k <= 64; ++k)
+			{
+				Table t;
+				ramp(t);
+				if (l >= 0)
+					apply(t, kDefs[kLiquids[l]], 3 * kOne / 4);
+				apply(t, kDefs[d], k * kOne / 64);
+				const auto t0 = std::chrono::steady_clock::now();
+				const FadeFit f = fit_of(t, 2);
+				const double dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+				ms += dt;
+				ms_max = std::max(ms_max, dt);
+				// The cache's path: the previous step's fit as the hint. Same kind, and within tol when found.
+				{
+					uint16_t cr[256], cg[256], cb[256];
+					split(t, cr, cg, cb);
+					const auto t1 = std::chrono::steady_clock::now();
+					const FadeFit h = fade_fit(cr, cg, cb, 2, kFadeAllParts, &prev);
+					ms_hint += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+					// a regression: found without the hint, not with it; or a hinted fold off by more than tol
+					hint_diff += (f.kind != FadeKind::None && h.kind == FadeKind::None) ||
+					             (h.kind == FadeKind::Fold && m6b_fold_error(t, h) > 2);
+					hint_more += f.kind == FadeKind::None && h.kind != FadeKind::None;
+					prev = h;
+				}
+				++total;
+				if (f.kind == FadeKind::Fold)
+				{
+					++fold;
+					const unsigned e = m6b_fold_error(t, f);
+					worst = std::max(worst, e);
+					bad += e > 2 || e != f.err;
+					for (unsigned w : f.wrap_from)
+						wraps += w != kFadeNoWrap;
+					for (unsigned tr : f.trust)
+					{
+						overflow += tr != 255;
+						bad += tr != 255 && d <= 23;   // negate has no int32 overflow: always SW's own curve
+					}
+				}
+				else if (f.kind == FadeKind::Affine)
+					++affine;
+				else if (f.kind == FadeKind::None)
+				{
+					++none;
+					++none_def[d - 21];
+					if (none <= 40)
+						std::printf("m6b part 2 not found: def %d liquid %d t %d/64 (err %u)\n", d, l, k, f.err);
+				}
+				else
+					++bad;   // static
+			}
+		}
+	std::printf("m6b part 2: %u curves: %u fold, %u affine, %u not found; worst error %u; %u wrapped channels, %u "
+	            "fitted on the overflow-free entries; %.3f ms per fit, worst %.3f, hinted %.3f (host); hinted: %u regressions, %u more found\n",
+	            total, fold, affine, none, worst, wraps, overflow, ms / total, ms_max, ms_hint / total, hint_diff, hint_more);
+	std::printf("m6b part 2 not found per type (of 390 each): negative %u, big negative %u, flicker negative %u, dodge "
+	            "purple %u, burn cyan %u, dodge yellow %u, burn green %u\n", none_def[0], none_def[1], none_def[2],
+	            none_def[3], none_def[4], none_def[5], none_def[6]);
+	CHECK(bad == 0 && worst <= 2 && hint_diff == 0);
+	CHECK(none * 100 <= total * 2);   // the search finds at least 98 %
+	CHECK(wraps > 0);                 // dodge's wrap is seen and normalised
+	// The pass rule: a channel with K > 1 and one with K < 1 in the same pass are rejected.
+	FadeChannel c[3];
+	c[0].k1 = 300;
+	c[1].k1 = 255;
+	c[2].k1 = 255;
+	FadeFit dummy;
+	(void)dummy;
+	CHECK(fade_term(100, 1, 300) == 200 && fade_term(100, 1, 80) == 0 && fade_term(100, 0, 80) == 80);
+	CHECK(fade_term(10, 1, 510) == 255 && fade_term(0, 0, 255) == 255);
+}
+
+// Part 3: randomize at every mask 2^k - 1 (k = 8..16), alone and over each liquid, classifies as static with that
+// mask; no tint / soft_tint / negate / dodge / burn replica, composed or not, ever does.
+static void test_m6b_part3()
+{
+	using namespace m6b;
+	unsigned found = 0, total = 0, mask_wrong = 0, missed_alone = 0, fold_static = 0, fold_small = 0;
+	for (int l = -1; l < 5; ++l)
+		for (int k = 8; k <= 16; ++k)
+			for (int rep = 0; rep < 4; ++rep)
+			{
+				Table t;
+				ramp(t);
+				if (l >= 0)
+					apply(t, kDefs[kLiquids[l]], 3 * kOne / 4);
+				const int32_t tr = k == 16 ? kOne : (1 << (k - 1)) + rep * 37;
+				apply(t, kDefs[20], tr);
+				const FadeFit f = fit_of(t, 2, kFadeStatic);
+				const FadeFit all = fit_of(t, 2);
+				// The fold search never takes SW's static once its offsets exceed the tolerance (k >= 11: up to 8 steps);
+				// below that (offsets of 0..3 steps) a fold within tol is as close to SW as anything.
+				if (all.kind == FadeKind::Fold)
+				{
+					fold_small += k < 11;
+					fold_static += k >= 11;
+				}
+				++total;
+				if (f.kind == FadeKind::Static)
+				{
+					++found;
+					// k, or k + 1 where a base's error moved a channel's mean a step (density within 2x)
+					mask_wrong += f.mask != ((1u << k) - 1) && (k == 16 || f.mask != ((2u << k) - 1));
+				}
+				else
+				{
+					missed_alone += l < 0;
+					if (total - found <= 6)
+						std::printf("m6b part 3 not static: liquid %d k %d rep %d\n", l, k, rep);
+				}
+			}
+	unsigned false_static = 0, checked = 0;
+	for (int d = 0; d < kDefCount; ++d)
+	{
+		if (kDefs[d].proc == Randomize)
+			continue;
+		for (int l = -1; l < 5; ++l)
+			for (int k = 0; k <= 64; ++k)
+			{
+				Table t;
+				ramp(t);
+				if (l >= 0)
+					apply(t, kDefs[kLiquids[l]], 3 * kOne / 4);
+				apply(t, kDefs[d], k * kOne / 64);
+				++checked;
+				if (fit_of(t, 2, kFadeStatic).kind == FadeKind::Static)
+				{
+					if (++false_static <= 6)
+						std::printf("m6b part 3 false static: def %d liquid %d t %d/64\n", d, l, k);
+				}
+			}
+	}
+	std::printf("m6b part 3: static %u of %u randomize curves (mask wrong %u); false static %u of %u others; with every "
+	            "part, %u small-mask curves (k < 11) fitted as fold within tol, %u larger\n", found, total, mask_wrong,
+	            false_static, checked, fold_small, fold_static);
+	// Every static without a liquid; over a liquid the misses (mid masks over lava, sewage, jjaro) fall back, non-direct.
+	CHECK(missed_alone == 0 && found * 10 >= total * 9 && mask_wrong == 0 && false_static == 0 && fold_static == 0);
+}
+
+static void test_config_m6b()
+{
+	Config c;
+	CHECK(c.fades && c.fade_tol == 2 && c.fade_parts == kFadeAllParts);
+	std::vector<std::string> problems;
+	config_parse(c, "fades 0\nfade_tol 5\nfade_parts 1\nfade_tol 33\nfade_parts 8\nfades 2\n", problems);
+	CHECK(!c.fades && c.fade_tol == 5 && c.fade_parts == 1 && problems.size() == 3);
+	Config p;
+	config_apply_preference(p, true);
+	CHECK(p.fades && p.fade_tol == 2 && p.fade_parts == kFadeAllParts);   // the preference's bundle: fades 1
+}
+
+static void test_m6b_core()
+{
+	test_m6b_part1();
+	test_m6b_part2();
+	test_m6b_part3();
+	test_config_m6b();
+}
+
+
+// --- M9 (design 7, "M9 specification"): the ramp, the shift model, weapon_w, stereo_w, the VRAM rule, the keys ---
+
+static unsigned ramp_frames_to(float T, unsigned N)
+{
+	StereoRamp r;
+	unsigned n = 0;
+	while (n < 4 * N + 4)
+	{
+		++n;
+		if (stereo_step(r, true, T, N) >= (T < kStereoSliderFloor ? 0.0f : std::min(T, 1.0f)))
+			break;
+	}
+	return n;
+}
+
+static void test_m9_ramp()
+{
+	// 0 -> T in ceil(T*N) frames (at most N), monotone, the last step lands on T exactly
+	for (unsigned N : {1u, 2u, 7u, 15u, 30u, 600u})
+		for (int i = 1; i <= 100; ++i)
+		{
+			const float T = static_cast<float>(i) / 100.0f;
+			if (T < kStereoSliderFloor)
+				continue;
+			StereoRamp r;
+			float prev = 0.0f;
+			unsigned n = 0;
+			bool mono = true;
+			while (r.p < T && n < N + 5)
+			{
+				const float p = stereo_step(r, true, T, N);
+				mono = mono && p > prev;
+				prev = p;
+				++n;
+			}
+			const unsigned want = static_cast<unsigned>(std::ceil(static_cast<double>(T) * N - 1e-4));
+			CHECK(mono);
+			CHECK(n == (want < 1 ? 1 : want));
+			CHECK(n <= N);
+			CHECK(r.p == T);
+			CHECK(stereo_step(r, true, T, N) == T);   // stays
+		}
+	CHECK(ramp_frames_to(1.0f, 15) == 15);
+	CHECK(ramp_frames_to(0.5f, 14) == 7);
+	// N = 1 jumps
+	{
+		StereoRamp r;
+		CHECK(stereo_step(r, true, 0.8f, 1) == 0.8f);
+	}
+	// a non-capable frame gives 0 at once, from anywhere
+	{
+		StereoRamp r;
+		for (int i = 0; i < 20; ++i)
+			stereo_step(r, true, 1.0f, 15);
+		CHECK(r.p == 1.0f);
+		CHECK(stereo_step(r, false, 1.0f, 15) == 0.0f && r.p == 0.0f);
+		// and restarts from 0 at 1/N
+		CHECK(std::fabs(stereo_step(r, true, 1.0f, 15) - 1.0f / 15.0f) < 1e-6f);
+	}
+	// a slider drop falls at 1/N per frame; below 1/64 is 0 at once
+	{
+		StereoRamp r;
+		for (int i = 0; i < 20; ++i)
+			stereo_step(r, true, 1.0f, 10);
+		float prev = r.p;
+		int steps = 0;
+		while (r.p > 0.5f + 1e-6f && steps < 20)
+		{
+			const float p = stereo_step(r, true, 0.5f, 10);
+			CHECK(std::fabs((prev - p) - 0.1f) < 1e-5f || p == 0.5f);
+			prev = p;
+			++steps;
+		}
+		CHECK(steps == 5 && r.p == 0.5f);
+		CHECK(stereo_step(r, true, 0.0f, 10) == 0.0f);
+		for (int i = 0; i < 20; ++i)
+			stereo_step(r, true, 1.0f, 10);
+		CHECK(stereo_step(r, true, kStereoSliderFloor * 0.99f, 10) == 0.0f);
+		CHECK(stereo_step(r, true, kStereoSliderFloor, 10) > 0.0f);
+	}
+	// a slider above 1 is 1; reset sets 0
+	{
+		StereoRamp r;
+		for (int i = 0; i < 40; ++i)
+			stereo_step(r, true, 7.0f, 10);
+		CHECK(r.p == 1.0f);
+		stereo_reset(r);
+		CHECK(r.p == 0.0f);
+	}
+	CHECK(stereo_pixels(1.0f, 96) == 6.0f && stereo_pixels(0.5f, 96) == 3.0f && stereo_pixels(0.0f, 96) == 0.0f);
+}
+
+static void test_m9_shift()
+{
+	const float P = 8.0f, w0 = 1024.0f, near = 1.0f;
+	// the four calibration depths, right eye: -P, 0, P/2, within 0.01 of P
+	CHECK(stereo_shift(w0 / 2, +1, P, w0, near) == -P);
+	CHECK(stereo_shift(w0, +1, P, w0, near) == 0.0f);
+	CHECK(stereo_shift(2 * w0, +1, P, w0, near) == P / 2);
+	CHECK(std::fabs(stereo_shift(kWPerspMax, +1, P, w0, near) - P) < 0.01f);
+	// left eye mirrors it
+	CHECK(stereo_shift(w0 / 2, -1, P, w0, near) == P);
+	CHECK(stereo_shift(2 * w0, -1, P, w0, near) == -P / 2);
+	// the near clamp: w = 16 would give -63, limited to -near
+	CHECK(stereo_shift(16.0f, +1, P, w0, 1.0f) == -P);
+	CHECK(stereo_shift(16.0f, +1, P, w0, 0.25f) == -P * 0.25f);
+	CHECK(stereo_shift(16.0f, +1, P, w0, 0.0f) == 0.0f);
+	// P = 0 gives 0 for every finite w >= 1, near any
+	for (float w : {1.0f, 16.0f, 100.0f, 1024.0f, 16777216.0f})
+		for (int e : {-1, 1})
+			CHECK(stereo_shift(w, e, 0.0f, w0, 1.0f) == 0.0f);
+	// affine in 1/w: the shift is e*P*(1 - w0 * (1/w)), the sum the vertex shader does
+	for (float w : {20.0f, 300.0f, 1500.0f, 90000.0f})
+	{
+		const float want = P * (1.0f - w0 * (1.0f / w));
+		CHECK(std::fabs(stereo_shift(w, +1, P, w0, 100.0f) - want) < 1e-3f);
+	}
+}
+
+static void test_m9_weapon_and_w()
+{
+	const float w0 = 1024.0f;
+	CHECK(stereo_weapon_w(w0, 0.0f) == w0);
+	CHECK(stereo_weapon_w(w0, -1.0f) == w0 / 2);
+	CHECK(stereo_weapon_w(w0, 0.5f) == 2 * w0);
+	CHECK(stereo_weapon_w(w0, 1.0f) == kWPerspMax);
+	CHECK(stereo_weapon_w(w0, 0.99f) == kWPerspMax);
+	CHECK(stereo_weapon_w(w0, -0.5f) > w0 / 2 && stereo_weapon_w(w0, -0.5f) < w0);
+	// the weapon's share t of P: shift(weapon_w) = e * P * t (near large enough not to clamp)
+	for (float t : {-1.0f, -0.5f, 0.0f, 0.25f, 0.5f, 0.9f})
+		CHECK(std::fabs(stereo_shift(stereo_weapon_w(w0, t), +1, 8.0f, w0, 10.0f) - 8.0f * t) < 1e-3f);
+	CHECK(stereo_weapon_w(64.0f, -1.0f) == 32.0f);   // never under the clamp's 16 (w0 >= 64)
+	// stereo_w: walls, floors and statics keep the geometric w; rectangles carry their depth (clamped), the weapon
+	// weapon_w, landscapes the far limit
+	CHECK(stereo_w(StereoWKind::Wall, 0, false, 0.0f, 777.0f) == 777.0f);
+	CHECK(stereo_w(StereoWKind::Static, 5, true, 1.0f, 321.0f) == 321.0f);
+	CHECK(stereo_w(StereoWKind::Rectangle, 4096, false, 2048.0f, 0.0f) == 4096.0f);
+	CHECK(stereo_w(StereoWKind::Rectangle, 3, false, 2048.0f, 0.0f) == 16.0f);   // under 16 clamps to 16
+	CHECK(stereo_w(StereoWKind::Rectangle, -5, false, 2048.0f, 0.0f) == 16.0f);
+	CHECK(stereo_w(StereoWKind::Rectangle, 1 << 30, false, 2048.0f, 0.0f) == kWPerspMax);
+	CHECK(stereo_w(StereoWKind::Rectangle, 4096, true, 2048.0f, 0.0f) == 2048.0f);
+	CHECK(stereo_w(StereoWKind::Landscape, 4096, false, 2048.0f, 99.0f) == kWLandStereo && kWLandStereo == kWMax);   // M9 fix
+	// no stereo w is ever under the clamp
+	for (int d : {0, 1, 15, 16, 17})
+		CHECK(stereo_w(StereoWKind::Rectangle, d, false, 512.0f, 0.0f) >= 16.0f);
+}
+
+static void test_m9_cap_and_keys()
+{
+	// stereo_allocated: no file -> yes; file -> its stereo key
+	CHECK(stereo_allocated(false, false) && stereo_allocated(false, true));
+	CHECK(!stereo_allocated(true, false) && stereo_allocated(true, true));
+	// stereo_vram_cap: no file -> 2944; file stereo 0 -> 3584; file stereo 1 -> 2944; an explicit vram_cap wins in all
+	{
+		Config none;   // what the loader leaves without a file
+		CHECK(stereo_vram_cap(none, stereo_allocated(false, none.stereo)) == 2944);
+		Config f0;
+		std::vector<std::string> problems;
+		config_parse(f0, "renderer c3d\n", problems);
+		CHECK(!f0.stereo && stereo_vram_cap(f0, stereo_allocated(true, f0.stereo)) == 3584);
+		Config f1;
+		config_parse(f1, "stereo 1\n", problems);
+		CHECK(f1.stereo && stereo_vram_cap(f1, stereo_allocated(true, f1.stereo)) == 2944);
+		Config e0, e1, en;
+		config_parse(e0, "vram_cap 2000\n", problems);
+		config_parse(e1, "stereo 1\nvram_cap 2000\n", problems);
+		CHECK(stereo_vram_cap(e0, stereo_allocated(true, e0.stereo)) == 2000);
+		CHECK(stereo_vram_cap(e1, stereo_allocated(true, e1.stereo)) == 2000);
+		CHECK(stereo_vram_cap(e0, stereo_allocated(false, e0.stereo)) == 2000);   // no-file path with an explicit key
+		config_parse(en, "vram_cap 3584\n", problems);   // explicit and equal to the default still counts as set
+		CHECK(en.vram_cap_set && stereo_vram_cap(en, true) == 3584);
+		CHECK(problems.empty());
+	}
+	// the keys: defaults and ranges
+	{
+		Config c;
+		CHECK(!c.stereo && c.stereo_k == 96 && c.stereo_w0 == 1024 && c.stereo_near == 100 && c.stereo_weapon == -50 &&
+		      c.stereo_ramp == 15 && c.stereo_fill && c.stereo_slider == -1 && !c.stereo_force && !c.stereo_cal &&
+		      c.stereo_check == 0 && !c.stereo_gaps && !c.stereo_fail && !c.vram_cap_set);
+		std::vector<std::string> problems;
+		config_parse(c,
+		             "stereo 1\nstereo_k 512\nstereo_w0 64\nstereo_near 400\nstereo_weapon -100\nstereo_ramp 600\nstereo_fill 0\n"
+		             "stereo_slider 100\nstereo_force 1\nstereo_cal 1\nstereo_check 30\nstereo_gaps 1\nstereo_fail 1\n",
+		             problems);
+		CHECK(problems.empty());
+		CHECK(c.stereo && c.stereo_k == 512 && c.stereo_w0 == 64 && c.stereo_near == 400 && c.stereo_weapon == -100 &&
+		      c.stereo_ramp == 600 && !c.stereo_fill && c.stereo_slider == 100 && c.stereo_force && c.stereo_cal &&
+		      c.stereo_check == 30 && c.stereo_gaps && c.stereo_fail);
+		Config d;
+		config_parse(d, "stereo_weapon 100\nstereo_slider -1\nstereo_slider 0\nstereo_weapon +5\n", problems);
+		CHECK(d.stereo_weapon == 100 && d.stereo_slider == 0 && problems.size() == 1);
+		Config e;
+		problems.clear();
+		config_parse(e,
+		             "stereo_k 513\nstereo_w0 63\nstereo_w0 32768\nstereo_near 401\nstereo_weapon -101\nstereo_weapon 101\n"
+		             "stereo_ramp 0\nstereo_ramp 601\nstereo_slider 101\nstereo_slider -2\nstereo_slider -\nstereo\nstereo 2\n",
+		             problems);
+		CHECK(problems.size() == 13);
+		CHECK(!e.stereo && e.stereo_k == 96 && e.stereo_w0 == 1024 && e.stereo_near == 100 && e.stereo_weapon == -50 &&
+		      e.stereo_ramp == 15 && e.stereo_slider == -1);
+	}
+	// the preference: stereo follows gpu; a file-less config otherwise unchanged
+	{
+		Config c;
+		config_apply_preference(c, true);
+		CHECK(c.stereo && c.renderer_c3d);
+		config_apply_preference(c, false);
+		CHECK(!c.stereo && !c.renderer_c3d);
+	}
+}
+
+// A picture of the five calibration quads as the model puts them in eye e: the test's stand-in for the texture or the
+// framebuffer (width 512, the colour 0xRRGGBB, black elsewhere).
+struct CalPic
+{
+	int e;
+	float w0;
+	int width;
+	int wrong_col;     // a column to paint wrongly (-1: none), for the failing case
+};
+static uint32_t cal_pic_px(const void* ctx, int x, int y)
+{
+	const CalPic& p = *static_cast<const CalPic*>(ctx);
+	for (int q = 0; q < kStereoCalQuads; ++q)
+	{
+		int first, last;
+		stereo_cal_expect(q, p.e, p.w0, first, last);
+		if (y >= kStereoCalRow && y < kStereoCalRow + kStereoCalSize && x >= first && x <= last)
+			return stereo_cal_rgb(q);
+	}
+	if (x == p.wrong_col && y == kStereoCalRow + 3)
+		return stereo_cal_rgb(1);
+	return 0;
+}
+
+static void test_m9_cal()
+{
+	const float w0 = 1024.0f;
+	// the spec's expected columns: left 108, 150, 196, 242 and 10; right 92, 150, 204, 258 and 0..9
+	const int lf[5] = {108, 150, 196, 242, 10}, rf[5] = {92, 150, 204, 258, 0};
+	const int rl[5] = {107, 165, 219, 273, 9};
+	for (int q = 0; q < 5; ++q)
+	{
+		int f, l;
+		stereo_cal_expect(q, -1, w0, f, l);
+		CHECK(f == lf[q]);
+		CHECK(l == lf[q] + 15);
+		stereo_cal_expect(q, +1, w0, f, l);
+		CHECK(f == rf[q]);
+		CHECK(l == rl[q]);
+	}
+	// another w0: the model follows it (quad 1 stays on the screen plane, quad 0 at w0/2 still pops out by P)
+	{
+		int f, l;
+		stereo_cal_expect(1, -1, 2048.0f, f, l);
+		CHECK(f == 150 && l == 165);
+	}
+	CalPic pic{-1, w0, 512, -1};
+	CHECK(stereo_cal_check(cal_pic_px, &pic, -1, w0, 512) == 5);
+	pic.e = +1;
+	CHECK(stereo_cal_check(cal_pic_px, &pic, +1, w0, 512) == 5);
+	// the right eye's picture is not the left's: against the wrong eye no quad but the screen-plane one (quad 1) matches
+	CHECK(stereo_cal_check(cal_pic_px, &pic, -1, w0, 512) == 1);
+	// a stray pixel of a quad's colour anywhere (a wrap at columns 400-511, one pixel off) fails that quad
+	pic.wrong_col = 450;
+	CHECK(stereo_cal_check(cal_pic_px, &pic, +1, w0, 512) == 4);
+	pic.wrong_col = 300;
+	CHECK(stereo_cal_check(cal_pic_px, &pic, +1, w0, 512) == 4);
+	// quad depths and colours
+	CHECK(stereo_cal_w(0, w0) == 512.0f && stereo_cal_w(1, w0) == 1024.0f && stereo_cal_w(2, w0) == 2048.0f);
+	CHECK(stereo_cal_w(3, w0) == kWPerspMax && stereo_cal_w(4, w0) == 512.0f);
+	for (int a = 0; a < 5; ++a)
+		for (int b = a + 1; b < 5; ++b)
+			CHECK(stereo_cal_rgb(a) != stereo_cal_rgb(b));
+}
+
+// The GX entries of a stereo view frame, in the order back/draw.cpp view_begin takes them (this is a model of that function, not
+// a call of it: keep the two in step). view_begin, after frame_begin with the command buffer still empty: (1) the seed, when
+// the texture lost the view (view_seed_transfer, a gx_op); (2) on a stereo frame whose right texture is fresh or re-entered,
+// the right eye's init (view_copy_left_to_right, a C3D_SyncTextureCopy in a gx_op, which replaced the black clear after the
+// code review of commit 2; stereo_gaps / stereo_cal instead clear it with view_clear_target_right, the same one entry); (3)
+// the shade LUT (shade_frame_start); (4) the texture cache's promotions (texcache_frame_start, at worst 2 each); (5) the left
+// clear (opt.clear / stereo_gaps only). Every one is taken with the command buffer empty (cost 1) except a promotion at worst 2.
+// The right init comes before the LUT and the promotions so that a tight budget refuses a promotion (retried next frame)
+// and never the init (which would discard the frame).
+static void test_m9_gx_accounting()
+{
+	// a stereo composite: <= 4 band uploads (1 each, command buffer empty) + end + 2 linked = 7 of 32
+	{
+		GxQueue q;
+		q.begin_frame();
+		for (int i = 0; i < 4; ++i)
+			CHECK(q.take(false));
+		CHECK(q.end_frame(2) == 7);
+		q.begin_frame();
+		for (int i = 0; i < 4; ++i)
+			CHECK(q.take(false));
+		CHECK(q.end_frame(1) == 6);   // the mono composite
+	}
+	// the full budget: seed + right init (copy) + LUT + 8 promotions (2 each at worst) + end <= 24
+	{
+		GxQueue q;
+		q.begin_frame();
+		CHECK(q.take(false));   // seed
+		CHECK(q.take(false));   // the right init (copy from the left)
+		CHECK(q.take(false));   // the shade LUT
+		for (int i = 0; i < 8; ++i)
+			CHECK(q.take(true));
+		CHECK(q.used() == 3 + 16);
+		CHECK(q.end_frame(0) <= 24);
+	}
+	// the software backend's gxq_budget 3, the first stereo frame after a map or terminal (seeded, right texture initialised from the left):
+	// in the real order the three operations (seed, right init, LUT) fit and a promotion is the one refused (retried next frame) ...
+	{
+		GxQueue q;
+		q.set_budget(3);
+		q.begin_frame();
+		CHECK(q.take(false));    // seed
+		CHECK(q.take(false));    // right init
+		CHECK(q.take(false));    // LUT
+		CHECK(!q.take(false));   // a promotion: refused, not fatal
+		CHECK(q.refused() == 1 && q.used() == 3);
+	}
+	// ... and in the order of commit 1 (init after the promotions) a single promotion before it made the init the
+	// refused one: the frame was discarded (DiscardReason::Gx). This is why the init comes first.
+	{
+		GxQueue q;
+		q.set_budget(3);
+		q.begin_frame();
+		CHECK(q.take(false));    // seed
+		CHECK(q.take(false));    // LUT
+		CHECK(q.take(false));    // a promotion
+		CHECK(!q.take(false));   // the right init: refused
+	}
+	// the gaps test (stereo_gaps): the right clear (instead of the copy) and the left clear are both taken before the first draw
+	{
+		GxQueue q;
+		q.begin_frame();
+		CHECK(q.take(false));   // right clear
+		CHECK(q.take(false));   // left clear
+		CHECK(q.take(false));   // LUT
+		for (int i = 0; i < 8; ++i)
+			CHECK(q.take(true));
+		CHECK(q.end_frame(0) <= 24);
+	}
+}
+
+static void test_m9_core()
+{
+	test_m9_ramp();
+	test_m9_shift();
+	test_m9_weapon_and_w();
+	test_m9_cap_and_keys();
+	test_m9_cal();
+	test_m9_gx_accounting();
+}
+
+// --- M9 fix (design 7, "M9 fix: the edge strip"): the extension width, the strip of a clipped polygon, the key ---
+static void test_m9_fix_core()
+{
+	CHECK(stereo_edge_px(96, 100) == 6 && stereo_edge_px(96, 0) == 6 && stereo_edge_px(96, 200) == 12);
+	CHECK(stereo_edge_px(100, 100) == 7 && stereo_edge_px(0, 100) == 0);
+	{
+		Config c;
+		CHECK(c.stereo_edge);
+		CHECK(config_apply(c, "stereo_edge", "0") && !c.stereo_edge);
+		CHECK(!config_apply(c, "stereo_edge", "2") && config_apply(c, "stereo_edge", "1") && c.stereo_edge);
+	}
+	const int W = 400, H = 240, b = 6;
+	Point2 s[4];
+	// A wall cut by the right edge: top edge rising 1 in 2, bottom edge falling 1 in 3 towards the edge.
+	{
+		const Point2 v[4] = {{300, 100}, {400, 50}, {400, 180}, {340, 200}};
+		CHECK(accept_polygon(v, 4, W, H) == Accept::Draw && convex_cw(v, 4));
+		CHECK(!stereo_edge_strip(v, 4, 0, W, b, 0, H, s) && !stereo_edge_strip(v, 4, 2, W, b, 0, H, s));
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s));
+		CHECK(s[0].x == 400 && s[0].y == 50 && s[3].x == 400 && s[3].y == 180);
+		CHECK(s[1].x == 406 && s[1].y == 47 && s[2].x == 406 && s[2].y == 180);
+		CHECK(accept_polygon(s, 4, W + b, H) == Accept::Draw && convex_cw(s, 4));   // clockwise, like the polygon
+		CHECK(!stereo_edge_strip(v, 4, 1, W, 0, 0, H, s));                           // no width, no strip
+	}
+	// The same shape mirrored to the left edge: the edge runs upwards, the strip goes to x = -b.
+	{
+		const Point2 v[4] = {{0, 180}, {0, 50}, {100, 100}, {60, 200}};
+		CHECK(accept_polygon(v, 4, W, H) == Accept::Draw);
+		CHECK(stereo_edge_strip(v, 4, 0, W, b, 0, H, s));
+		CHECK(s[0].x == 0 && s[0].y == 180 && s[3].x == 0 && s[3].y == 50);
+		CHECK(s[1].x == -6 && s[1].y == 180 && s[2].x == -6 && s[2].y == 47);
+		int64_t area2 = 0;
+		for (int i = 0; i < 4; ++i)
+			area2 += static_cast<int64_t>(s[i].x) * s[(i + 1) % 4].y - static_cast<int64_t>(s[(i + 1) % 4].x) * s[i].y;
+		CHECK(area2 > 0);
+	}
+	// Clamps: a steep edge leaves [ylo, yhi]; a floor's rows (its own ymin..ymax) hold the outer corners.
+	{
+		const Point2 v[4] = {{398, 30}, {400, 2}, {400, 239}, {398, 200}};
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s));
+		CHECK(s[1].y == 0 && s[2].y == 240);
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 2, 239, s));
+		CHECK(s[1].y == 2 && s[2].y == 239);
+	}
+	// A screen-corner polygon: the neighbours lie on the top and bottom edges, so the strip is a rectangle; a neighbour on
+	// the same view edge (collinear) keeps its y.
+	{
+		const Point2 v[4] = {{0, 0}, {400, 0}, {400, 240}, {0, 240}};
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s) && s[1].y == 0 && s[2].y == 240 && s[1].x == 406);
+		CHECK(stereo_edge_strip(v, 4, 3, W, b, 0, H, s) && s[1].y == 240 && s[2].y == 0 && s[1].x == -6);
+		const Point2 c[5] = {{300, 10}, {400, 10}, {400, 100}, {400, 200}, {300, 200}};
+		CHECK(stereo_edge_strip(c, 5, 1, W, b, 0, H, s) && s[1].y == 10 && s[2].y == 100);
+		CHECK(stereo_edge_strip(c, 5, 2, W, b, 0, H, s) && s[1].y == 100 && s[2].y == 200);
+	}
+	// The strip never narrows: sides that close towards the edge go straight on; sides that open keep their own lines.
+	{
+		const Point2 v[4] = {{380, 60}, {400, 98}, {400, 102}, {380, 140}};
+		CHECK(stereo_edge_strip(v, 4, 1, W, b, 0, H, s));
+		CHECK(s[1].y == 98 && s[2].y == 102);
+		const Point2 t[3] = {{396, 100}, {400, 90}, {400, 110}};
+		CHECK(stereo_edge_strip(t, 3, 1, W, b, 0, H, s));
+		CHECK(s[1].y == 75 && s[2].y == 125);
+		// given lines (a wall's own) replace the vertex slopes; one that would narrow the strip, or a NaN, is refused
+		const double ys[2] = {80.4, 131.6}, bad[2] = {95.0, std::nan("")};
+		CHECK(stereo_edge_strip(t, 3, 1, W, b, 0, H, s, ys) && s[1].y == 80 && s[2].y == 132);
+		CHECK(stereo_edge_strip(t, 3, 1, W, b, 0, H, s, bad) && s[1].y == 90 && s[2].y == 110);
+	}
+	// A wall's own line: a wall square to the view (depth constant) keeps its rows; one receding to the right closes
+	// towards the horizon row by the ratio of the depths.
+	{
+		TexView tv{};
+		tv.hw = 200; tv.hh = 120; tv.wx = 200; tv.wy = 200; tv.dtp = 0;
+		const WallSurf sq{2048, -1024, 0, 0, 1024, -1024};   // x = 2048 everywhere
+		CHECK(stereo_wall_edge_y(tv, sq, 400, 50, 406) == 50.0);
+		const WallSurf rc{1024, -1024, 0, 512, 1024, -1024};   // receding to the right, vanishing at column 600
+		const double d400 = wall_vertex(tv, rc, 400, 0).w, d300 = wall_vertex(tv, rc, 300, 0).w;
+		CHECK(d400 > d300);
+		const double y = stereo_wall_edge_y(tv, rc, 300, 20, 400);
+		CHECK(std::fabs(y - (120.0 - 100.0 * d300 / d400)) < 1e-9 && y > 20.0 && y < 120.0);
+		CHECK(stereo_wall_edge_y(tv, rc, 300, 220, 400) < 220.0);   // below the horizon it rises
+		// M9 fix, critic finding 3: past a vanishing point (or through the eye plane) wall_vertex's fabs makes a finite
+		// depth that is not the wall's; the line is NaN there, and so is a depth growing over kWallEdgeMaxRatio times.
+		const WallSurf v400{1024, -1024, 0, 1024, 1024, -1024};   // vanishing at column 400 (den == 0 there)
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v400, 395, 20, 400)));   // the guarded den: a huge negative depth
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v400, 395, 20, 401)));   // past it: the sign flips
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v400, 300, 20, 399)));   // same side, 100x deeper
+		const WallSurf v403{1024, -1024, 0, 1000, 1015, -1024};   // vanishing at 403: inside the strip 400..406
+		CHECK(std::isnan(stereo_wall_edge_y(tv, v403, 400, 20, 406)));   // through it: the sign flips
+		CHECK(std::isfinite(stereo_wall_edge_y(tv, v403, 400, 20, 402)));   // before it, 3x deeper: still the wall
+		CHECK(std::isfinite(stereo_wall_edge_y(tv, v403, 300, 20, 395)));   // 12.9x: under the ratio
+		CHECK(std::isfinite(stereo_wall_edge_y(tv, rc, 400, 20, 406)));   // far from its vanishing point: fine
+	}
+	// A zero-length edge, an edge inside the view and a polygon touching the edge with one vertex give nothing.
+	{
+		const Point2 v[4] = {{300, 100}, {400, 120}, {400, 120}, {300, 140}};
+		for (int i = 0; i < 4; ++i)
+			CHECK(!stereo_edge_strip(v, 4, i, W, b, 0, H, s));
+	}
+}
+
+int main()
+{
+	test_config();
+	test_gate_inputs();
+	test_tracker();
+	test_retire_wait();
+	test_config_m0();
+	test_classify();
+	test_diff();
+	test_bmp();
+	test_gx_queue_readback();
+	test_gx_queue_m1();
+	test_stats();
+	test_calibrate();
+	test_calibrate_m1();
+	test_wall_w();
+	test_fan_and_key();
+	test_colour_and_cmdbuf();
+	test_config_m1();
+	test_acceptance_and_coverage();
+	test_acceptance_and_coverage_horizontal();
+	test_tie_pixels();
+	test_ring();
+	test_m2_core();
+	test_m3_core();
+	test_m4_core();
+	test_m5_core();
+	test_m6_core();
+	test_m6b_core();
+	test_m9_core();
+	test_m9_fix_core();
+	std::printf("%d checks, %d failures\n", s_checks, s_fail);
+	return s_fail ? 1 : 0;
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stage 10 M4 test (docs/3ds/CITRO3D_DESIGN.md, section 7, M4 specification, "The Invisibility Test plugin"):
+     keeps the player invisible (every frame has a tinted weapon) and, best effort, creates two invisible compilers
+     in front of the player (tinted sprites). Installed by scripts/3ds/run-azahar.sh --invisibility-test. -->
+<plugin name="Invisibility Test" version="1.0" description="3DS test: invisible player and invisible monsters" solo_lua="invisibility.lua">
+  <scenario name="Marathon 2"/>
+</plugin>

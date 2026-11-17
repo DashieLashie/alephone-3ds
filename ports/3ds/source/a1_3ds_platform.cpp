@@ -9,6 +9,9 @@
 	(at your option) any later version.
 */
 #include "a1_3ds_platform.h"
+#ifdef A1_RENDER_C3D
+#include "a1_c3d_port.h"
+#endif
 
 #include <3ds.h>
 #include <SDL2/SDL.h>
@@ -574,6 +577,12 @@ void put_le(std::vector<unsigned char>& v, size_t at, u32 value, int bytes)
 		v[at + i] = (value >> (8 * i)) & 0xff;
 }
 
+#ifdef A1_RENDER_C3D
+// M9: dump_screen reads the top screen's right-eye framebuffer (framebuf1) instead of the left's (framebuf0) while set;
+// only save_screens sets it. Compiled only into the citro3d builds, so the others stay byte-identical.
+bool s_dump_right_eye = false;
+#endif
+
 // Saves the framebuffer the display is showing (GSPGPU capture info, as
 // screenshot tools do) as a 24-bit BMP. 3DS framebuffers are stored rotated:
 // each memory row is one screen column, bottom pixel first.
@@ -584,6 +593,10 @@ void dump_screen(int screen, const char* name, bool raw_log = false)
 		return;
 	const GSPGPU_CaptureInfoEntry& e = info.screencapture[screen];
 	const u8* fb = reinterpret_cast<const u8*>(e.framebuf0_vaddr);
+#ifdef A1_RENDER_C3D
+	if (s_dump_right_eye)
+		fb = reinterpret_cast<const u8*>(e.framebuf1_vaddr);
+#endif
 	const int width = screen == 0 ? 400 : 320;   // screen columns = memory rows
 	const int height = 240;
 	const u32 format = e.format & 7;
@@ -790,6 +803,13 @@ void save_screens(const std::string& tag)
 {
 	dump_screen(0, ("screen-" + tag + "-top.bmp").c_str());
 	dump_screen(1, ("screen-" + tag + "-bottom.bmp").c_str());
+#ifdef A1_RENDER_C3D
+	// M9: the top screen's right eye (framebuf1_vaddr of the same capture info; equal to the left's in 2D mode or after a
+	// frame that drew one image), for the stereo checks of docs/3ds/CITRO3D_DESIGN.md (T3).
+	s_dump_right_eye = true;
+	dump_screen(0, ("screen-" + tag + "-top-right.bmp").c_str());
+	s_dump_right_eye = false;
+#endif
 }
 
 // --- entropy -------------------------------------------------------------------
@@ -1057,6 +1077,24 @@ bool boot_begin(int& argc, char**& argv)
 	install_tee();
 	atexit(close_outputs);
 	atexit(quit_sdl_at_exit);
+#ifdef A1_RENDER_C3D
+	// debug-c3d "film PATH": replay it as a command-line file (design 7 "Film"). After the atexit
+	// calls above, so the c3d summary handler (registered by the config load) runs first.
+	if (const char* film = a1_c3d_boot_film())
+	{
+		static char* film_argv[64];
+		if (argc >= 0 && argc < 62)
+		{
+			for (int i = 0; i < argc; ++i)
+				film_argv[i] = argv[i];
+			film_argv[argc] = const_cast<char*>(film);
+			film_argv[argc + 1] = nullptr;
+			argv = film_argv;
+			++argc;
+			printf("[3ds] argv[%d] = %s\n", argc - 1, argv[argc - 1]);
+		}
+	}
+#endif
 	std::set_terminate(on_terminate);
 	signal(SIGABRT, on_abort);
 	try
@@ -1277,14 +1315,25 @@ void error_screen_here(const std::string& title, const std::string& body, bool r
 		fflush(stderr);
 	}
 
-	// Merge note (piece 4, stage10-c3d): there, the `#ifdef A1_RENDER_C3D` release
-	// call goes right here (a1_c3d_release_top()). If it returns false (citro3d
-	// still up) this function logs only: no console_init_keep_log, no wait loop,
-	// it returns (CITRO3D_DESIGN.md 5.6.2 a, 5.6.3 step 3).
-
 	// The port's own bottom-screen console output stops here: a HOME round trip
 	// during the loop below must not redraw the legend over the error.
 	console_error_screen_begin();
+
+#ifdef A1_RENDER_C3D
+	// citro3d owns the top screen once the GPU present is up: give it back before the
+	// console or SDL draw there (docs/3ds/CITRO3D_DESIGN.md, 1.3, 5.1). On main (every
+	// error screen since 5.6.3) it releases directly. Off main this is 5.6.3's fallback
+	// (raw_log), with main blocked, perhaps on the tee lock or between C3D_FrameBegin and
+	// C3D_FrameEnd: a1_c3d_release_top()'s hand-off would printf and wait for nothing, so
+	// only ask whether citro3d is up. If it is: no consoleInit (it swaps the top screen
+	// too), nothing drawn, no wait (5.6.2 a, 5.6.3 step 3); the frozen frame is the design,
+	// and this thread must never call citro3d.
+	if (raw_log ? a1_c3d_owns_top() : !a1_c3d_release_top())
+	{
+		log_line(raw_log, "[3ds] error screen: citro3d still up (fallback off main): logged only\n");
+		return;
+	}
+#endif
 
 	// Before SDL video is up nobody owns the screens yet. After it, SDL owns
 	// the top screen and the bottom one is unused. Keep the game's last frame

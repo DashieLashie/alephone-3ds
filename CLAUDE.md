@@ -12,13 +12,59 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
 - Stages 0-7 are done and passed on a real **New 3DS** (Marathon 2 plays to the end of level 1+, controls, audio,
   HUD + Map on the bottom screen, 30 fps cap), plus a performance stage and a load-time sprint (`NEXT-SPRINT.md`).
 - **Stage 10** (optional citro3d GPU renderer behind `A1_RENDER_C3D`) lives on branch **`stage10-c3d`**, in the worktree
-  `.claude/worktrees/stage10-c3d`; its own `CLAUDE.md` has the current state. P0, P1 (GPU present, tag
-  `port-stage10-P1`), G0-b (console, 2026-10-19) and the fixes of plan A are done and console-verified (2026-10-26).
-  The user decided (2026-10-19) to keep the GPU present and to build the renderer (M7 supersampling, M9 stereo).
-  Next there: B, the zero-copy present, then M0-M6, M7, M9. Not paused. Work on it from the worktree, not here.
-- The port's fatal-error path (hand-off to the main thread, error screen, fallback exit through `aptExit`, A7) is
-  console-verified on `3ds-port` too (mode 7, shipping build, 2026-10-26). Never end the process with a bare
-  `svcExitProcess`: it restarts the console (`NEXT-SPRINT.md` item 14).
+  `.claude/worktrees/stage10-c3d`. P0 (software baseline) and P1 (GPU present, tag `port-stage10-P1`) are done.
+  The G0-b console runs were all done on 2026-10-19 (`PERF.md` "Console G0-b", two sessions). **User decisions
+  (2026-10-19):** keep the GPU present, G1 = build the renderer aiming at M7 (supersampling) and M9 (stereo),
+  try the zero-copy present. The plan is the end of `docs/3ds/NEXT-SPRINT.md`. **Plan A (the fixes) is complete and
+  verified on the console (2026-10-26):** the HOME > Close hang (A5/A6), the fatal-error hand-off, the 3dslink
+  mirror stall, Power Off, and the fatal fallback's exit (A7, also carried to `3ds-port`). **B** (zero-copy
+  present): B-a measured on the console below the 0.5 ms rule; B-b was built on its own branch `stage10-bb`
+  (user decision 2026-10-26) and **merged into `stage10-c3d` on 2026-11-07 before M6** (user decision; `zero_copy` defaults to 1). **C (the renderer) on `stage10-c3d`: M0 done** (2026-10-27, tag
+  `port-stage10-M0`, `PATCHES.md` 45); **M1 done** (2026-10-27, tag `port-stage10-M1`, Azahar only, no engine edit:
+  walls drawn by citro3d on diff frames, `PERF.md` "Stage 10 M1"); **M2 session 1 done** (2026-11-02, no tag:
+  conversion, tiling, texture-cache logic, hooks 2a/2b = `PATCHES.md` 46, floors and texcoords, harness with
+  the user's neighbourhood colour gate; `PERF.md` "Stage 10 M2 session 1"); **M2 done** (2026-11-02, tag
+  `port-stage10-M2`, Azahar only: textured walls/floors on diff frames, texture cache v1, VRAM promotions,
+  non-convex polygons as SW spans; `PERF.md` "Stage 10 M2"; one recorded gate exception, design Review log
+  "M2 acceptance, load test colour"); **M2 console short check passed** (2026-11-03, `PERF.md` "Stage 10 M2 —
+  console, short check": texture flush and VRAM promotion verified on hardware);
+  **M3 implemented** (2026-11-05, `PERF.md` "Stage 10 M3", Azahar only: shade LUT on unit 1, two TEV
+  stages, infravision, flash; passes on both Azahar backends; Azahar's software rasteriser faults when a draw
+  samples FCRAM and VRAM textures together, so under it run films with `gxq_budget 3`: design Review log "M3
+  acceptance, software-backend films"); **M4 done** (2026-11-06, tag `port-stage10-M4`, `PERF.md` "Stage 10 M4", Azahar only,
+  no engine edit: sprites/weapons as one quad per rectangle, A8 mask, tinted constant-colour blend, **play mode on**
+  in readback mode; passes on both Azahar backends; sprites gated on L0 and the films, user decision); **M5 done**
+  (2026-11-07, tag `port-stage10-M5`, `PERF.md` "Stage 10 M5", Azahar only, no engine edit: landscapes (two texture
+  parts), static, eviction hardening; every play frame is C3D; passes on both Azahar backends; **G2-a fails** as
+  predicted, +2.0 / +4.9 / +3.5 ms busy on L0 / L6 / L20); **M6 done** (2026-11-07, tag `port-stage10-M6`, `PERF.md`
+  "Stage 10 M6", Azahar only, `stage10-bb` merged first: direct mode, `PATCHES.md` 47; first speedup, @60 59.7 fps on
+  L0/L6/L20; captures pass a recorded exception, design Review log "M6 acceptance, capture gate"); **M6 console check run
+  2026-11-07** (`PERF.md` "Stage 10 M6 — console, short check", 15 launches: no hardware bug; orientations right, `direct_check`
+  Δ 0, HOME/sleep/Close clean, **direct 60.5 fps @60 on L0/L6/L20, goal met, but SW also holds 60.5 on the console**; busy
+  −0.4 to −0.8 ms vs SW; G3-b `gpu_ms view` 1.3-1.5 ms); **order (user decision 2026-11-08): M8 → M6b (fades in direct mode) → M9 → M7, M7 goes last;
+  gates measured, not deciding.** **M8 done** (2026-11-08, tag `port-stage10-M8`, `PERF.md` "Stage 10 M8", Azahar only,
+  `PATCHES.md` 48: Graphics > Renderer "GPU (experimental)" = `renderer c3d`, `mode direct`, new key `fallback sw`, applied only
+  without a `debug-c3d` file; finding: any non-default Brightness blocked every direct frame **and** dropped Software itself to
+  ~22 fps @60 in Azahar (the engine's `apply_gamma`), so **Brightness was removed from the options**, `PATCHES.md` 56, on
+  `3ds-port` too, user 2026-11-08); **M6b done** (2026-11-08, tag `port-stage10-M6b`, `PERF.md` "Stage 10 M6b", Azahar only, no engine edit: every fade,
+  flash and tint direct via curve classification (affine quad, MIN/MAX fold passes, GPU noise static); dodge/burn drawn in the
+  intended form because `fades.cpp`'s int32 overflow distorts SW's, user decision; Fade Test @60 59.7 fps vs 39.7 with
+  `fades 0`); **M9 done** (2026-11-13, tag `port-stage10-M9`, `PERF.md` "Stage 10 M9", Azahar only, no engine edit: stereo 3D on direct
+  frames; per-vertex shift in the world shader from the eye depth `w`, a per-frame draw list replayed per eye, gap fill = a centre
+  pass under each shifted pass (4 passes, `stereo_fill 1`), two 512x256 eye textures and a right-linked screen target, the right
+  texture copied from the left on every entry into stereo, depth eased in by a ramp (`stereo_ramp 15`) after any flat frame and
+  at every level load; user decisions 2026-11-09: "GPU (experimental)" turns stereo on with the 3D slider as the control, fill on,
+  **weapon in front of the screen** (`stereo_weapon -50`), constant-rate ramp; under the preference the right-eye objects are
+  always allocated and the VRAM pool cap is 2 944 KiB (L0/L6's 2 MiB landscape part is then sampled from linear memory); Azahar
+  @60 59.6-59.7 fps on every stereo row, which says little about fill: **the console check is not run**, `NEXT-SPRINT.md` "M9
+  console check"); **M9 console check run partly 2026-11-13** (`PERF.md` "Stage 10 M9 — console": 13 of 17 launches, user stopped; T1, HOME/Close, fill 1 holds 60.5 fps @60 on L0/L20, `gpu_ms view` 1.09 / 2.43 / 3.84 ms for 1 / 2 / 4 passes; **two open defects: a sky bleed and a per-eye edge strip, both stereo only**; blocks F, G, H and comfort tuning not run, defaults kept; fix them before M7); **M9 fix: both defects fixed, seen right on the console 2026-11-15** (no tag yet: `port-stage10-M9b` after the rest of the
+  check; `PERF.md` "Stage 10 M9 fix" and "... — console", design 7 "M9 fix: the edge strip" / "the sky bleed"). Edge strip (`9760e14d0`,
+  user decision: extend the polygons past the view edge, key `stereo_edge`): edge gap 830.6 -> 3.6 px per sample. **Sky bleed: the
+  console's PICA draws no landscape whose vertices all carry `w = 2^24`** (the shader scales clip by `w`); landscapes now carry
+  `kWMax` = 32 767 on stereo frames (user decision; key `stereo_land_w`); the never-cleared eye texture showed its last frame there.
+  Still to run: the edge control, the bench @60, M9's blocks F/G/H/J (`NEXT-SPRINT.md` "M9 fix console check"); the deeper-sky wish is open;
+  **M7 (2x2 supersampling) dropped 2026-11-17 (user)**: cheaper AA options are backlog, `NEXT-SPRINT.md` "Antialiasing, to explore later"; **the M3/M4/M5 console short checks were run 2026-11-07** (15 launches, `PERF.md` "Stage 10 M3-M5 — console, short checks": no hardware bug; Look Up Test strict 97.84 % against 98 %; **G2-b: readback costs +6.2 / +7.8 / +7.3 ms busy on L0 / L6 / L20**; the 1 Hz play-mode stutter was the stats printing, verified with the test-only `quiet 1` key, which also cuts ~2 ms of busy time: use `quiet 1` in console busy comparisons). Another session may run Azahar on the same emulated card: take
+  `~/Applications/Azahar-2126.2/user/.run-lock` (mkdir/rmdir) around every run.
 - Nothing is pending on `3ds-port`: the "Catch-up runbook (stage 3)" in `NEXT-SPRINT.md` (a sprint stage, not port
   stage 3) was run on the console on 2026-10-18. Its optional leftovers are in the backlog.
 - Hardware: one **New 3DS / New 2DS**. Every Old 3DS figure comes from Azahar's Old 3DS mode and is unverified.
@@ -27,7 +73,7 @@ The upstream `README.md` is about the desktop engine. The port's history, decisi
 
 - Two remotes. `origin` is **upstream Aleph One** (`Aleph-One-Marathon/alephone`): read-only for us, never push to it and
   never open PRs against it. `alephone-3ds` is **the user's fork** (`github.com/DashieLashie/alephone-3ds`), where the
-  port is published: it already holds `3ds-port`, `stage10-c3d` and the tag `port-stage10-P1` (the user pushed them).
+  port is published: as of 2026-11-16 it holds `3ds-port`, `stage10-c3d`, `stage10-bb` and every tag `port-stage10-P1`, `-B`, `-M0` ... `-M9`, all in step with the local branches.
   Pushing to the fork is allowed, but it is outward-facing: do it only when the user asks (or has said to, for the
   task at hand), push the branch you worked on, never force-push, and never push to `origin`. The clone is shallow
   (boundary `fc4c274`); the fork accepts pushes as is.
@@ -74,8 +120,7 @@ Host (Linux, Docker) builds and the preprocessor check: `docs/3ds/AUDIT.md` sect
 2. **Every engine edit** (anything under `Source_Files/`) is fenced with `#ifdef A1_PLATFORM_3DS`, gets a numbered
    entry in `docs/3ds/PATCHES.md`, and passes the non-3DS check:
    `scripts/3ds/host-baseline/ppcheck.sh "<changed files>" "<TUs>"` (Docker). IDENTICAL is the goal; DIFFER is fine only
-   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45-48 are stage 10's
-   (M0/M2/M6/M8); 49-54 and 56 are used, 55 is taken (B-b, on `stage10-c3d`); take 57+ for anything else.
+   if the printed normalised line count is 0 (just `__LINE__` shifts). Next free patch numbers: 45 is M0's, 46 M2's, 47 M6's, 48 M8's (all used); 49-55 are used or taken (55: B-b, merged into `stage10-c3d` 2026-11-07), 56 is Brightness removed (`3ds-port`, carried here); take 57+ for anything else.
 3. Port code goes in `ports/3ds/`. Engine TUs never include `<3ds.h>` (libctru's `u8`, `Handle`... must not leak).
 4. **Azahar first, then the console.** Record results in the stage's doc in the style of the existing ones.
    Azahar results are labelled "Azahar — non-authoritative".
@@ -111,6 +156,11 @@ must not touch citro3d (`NEXT-SPRINT.md`, G0-b item 7).
 sized in `a1_3ds_platform.cpp` (`__ctru_linear_heap_size`) and **must fit inside it** or the console fails to boot
 (Azahar does not: `PATCHES.md` 25; New 3DS: heap 98 304 KiB, linear 19 960 KiB). The audio/music path uses bounded
 chunks (<= 8 KiB PCM per request); never load a whole track. citro3d costs about 1 MiB of linear heap; VRAM is 6 MiB.
+
+**PICA vs Azahar.** The console's PICA draws nothing of a polygon whose vertices all carry a clip `w` near `2^24` (the world
+shader scales clip by `w`; the M9 sky bleed, `PERF.md` "Stage 10 M9 fix — console"); 32 767 works, the real limit is unknown.
+Azahar computes in float32 and draws it. Keep every constant-`w` primitive at `kWMax` or below; when only the console shows a
+defect, a magenta clear (`stereo_gaps`) tells "not drawn" from "drawn wrong".
 
 **Screens.** The top screen is 400x240; menus and dialogs stay 640x480 logical and are halved. In game, HUD + Map
 (default, `bottom_screen=0`) renders the view 1:1 at 400x240 and draws HUD + overhead map on the bottom screen
@@ -171,7 +221,7 @@ netloader can't run at once. Full procedure: `NEXT-SPRINT.md` "How to drive the 
 Goal (user-confirmed 2026-10-16): **HUD + Map at Framerate Target 60 sustains >= 55 fps on L0/L6/L20 on a New 3DS**,
 no regression at 30, Classic @60 no worse than 53.16 fps. At 30 fps the software renderer already idles over half the
 frame, so "faster at 30" is not a goal. Order: P0 baseline -> P1 GPU present -> G0 (done) -> G1 (decided: build) -> plan A fixes (done) -> B zero-copy -> M0-M5
-renderer in readback mode (no speedup) -> M6 direct mode (the payoff) -> M7-M9 optional. The design is
+renderer in readback mode (no speedup) -> M6 direct mode (the payoff) -> M8 preference -> M9 stereo; M7 supersampling dropped 2026-11-17 (user). The design is
 `docs/3ds/CITRO3D_DESIGN.md` (critic-approved round 3; section 10 is the "Needs console verification" list,
 section 7 the milestones). Code layout under `ports/3ds/render_c3d/`: `core/` plain C++ (host-testable), `front/`
 engine headers only, `back/` `<3ds.h>`/`<citro3d.h>` only, `shaders/*.v.pica` (picasso via CMake, no hand-embedded

@@ -241,6 +241,9 @@ extern WindowPtr screen_window;
 #endif
 #include "preferences.h"
 #include "screen.h"
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+#include "a1_c3d.h"
+#endif
 
 /* use native alignment */
 #if defined (powerc) || defined (__powerc)
@@ -463,6 +466,28 @@ void render_view(
 			RenderPlaceObjs.view = view;
 			RenderPlaceObjs.build_render_object_list();
 			
+#if defined(A1_PLATFORM_3DS) && defined(A1_RENDER_C3D)
+#ifdef HAVE_OPENGL
+#error "A1_RENDER_C3D assumes the 3DS build (no OpenGL)"
+#endif
+			// docs/3ds/CITRO3D_DESIGN.md, section 1.2
+			struct C3dDrawCtx { view_data* view; } c3d_ctx{view};
+			auto c3d_draw = [](void* c, RasterizerClass* ras) {
+				view_data* v = static_cast<C3dDrawCtx*>(c)->view;
+				ras->SetView(*v);
+				ras->Begin();
+				Render_Classic.view = v;
+				Render_Classic.RasPtr = ras;
+				Render_Classic.render_tree();
+				if (!Render_Classic.renders_viewer_sprites_in_tree())
+					render_viewer_sprite_layer(v, ras);
+				ras->End();
+			};
+			assert(software_render_dest);
+			Rasterizer_SW.screen = software_render_dest;
+			if (!a1_c3d::render_frame(*view, software_render_dest, &Rasterizer_SW, c3d_draw, &c3d_ctx))
+				c3d_draw(&c3d_ctx, &Rasterizer_SW);
+#else
 			// LP addition: set the current rasterizer to whichever is appropriate here
 			RasterizerClass *RasPtr;
 #ifdef HAVE_OPENGL
@@ -504,6 +529,7 @@ void render_view(
 			
 			// Finish rendering main view
 			RasPtr->End();
+#endif
 		}
 
 		if (view->overhead_map_active)

@@ -1,0 +1,293 @@
+/*
+	Aleph One for the Nintendo 3DS, citro3d back end: the debug-c3d settings file
+	(docs/3ds/CITRO3D_DESIGN.md, section 7 "Runtime config"). Plain C++, no 3DS or
+	engine headers, so the parser can be tested on the host.
+
+	sdmc:/3ds/alephone/debug-c3d, one "key value" per line, '#' starts a comment.
+	Keys of P1:
+
+	  present cpu|gpu   top screen on the CPU (as without citro3d) or on the GPU (default)
+	  calibrate 0|1     the screen target is cleared to a colour that encodes the present
+	                    counter instead of drawing the picture; the screens are saved
+	                    (screen-c3d-cal-<n>-*.bmp) after presents 120-125, 600-605, 1200-1205, 1800-1805
+	  alt_load 0|1      every second present starts with a 20 ms busy wait (a heavy frame)
+	  odd_surface 0|1   once a second the present is handed a 300x200 RGB565 picture
+	  test_vhalt 0-4    20 s after the first present: 1 = vhalt() (the error-screen path);
+	                    2 = abort() on a second thread, 3 = vhalt() on a second thread, 4 =
+	                    error_screen() on a second thread (the hand-off of a release requested
+	                    off the main thread, critic P1 minor 4)
+	  present_diff N    0 = off (default); N > 0: every N-th present, the picture the CPU present
+	                    would show (video_3ds.cpp's own code, into a 240x400 buffer) is compared
+	                    with the framebuffer the GPU present wrote, at the next present; per-check
+	                    and final "[c3d] present_diff" log lines (critic P1 minor 1)
+
+	Keys of plan A piece 5 (design 5.6.1, the HOME > Close hang):
+
+	  suspend_gate 0|1  default 1: no GPU present without GPU rights or while suspended/closing.
+	                    0 restores the pre-gate behaviour (console confirmation run only)
+	  retire_wait_ms N  default 500, 0..600000: how long a wait for the GPU queue may take where it
+	                    might never retire (release; a frame begun with the gate condition true)
+	                    before citro3d is abandoned. 0 = unbounded (C3D_FrameBegin(0), the old
+	                    behaviour, for a deliberate reproduction)
+	  force_abandon 0|1 the release takes the abandon path without polling (Azahar cannot hang a queue)
+	  close_frame 0|1   the release, when the gate condition holds, first ends one frame that draws
+	                    the present quad (the GPU work of a present), console run 1
+
+	Key of plan B-a (design 5.7.4 and 5.7.11, the zero-copy present's pre-measurement):
+
+	  two_frame 0|1     default 0 = one C3D frame per present, as in P1. 1 = the present runs as two
+	                    C3D frames: U (staging fill, flush, upload transfer, no draw) and D (wait for
+	                    U, then the quad); only to measure the cost structure of plan B-b. With
+	                    suspend_gate 1 the gate is checked again between U and D
+
+	Key of plan B-b (design 5.7.2, 5.7.7, the zero-copy present):
+
+	  zero_copy 0|1     default 1. 1 = the 400x240 game surface (HUD + Map) is allocated in linear
+	                    memory (512 KiB, once, never freed) and the GPU's display transfer reads it
+	                    directly; the channel order is fixed by three masked draws, and the present
+	                    is two C3D frames (U, D). 0 = the engine allocates the surface itself and
+	                    every present goes through the staging image: exactly the P1 present.
+	                    Acts from the next game screen setup (the surface is created there), so put
+	                    the file on the card before launching. One build serves both sides of the
+	                    measurement. Needs present gpu; with present cpu the key does nothing.
+
+	Keys of M0 (design 7, "M0 specification"; the renderer harness):
+
+	  renderer sw|c3d   default sw. c3d: the citro3d renderer (in M0 only the null mode runs)
+	  mode null|readback|direct
+	                    default readback. null: count what the rasteriser would draw, draw nothing
+	                    (defines R); readback / direct: not before M1 / M6
+	  diff N            0..100000, default 0 = off: every N-th world frame is a diff frame
+	  diff_frames N     0..1000000, default 20: diff frames in all, then diffing stops and a summary
+	                    is logged; 0 = no limit
+	  classes LIST      default all: comma list, no spaces, of walls floors landscape static sprites
+	                    weapons tinted other frame, or "all"; an unknown name or an empty item
+	                    rejects the whole value
+	  fullbright 0|1    every forwarded textured primitive is drawn with the brightest shading table
+	  dump 0|1          diff frames and calibration frames are written as c3d-*.bmp
+	  readback_cal 0|1  the readback calibration (the first 30 world frames; P1's "calibrate" is the
+	                    present-target test, a different thing)
+  readback_cal_resize 0|1
+                    default 0; with readback_cal: every odd calibration frame uses a view 8 pixels
+                    narrower and lower, so the target and buffers are deleted and created again every
+                    frame (exercises the resize path out of frame)
+
+	Keys of M1 (design 7, "M1 specification"; the first C3D draws, on diff frames):
+
+	  cmdbuf_kib N      16..4096, default 512: the C3D_Init command-buffer size (below 16 KiB the
+	                    present's own frames, which check no reserve, are not guaranteed)
+	  gxq_budget N      1..24, default 24: the GX queue budget per C3D frame (GxQueue)
+	  ring_vertices N   64..32768, default 2048 (M3: the L08 film's span quads overflowed 1024): vertices per half
+	  ring_indices N    64..65536, default 4096: indices per half of the index ring
+	  reserve_extra N   0..1000000 words, default 0: added to the command-buffer reserve test, to
+	                    force a "cmdbuf" discard
+	  film PATH         the rest of the line, trimmed; a '#' still starts a comment, so a path with a
+	                    '#' is not supported. Relative to the user directory unless it starts with
+	                    sdmc:/ or /. A film to replay from the command line (boot_begin)
+
+	Keys of M2 (design 7, "M2 specification", "Keys"):
+
+	  textures 0|1      default 1 (textured: M2 part 7); 0 = walls and floors flat-coloured
+	                    (coverage only; a wall with a _TRANSPARENT_BIT bitmap is excluded as in M1)
+	  uv_half 0|1       default 1: the vertex attributes (texcoords and w) are evaluated at the
+	                    vertex position shifted by -1/2 pixel in x and y (SW samples a pixel's integer
+	                    corner, the GPU its centre); 0 = at the vertex itself
+	  diff_tol N        0..255, default 2: per-channel tolerance of the colour metric of a C3D check
+	  vram_cap KiB      0..4096, default 3584: accounting cap of the VRAM texture pool
+	  linear_cap KiB    64..16384, default 4096: accounting cap of the linear texture pool
+	  promote_max N     0..8, default 8: linear-to-VRAM promotions per view frame; 0 = never
+	                    (linear sampling only)
+
+	Keys of M3 (design 7, "M3 specification", "Keys"):
+
+	  lit 0|1           default 1: textured view frames shade with the shade LUT on texture unit 1 and
+	                    two TEV stages (design 4.2); 0 = M2's single stage (the texture as it is)
+	  alpha_x2 0|1      default 0: with lit 1, TEV stage 0's alpha is scaled x2 (the UNVERIFIED clamp
+	                    A/B of m3-alpha2.cfg); 0 = scale 1 (alpha 255 or 128 written, as in M2)
+	Keys of M4 (design 7, "M4 specification", "Keys"):
+	  play 0|1          default 1: with renderer c3d, mode readback, textures 1 and lit 1, play frames are
+	                    drawn by citro3d and read back into the view (else SW, as before M4)
+	  play_check N      0..100000, default 0 = off: every N-th C3D play frame is compared with SW's replay
+	                    over the same previous frame ("DIFF ... class=play")
+	  rect_bias N       0..65536, default 1: the bias added to a rectangle's texcoords, in 1/131072 texel
+	M5 (design 7, M5 specification "fail_every", "Colour and density gates"):
+	  fail_every N      0..100000, default 0 = off: every N-th texture-cache create() fails before allocating
+	                    (counted forced; the frame is discarded `tex` and redrawn by SW)
+	  landscape_tol N   0..255, default 0 = diff_tol: the tolerance printed on landscape DIFF lines
+  land_cut N        64..512, default 512: the row a landscape texture is cut at; test only (m5-lookup.cfg: 300, just
+                    above the horizon, so part 1 and the cut-crossing span path run; critic, M5 code review major 2)
+  quiet 0|1         default 0; test only: the two once-a-second stats printers (back and front) return without
+                    printing or flushing, to see whether that logging causes a play-mode hitch each second
+                    (console short checks 2026-11-07: one 70-87 ms frame per 1 s window)
+
+	Keys of M6 (design 7, M6 specification; `mode direct`):
+	  overlays 0|1|2    default 0; test only: 1 = FPS, position, crosshair and a constant message every 2 s switched
+	                    on through the engine's own globals at the first world frame; 2 = position and crosshair only
+	                    (deterministic, for the direct-vs-readback captures)
+	  direct_check N    0..100000, default 0 = off: every N-th direct frame the composite is compared with the read-back
+	                    view and the overlay composited on the CPU ("[c3d] direct_check:" lines)
+	  overlay_audit N   0..100000, default 0 = off: every N-th direct frame the overlay surface is scanned for pixels
+	                    outside the frame's bands (overlay_leaks)
+	  seed_check 0|1    default 0: after the first seed of the run, the seeded texture is read back and compared with
+	                    the view it was seeded from
+	  band_from_end 0|1 default 1: a band of rows [y0, y1) goes to texture rows from the end (256 - y1); 0 = from y0
+	  view_v_flip 0|1   default 1: the composite samples the view texture at v = 1 - y/256; 0 = y/256
+	  g3a 0|1           default 0; test only (G3-a's budget probe): the direct view target is 1024x512 and the pool's
+	                    VRAM cap 2048 KiB
+	  reseed N          0..100000, default 0 = off; test only (M9): every N-th direct play frame the view texture is forgotten as after a new
+	                    dest of the same size, so the next frame is seeded from dest with no flat frame in between (stereo: the right eye
+	                    must then be copied again, r_copies rises with seeds)
+	  sw_every N        0..100000, default 0 = off; test only: every N-th play frame is drawn by SW (counted forced_sw),
+	                    so the sync and the seed after it run
+
+	Key of M8 (design 7, M8; the Renderer preference):
+	  fallback readback|sw
+	                    default readback: in mode direct a frame that may not be direct (any eligibility block: Classic's
+	                    not_native, a fade, a non-default Brightness, the map...) is drawn by citro3d and read back. sw: it
+	                    is drawn by SW instead (one sync when direct frames stop, one seed when they resume). The
+	                    Renderer preference's "GPU (experimental)" means renderer c3d, mode direct, fallback sw, the
+	                    other keys at their defaults; it applies only when there is no debug-c3d file (the file decides
+	                    everything when present)
+
+	Keys of M6b (design 7, M6b specification; fades, flashes and tints in direct mode):
+	  fades 0|1         default 1: in mode direct a frame whose only block is a fade (kDirectGamma) stays direct when its
+	                    three colour curves fit a GPU form (core/fade_fit.h) and the composite applies them; 0 = M6's
+	                    behaviour (every fade frame is not direct). The Renderer preference's bundle keeps the default
+	  fade_tol N        0..32, default 2: the fit's tolerance in 8-bit steps
+	  fade_parts N      0..7, default 7; test only: the parts that may classify the curves (1 affine, 2 fold, 4 static)
+
+	Keys of M9 (design 7, M9 specification "Parameters and keys"; stereo 3D in mode direct):
+	  stereo 0|1        default 0 in a file; without a file the Renderer preference sets it (GPU = 1). The right-eye
+	                    objects exist from present_init when it is 1 (file) or there is no file (core/stereo.h)
+	  stereo_k N        0..512, default 96: K = N/16 pixels per eye at slider 1 (console-tuned)
+	  stereo_w0 N       64..32767, default 1024: the convergence depth w0 (1024 = 1 WU)
+	  stereo_near N     0..400, default 100: near = N/100, the limit of the pop-out
+	  stereo_weapon N   -100..100, default -50: the weapon's parallax as N/100 of P (negative = in front of the screen)
+	  stereo_ramp N     1..600, default 15: the ramp's length in frames (full range)
+	  stereo_fill 0|1   default 1: each eye is drawn unshifted first, then shifted (4 view passes); 0 = shifted only
+	  test only: stereo_slider N (-1 = the hardware slider, default; 0..100 = that percentage), stereo_force 0|1 (every
+	  direct frame takes the stereo path even at strength 0), stereo_check N (every N-th stereo composite compares the
+	  right framebuffer with the left), stereo_fail 0|1 (the second view texture's allocation fails), stereo_cal 0|1 (T1: five
+	  calibration quads instead of the world, both eyes read back) and stereo_gaps 0|1 (T4: both eye textures cleared
+	  to magenta, uncovered pixels counted); stereo_edge 0|1 (M9 fix, default 1: primitives the engine clipped at the view's left
+	  or right edge continue past it on stereo frames; 0 = M9's behaviour, for the before/after gap counts); stereo_land_w N
+	  (M9 fix, the sky diagnostic: a landscape's w on stereo frames, 0..16777216; 0 = the default kWLandStereo = 32767; 16777216 = M9's value, which the console does not draw)
+
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation; either version 3 of the License, or
+	(at your option) any later version.
+*/
+#ifndef A1_C3D_CORE_CONFIG_H
+#define A1_C3D_CORE_CONFIG_H
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "classify.h"
+
+namespace a1_c3d {
+
+enum class Mode { Null, Readback, Direct };
+
+struct Config
+{
+	bool present_gpu = true;
+	bool calibrate = false;
+	bool alt_load = false;
+	bool odd_surface = false;
+	int test_vhalt = 0;
+	unsigned present_diff = 0;
+	bool suspend_gate = true;
+	unsigned retire_wait_ms = 500;   // 0 = unbounded
+	bool force_abandon = false;
+	bool close_frame = false;
+	bool two_frame = false;
+	// M0
+	bool renderer_c3d = false;
+	Mode mode = Mode::Readback;
+	unsigned diff = 0;                      // every N-th world frame is a diff frame; 0 = off
+	unsigned diff_frames = 20;              // 0 = no limit
+	uint32_t classes = kAllClassesMask;
+	bool fullbright = false;
+	bool dump = false;
+	bool readback_cal = false;
+	bool readback_cal_resize = false;
+	// M1
+	unsigned cmdbuf_kib = 512;
+	unsigned gxq_budget = 24;
+	unsigned ring_vertices = 2048;
+	unsigned ring_indices = 4096;
+	unsigned reserve_extra = 0;
+	// M2
+	bool textures = true;
+	bool uv_half = true;
+	unsigned diff_tol = 2;
+	unsigned vram_cap = 3584;               // KiB
+	unsigned linear_cap = 4096;             // KiB
+	unsigned promote_max = 8;
+	// M3
+	bool lit = true;
+	bool alpha_x2 = false;
+	// M4
+	bool play = true;
+	unsigned play_check = 0;
+	unsigned rect_bias = 1;                 // 1/131072 texel
+	// M5
+	unsigned fail_every = 0;                // every N-th texture create() fails (0 = never)
+	unsigned landscape_tol = 0;             // the landscape class's DIFF tolerance (0 = diff_tol)
+	unsigned land_cut = 512;                // test only: the landscape texture's cut row (64..512)
+	bool quiet = false;                     // test only: no once-a-second [c3d] stats lines (the final ones stay)
+	std::string film;
+	bool zero_copy = true;
+	// M6
+	unsigned overlays = 0;                  // test only: 0 off, 1 all, 2 position + crosshair
+	unsigned direct_check = 0;
+	unsigned overlay_audit = 0;
+	bool seed_check = false;
+	bool band_from_end = true;
+	bool view_v_flip = true;
+	bool g3a = false;                       // test only
+	unsigned reseed = 0;                    // test only (M9)
+	unsigned sw_every = 0;                  // test only
+	// M8
+	bool fallback_sw = false;               // an ineligible frame in mode direct: SW (true) or readback (false)
+	// M6b
+	bool fades = true;
+	unsigned fade_tol = 2;
+	unsigned fade_parts = 7;                // test only: FadePart bits (core/fade_fit.h)
+	// M2 (set by the parser when the key is read: core/stereo.h stereo_vram_cap)
+	bool vram_cap_set = false;
+	// M9
+	bool stereo = false;
+	unsigned stereo_k = 96;                 // K = stereo_k / 16 pixels
+	unsigned stereo_w0 = 1024;
+	unsigned stereo_near = 100;             // near = stereo_near / 100
+	int stereo_weapon = -50;                // t = stereo_weapon / 100
+	unsigned stereo_ramp = 15;
+	bool stereo_fill = true;
+	int stereo_slider = -1;                 // test only: -1 = the hardware slider
+	bool stereo_force = false;              // test only
+	bool stereo_cal = false;                // test only (M9 part 2)
+	unsigned stereo_check = 0;              // test only
+	bool stereo_gaps = false;               // test only (M9 part 2)
+	bool stereo_edge = true;                // test only (M9 fix): 0 = polygons end at the view's edges, as in M9
+	unsigned stereo_land_w = 0;             // test only (M9 fix, sky diagnostic): a landscape's w on stereo frames; 0 = kWLandStereo
+	bool stereo_fail = false;               // test only
+};
+
+// Applies one setting. Returns false (leaving `cfg` alone) for an unknown key or a bad value.
+bool config_apply(Config& cfg, const std::string& key, const std::string& value);
+
+// Applies every line of `text`; one message per rejected line is appended to `problems`.
+void config_parse(Config& cfg, const std::string& text, std::vector<std::string>& problems);
+
+// M8: the Renderer preference over a configuration without a debug-c3d file. gpu: renderer c3d, mode direct, fallback
+// sw (every other key keeps its default); M9: stereo follows gpu. !gpu: renderer sw; mode and fallback stay, so a view target of mode direct is
+// not re-created by a later switch back. Returns whether renderer_c3d changed (stereo changes with it).
+bool config_apply_preference(Config& cfg, bool gpu);
+
+} // namespace a1_c3d
+
+#endif
