@@ -39,6 +39,12 @@ mkdir -p ~/Documents/3ds-tools-src/bin && cp ~/Documents/3ds-tools-src/Project_C
 
 (Output paths of the two builds are as their READMEs describe; check them if `cp` fails.)
 
+**Local patch (2026-11-17):** bannertool does not build with AppleClang 17: `source/3ds/lz11.cpp`:115
+`u8 pad[padLength] = {0};` is an initialised variable-length array (an error, not just a warning). Changed to
+`u8 pad[4] = {0};` (`padLength` is 1..3 there; the write still uses `padLength`). Re-apply it after a fresh clone.
+Built 2026-11-17 and first used for `0.1.0-beta1`: makerom accepted `alephone.rsf` without a message; the CIA's NCCH
+carries title ID `000400000a1e3000` (checked by reading the header).
+
 ## What a CIA changes against the 3dsx (UNVERIFIED until a CIA has booted on the console)
 
 - **Memory.** Under the Homebrew Launcher the port gets the New 3DS extended memory the launcher was started with. A CIA
